@@ -1,5 +1,8 @@
 # crdt-lite
 
+> [!WARNING]
+> Very early work in progress. It is not intended for production use.
+
 ## **1. Rust implementation of a generic CRDT.**
 
 This implementation includes:
