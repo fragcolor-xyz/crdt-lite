@@ -227,3 +227,7 @@ Comprehensive tests ensure the correctness of the CRDT implementation. They cove
    ```
 
 All tests should pass, indicating that the CRDT behaves as expected.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
