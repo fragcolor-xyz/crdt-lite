@@ -101,7 +101,7 @@ template <typename K, typename V> struct Change {
   std::optional<V> value; // std::nullopt represents deletion
   uint64_t col_version;
   uint64_t db_version;
-  CrdtNodeId node_id; // Changed from uint64_t to CrdtNodeId
+  CrdtNodeId node_id;
   uint64_t seq;
 
   Change() = default;
@@ -260,7 +260,7 @@ public:
       const CrdtString &col_name = change.col_name;
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
-      CrdtNodeId remote_node_id = change.node_id; // Changed from uint64_t to CrdtNodeId
+      CrdtNodeId remote_node_id = change.node_id;
       uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = change.value;
 
@@ -363,7 +363,7 @@ public:
   const CrdtMap<K, Record<V>> &get_data() const { return data_; }
 
 private:
-  CrdtNodeId node_id_; // Changed from uint64_t to CrdtNodeId
+  CrdtNodeId node_id_;
   LogicalClock clock_;
   CrdtMap<K, Record<V>> data_;
   CrdtSet<K> tombstones_;
