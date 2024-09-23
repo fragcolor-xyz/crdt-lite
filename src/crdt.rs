@@ -1156,10 +1156,20 @@ mod tests {
     assert!(node2.clock.current_time() > max_clock_before_merge);
     assert!(node3.clock.current_time() > max_clock_before_merge);
 
-    // NOT really, this won't be the case in the current design
-    // // Verify that all nodes have the same final clock value after full synchronization
-    // assert_eq!(node1.clock.current_time(), node2.clock.current_time());
-    // assert_eq!(node2.clock.current_time(), node3.clock.current_time());
+    // Instead of asserting identical clock values, verify that each node's clock
+    // is at least as large as the number of operations performed.
+    let min_expected_clock_value = 3; // At least 3 inserts happened
+    assert!(node1.clock.current_time() >= min_expected_clock_value);
+    assert!(node2.clock.current_time() >= min_expected_clock_value);
+    assert!(node3.clock.current_time() >= min_expected_clock_value);
+
+    // Optionally, print clock values for manual inspection
+    println!(
+      "Final Clocks - Node1: {}, Node2: {}, Node3: {}",
+      node1.clock.current_time(),
+      node2.clock.current_time(),
+      node3.clock.current_time()
+    );
   }
 
   #[test]
