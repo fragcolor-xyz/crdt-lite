@@ -110,78 +110,77 @@ public:
   CRDT(uint64_t node_id)
       : node_id_(node_id), clock_(), data_(), tombstones_() {}
 
-  /// Inserts a new record into the CRDT.
+  /// Inserts a new record or updates an existing record in the CRDT.
   ///
   /// # Arguments
   ///
   /// * `record_id` - The unique identifier for the record.
   /// * `fields` - A hashmap of field names to their values.
-  void insert(const K &record_id,
-              const std::unordered_map<std::string, V> &fields) {
-    // Prevent re-insertion if the record is already tombstoned
-    if (tombstones_.find(record_id) != tombstones_.end()) {
-      std::cout << "Insert ignored: Record " << record_id
-                << " is already deleted (tombstoned)." << std::endl;
-      return;
-    }
-
+  ///
+  /// # Returns
+  ///
+  /// A vector of `Change` objects representing the changes made.
+  std::vector<Change<K, V>>
+  insert_or_update(const K &record_id,
+                   const std::unordered_map<std::string, V> &fields) {
+    std::vector<Change<K, V>> changes;
     uint64_t db_version = clock_.tick();
 
-    // Initialize column versions
-    std::unordered_map<std::string, ColumnVersion> column_versions;
-    for (const auto &[col_name, _] : fields) {
-      column_versions.emplace(col_name,
-                              ColumnVersion(1, db_version, node_id_, 0));
-    }
-
-    // Insert the record
-    Record<V> record;
-    record.fields = fields;
-    record.column_versions = std::move(column_versions);
-    data_.emplace(record_id, std::move(record));
-  }
-
-  /// Updates an existing record's fields.
-  ///
-  /// # Arguments
-  ///
-  /// * `record_id` - The unique identifier for the record.
-  /// * `updates` - A hashmap of field names to their new values.
-  void update(const K &record_id,
-              const std::unordered_map<std::string, V> &updates) {
+    // Check if the record is tombstoned
     if (tombstones_.find(record_id) != tombstones_.end()) {
-      std::cout << "Update ignored: Record " << record_id
+      std::cout << "Insert/Update ignored: Record " << record_id
                 << " is deleted (tombstoned)." << std::endl;
-      return;
+      return changes; // No changes to return
     }
 
-    auto it = data_.find(record_id);
-    if (it == data_.end()) {
-      std::cout << "Update ignored: Record " << record_id << " does not exist."
-                << std::endl;
-      return;
-    }
+    bool is_new_record = data_.find(record_id) == data_.end();
 
-    Record<V> &record = it->second;
-    uint64_t db_version = clock_.tick();
+    if (is_new_record) {
+      // Initialize column versions
+      std::unordered_map<std::string, ColumnVersion> column_versions;
+      for (const auto &[col_name, _] : fields) {
+        column_versions.emplace(col_name,
+                                ColumnVersion(1, db_version, node_id_, 0));
+        // Create a Change object for each field inserted
+        changes.emplace_back(Change<K, V>(record_id, col_name,
+                                          fields.at(col_name), 1, db_version,
+                                          node_id_, 0));
+      }
 
-    for (const auto &[col_name, value] : updates) {
-      // Update the value
-      record.fields[col_name] = value;
+      // Insert the record
+      Record<V> record;
+      record.fields = fields;
+      record.column_versions = std::move(column_versions);
+      data_.emplace(record_id, std::move(record));
+    } else {
+      // Update existing record
+      Record<V> &record = data_.at(record_id);
+      for (const auto &[col_name, value] : fields) {
+        // Update the value
+        record.fields[col_name] = value;
 
-      // Update the clock for this column
-      auto col_it = record.column_versions.find(col_name);
-      if (col_it != record.column_versions.end()) {
-        col_it->second.col_version += 1;
-        col_it->second.db_version = db_version;
-        col_it->second.seq += 1;
-        col_it->second.site_id = node_id_;
-      } else {
-        // If the column does not exist, initialize it
-        record.column_versions.emplace(
-            col_name, ColumnVersion(1, db_version, node_id_, 0));
+        // Update the clock for this column
+        auto col_it = record.column_versions.find(col_name);
+        if (col_it != record.column_versions.end()) {
+          col_it->second.col_version += 1;
+          col_it->second.db_version = db_version;
+          col_it->second.seq += 1;
+          col_it->second.site_id = node_id_;
+        } else {
+          // If the column does not exist, initialize it
+          record.column_versions.emplace(
+              col_name, ColumnVersion(1, db_version, node_id_, 0));
+        }
+
+        // Create a Change object for each field updated
+        changes.emplace_back(Change<K, V>(
+            record_id, col_name, value,
+            record.column_versions[col_name].col_version, db_version, node_id_,
+            record.column_versions[col_name].seq));
       }
     }
+
+    return changes;
   }
 
   /// Deletes a record by marking it as tombstoned.
@@ -189,11 +188,17 @@ public:
   /// # Arguments
   ///
   /// * `record_id` - The unique identifier for the record.
-  void delete_record(const K &record_id) {
+  ///
+  /// # Returns
+  ///
+  /// A vector of `Change` objects representing the deletion.
+  std::vector<Change<K, V>> delete_record(const K &record_id) {
+    std::vector<Change<K, V>> changes;
+
     if (tombstones_.find(record_id) != tombstones_.end()) {
       std::cout << "Delete ignored: Record " << record_id
                 << " is already deleted (tombstoned)." << std::endl;
-      return;
+      return changes; // No changes to return
     }
 
     uint64_t db_version = clock_.tick();
@@ -212,6 +217,12 @@ public:
     // Store deletion info in the data map
     data_.emplace(record_id, Record<V>(std::unordered_map<std::string, V>(),
                                        std::move(deletion_clock)));
+
+    // Create a Change object for deletion
+    changes.emplace_back(Change<K, V>(record_id, "__deleted__", std::nullopt, 1,
+                                      db_version, node_id_, 0));
+
+    return changes;
   }
 
   /// Retrieves all changes since a given `last_db_version`.
@@ -428,7 +439,7 @@ void assert_true(bool condition, const std::string &message) {
 }
 
 int main() {
-  // Test Case: Basic Insert and Merge
+  // Test Case: Basic Insert and Merge using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -441,26 +452,22 @@ int main() {
         {"tag", "Node1Tag"},
         {"created_at", "2023-10-01T12:00:00Z"},
         {"created_by", "User1"}};
-    node1.insert(record_id, fields1);
+    auto changes1 = node1.insert_or_update(record_id, fields1);
 
     // Node2 inserts the same record with different data
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id},
-        {"form_id", node1.get_data().at(record_id).fields.at("form_id")},
+        {"form_id", fields1.at("form_id")},
         {"tag", "Node2Tag"},
         {"created_at", "2023-10-01T12:05:00Z"},
         {"created_by", "User2"}};
-    node2.insert(record_id, fields2);
+    auto changes2 = node2.insert_or_update(record_id, fields2);
 
-    // Merge node2 into node1
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    // Merge node2's changes into node1
+    node1.merge_changes(changes2);
 
-    // Merge node1 into node2
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
+    // Merge node1's changes into node2
+    node2.merge_changes(changes1);
 
     // Both nodes should resolve the conflict and have the same data
     assert_true(node1.get_data() == node2.get_data(),
@@ -473,7 +480,7 @@ int main() {
     std::cout << "Test 'Basic Insert and Merge' passed." << std::endl;
   }
 
-  // Test Case: Updates with Conflicts
+  // Test Case: Updates with Conflicts using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -482,38 +489,37 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "InitialTag"}};
-    node1.insert(record_id, fields);
-    node2.insert(record_id, fields);
+    auto changes_init1 = node1.insert_or_update(record_id, fields);
+    auto changes_init2 = node2.insert_or_update(record_id, fields);
+
+    // Merge initial inserts
+    node1.merge_changes(changes_init2);
+    node2.merge_changes(changes_init1);
 
     // Node1 updates 'tag'
     std::unordered_map<std::string, std::string> updates1 = {
         {"tag", "Node1UpdatedTag"}};
-    node1.update(record_id, updates1);
+    auto change_update1 = node1.insert_or_update(record_id, updates1);
 
     // Node2 updates 'tag'
     std::unordered_map<std::string, std::string> updates2 = {
         {"tag", "Node2UpdatedTag"}};
-    node2.update(record_id, updates2);
+    auto change_update2 = node2.insert_or_update(record_id, updates2);
 
     // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    node1.merge_changes(change_update2);
+    node2.merge_changes(change_update1);
 
     // Conflict resolved based on site_id (Node2 has higher site_id)
-    std::string expected_tag = "Node2UpdatedTag";
-
-    assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag,
+    assert_true(node1.get_data().at(record_id).fields.at("tag") ==
+                    "Node2UpdatedTag",
                 "Updates with Conflicts: Tag resolution mismatch");
     assert_true(node1.get_data() == node2.get_data(),
                 "Updates with Conflicts: Data mismatch");
     std::cout << "Test 'Updates with Conflicts' passed." << std::endl;
   }
 
-  // Test Case: Delete and Merge
+  // Test Case: Delete and Merge using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -522,20 +528,16 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "ToBeDeleted"}};
-    node1.insert(record_id, fields);
+    auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    std::vector<Change<std::string, std::string>> changes =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes);
+    node2.merge_changes(changes_init);
 
     // Node1 deletes the record
-    node1.delete_record(record_id);
+    auto changes_delete = node1.delete_record(record_id);
 
     // Merge the deletion to node2
-    std::vector<Change<std::string, std::string>> deletion_changes =
-        node1.get_changes_since(0);
-    node2.merge_changes(deletion_changes);
+    node2.merge_changes(changes_delete);
 
     // Both nodes should reflect the deletion
     assert_true(node1.get_data().at(record_id).fields.empty(),
@@ -553,7 +555,7 @@ int main() {
     std::cout << "Test 'Delete and Merge' passed." << std::endl;
   }
 
-  // Test Case: Tombstone Handling
+  // Test Case: Tombstone Handling using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -562,16 +564,18 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "Temporary"}};
-    node1.insert(record_id, fields);
-    node1.delete_record(record_id);
+    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_delete = node1.delete_record(record_id);
 
-    // Node2 inserts the same record
-    node2.insert(record_id, fields);
+    // Merge changes to node2
+    node2.merge_changes(changes_insert);
+    node2.merge_changes(changes_delete);
 
-    // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
+    // Node2 tries to insert the same record
+    auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
+
+    // Merge changes back to node1
+    node1.merge_changes(changes_attempt_insert);
 
     // Node2 should respect the tombstone
     assert_true(node2.get_data().at(record_id).fields.empty(),
@@ -583,7 +587,7 @@ int main() {
     std::cout << "Test 'Tombstone Handling' passed." << std::endl;
   }
 
-  // Test Case: Conflict Resolution with site_id and seq
+  // Test Case: Conflict Resolution with site_id and seq using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -594,31 +598,33 @@ int main() {
         {"id", record_id}, {"tag", "Node1Tag"}};
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id}, {"tag", "Node2Tag"}};
-    node1.insert(record_id, fields1);
-    node2.insert(record_id, fields2);
+    auto changes1 = node1.insert_or_update(record_id, fields1);
+    auto changes2 = node2.insert_or_update(record_id, fields2);
+
+    // Merge changes
+    node1.merge_changes(changes2);
+    node2.merge_changes(changes1);
 
     // Both nodes update the 'tag' field multiple times
     std::unordered_map<std::string, std::string> updates1 = {
         {"tag", "Node1Tag1"}};
-    node1.update(record_id, updates1);
+    auto changes_update1 = node1.insert_or_update(record_id, updates1);
 
     updates1 = {{"tag", "Node1Tag2"}};
-    node1.update(record_id, updates1);
+    auto changes_update2 = node1.insert_or_update(record_id, updates1);
 
     std::unordered_map<std::string, std::string> updates2 = {
         {"tag", "Node2Tag1"}};
-    node2.update(record_id, updates2);
+    auto changes_update3 = node2.insert_or_update(record_id, updates2);
 
     updates2 = {{"tag", "Node2Tag2"}};
-    node2.update(record_id, updates2);
+    auto changes_update4 = node2.insert_or_update(record_id, updates2);
 
     // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    node1.merge_changes(changes_update4);
+    node2.merge_changes(changes_update2);
+    node2.merge_changes(changes_update1);
+    node1.merge_changes(changes_update3);
 
     // Since node2 has a higher site_id, its latest update should prevail
     std::string expected_tag = "Node2Tag2";
@@ -631,7 +637,7 @@ int main() {
               << std::endl;
   }
 
-  // Test Case: Logical Clock Update
+  // Test Case: Logical Clock Update using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -640,12 +646,10 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {{"id", record_id},
                                                            {"tag", "Node1Tag"}};
-    node1.insert(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Node2 receives the change
-    std::vector<Change<std::string, std::string>> changes =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes);
+    node2.merge_changes(changes_insert);
 
     // Node2's clock should be updated
     assert_true(node2.get_clock().current_time() > 0,
@@ -656,7 +660,7 @@ int main() {
     std::cout << "Test 'Logical Clock Update' passed." << std::endl;
   }
 
-  // Test Case: Merge without Conflicts
+  // Test Case: Merge without Conflicts using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -665,22 +669,17 @@ int main() {
     std::string record_id1 = generate_uuid();
     std::unordered_map<std::string, std::string> fields1 = {
         {"id", record_id1}, {"tag", "Node1Record"}};
-    node1.insert(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 inserts a different record
     std::string record_id2 = generate_uuid();
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id2}, {"tag", "Node2Record"}};
-    node2.insert(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
-
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    node1.merge_changes(changes2);
+    node2.merge_changes(changes1);
 
     // Both nodes should have both records
     assert_true(node1.get_data().find(record_id1) != node1.get_data().end(),
@@ -697,7 +696,7 @@ int main() {
     std::cout << "Test 'Merge without Conflicts' passed." << std::endl;
   }
 
-  // Test Case: Multiple Merges
+  // Test Case: Multiple Merges using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -706,31 +705,24 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "InitialTag"}};
-    node1.insert(record_id, fields);
+    auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    std::vector<Change<std::string, std::string>> changes =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes);
+    node2.merge_changes(changes_init);
 
     // Node2 updates the record
     std::unordered_map<std::string, std::string> updates2 = {
         {"tag", "UpdatedByNode2"}};
-    node2.update(record_id, updates2);
+    auto changes_update2 = node2.insert_or_update(record_id, updates2);
 
     // Node1 updates the record
     std::unordered_map<std::string, std::string> updates1 = {
         {"tag", "UpdatedByNode1"}};
-    node1.update(record_id, updates1);
+    auto changes_update1 = node1.insert_or_update(record_id, updates1);
 
     // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
-
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
+    node1.merge_changes(changes_update2);
+    node2.merge_changes(changes_update1);
 
     // Since node2 has a higher site_id, its latest update should prevail
     std::string expected_tag = "UpdatedByNode2";
@@ -742,7 +734,7 @@ int main() {
     std::cout << "Test 'Multiple Merges' passed." << std::endl;
   }
 
-  // Test Case: Inserting After Deletion
+  // Test Case: Inserting After Deletion using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -751,21 +743,18 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "Temporary"}};
-    node1.insert(record_id, fields);
-    node1.delete_record(record_id);
+    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_delete = node1.delete_record(record_id);
 
     // Merge deletion to node2
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
+    node2.merge_changes(changes_insert);
+    node2.merge_changes(changes_delete);
 
     // Node2 tries to insert the same record
-    node2.insert(record_id, fields);
+    auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
 
-    // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    // Merge changes back to node1
+    node1.merge_changes(changes_attempt_insert);
 
     // The deletion should prevail
     assert_true(node1.get_data().at(record_id).fields.empty(),
@@ -785,7 +774,7 @@ int main() {
     std::cout << "Test 'Inserting After Deletion' passed." << std::endl;
   }
 
-  // Test Case: Offline Changes Then Merge
+  // Test Case: Offline Changes Then Merge using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -796,13 +785,13 @@ int main() {
     std::string record_id1 = generate_uuid();
     std::unordered_map<std::string, std::string> fields1 = {
         {"id", record_id1}, {"tag", "Node1Tag"}};
-    node1.insert(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 is offline and inserts a different record
     std::string record_id2 = generate_uuid();
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id2}, {"tag", "Node2Tag"}};
-    node2.insert(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Now, node2 comes online and merges changes from node1
     uint64_t last_db_version_node2 = 0;
@@ -827,7 +816,8 @@ int main() {
     std::cout << "Test 'Offline Changes Then Merge' passed." << std::endl;
   }
 
-  // Test Case: Conflicting Updates with Different Last DB Versions
+  // Test Case: Conflicting Updates with Different Last DB Versions using
+  // insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -838,39 +828,35 @@ int main() {
         {"id", record_id}, {"tag", "InitialTag"}};
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id}, {"tag", "InitialTag"}};
-    node1.insert(record_id, fields1);
-    node2.insert(record_id, fields2);
+    auto changes_init1 = node1.insert_or_update(record_id, fields1);
+    auto changes_init2 = node2.insert_or_update(record_id, fields2);
 
     // Merge initial inserts
-    std::vector<Change<std::string, std::string>> changes_from_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1);
-    std::vector<Change<std::string, std::string>> changes_from_node2 =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2);
+    node1.merge_changes(changes_init2);
+    node2.merge_changes(changes_init1);
 
     // Node1 updates 'tag' twice
     std::unordered_map<std::string, std::string> updates_node1 = {
         {"tag", "Node1Tag1"}};
-    node1.update(record_id, updates_node1);
+    auto changes_node1_update1 =
+        node1.insert_or_update(record_id, updates_node1);
 
     updates_node1 = {{"tag", "Node1Tag2"}};
-    node1.update(record_id, updates_node1);
+    auto changes_node1_update2 =
+        node1.insert_or_update(record_id, updates_node1);
 
     // Node2 updates 'tag' once
     std::unordered_map<std::string, std::string> updates_node2 = {
         {"tag", "Node2Tag1"}};
-    node2.update(record_id, updates_node2);
+    auto changes_node2_update1 =
+        node2.insert_or_update(record_id, updates_node2);
 
     // Merge node1's changes into node2
-    std::vector<Change<std::string, std::string>> changes_from_node1_after =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1_after);
+    node2.merge_changes(changes_node1_update1);
+    node2.merge_changes(changes_node1_update2);
 
     // Merge node2's changes into node1
-    std::vector<Change<std::string, std::string>> changes_from_node2_after =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2_after);
+    node1.merge_changes(changes_node2_update1);
 
     // The 'tag' should reflect the latest update based on db_version and
     // site_id Assuming node1 has a higher db_version due to two updates
@@ -887,7 +873,7 @@ int main() {
         << std::endl;
   }
 
-  // Test Case: Clock Synchronization After Merges
+  // Test Case: Clock Synchronization After Merges using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -902,19 +888,19 @@ int main() {
     std::string record_id1 = generate_uuid();
     std::unordered_map<std::string, std::string> fields1 = {
         {"id", record_id1}, {"tag", "Node1Tag"}};
-    node1.insert(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 inserts another record
     std::string record_id2 = generate_uuid();
     std::unordered_map<std::string, std::string> fields2 = {
         {"id", record_id2}, {"tag", "Node2Tag"}};
-    node2.insert(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Node3 inserts a third record
     std::string record_id3 = generate_uuid();
     std::unordered_map<std::string, std::string> fields3 = {
         {"id", record_id3}, {"tag", "Node3Tag"}};
-    node3.insert(record_id3, fields3);
+    auto changes3 = node3.insert_or_update(record_id3, fields3);
 
     // First round of merges
     // Merge node1's changes into node2 and node3
@@ -969,7 +955,7 @@ int main() {
               << std::endl;
   }
 
-  // Test Case: Atomic Sync Per Transaction
+  // Test Case: Atomic Sync Per Transaction using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -978,11 +964,9 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "InitialTag"}};
-    node1.insert(record_id, fields);
+    auto changes_node1 = node1.insert_or_update(record_id, fields);
 
     // Sync immediately after the transaction
-    std::vector<Change<std::string, std::string>> changes_node1 =
-        node1.get_changes_since(0);
     node2.merge_changes(changes_node1);
 
     // Verify synchronization
@@ -993,7 +977,7 @@ int main() {
     std::cout << "Test 'Atomic Sync Per Transaction' passed." << std::endl;
   }
 
-  // Test Case: Concurrent Updates
+  // Test Case: Concurrent Updates using insert_or_update
   {
     CRDT<std::string, std::string> node1(1);
     CRDT<std::string, std::string> node2(2);
@@ -1002,30 +986,23 @@ int main() {
     std::string record_id = generate_uuid();
     std::unordered_map<std::string, std::string> fields = {
         {"id", record_id}, {"tag", "InitialTag"}};
-    node1.insert(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    std::vector<Change<std::string, std::string>> changes_node1 =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_node1);
+    node2.merge_changes(changes_insert);
 
     // Concurrently update 'tag' on both nodes
     std::unordered_map<std::string, std::string> updates_node1 = {
         {"tag", "Node1TagUpdate"}};
-    node1.update(record_id, updates_node1);
+    auto changes_update1 = node1.insert_or_update(record_id, updates_node1);
 
     std::unordered_map<std::string, std::string> updates_node2 = {
         {"tag", "Node2TagUpdate"}};
-    node2.update(record_id, updates_node2);
+    auto changes_update2 = node2.insert_or_update(record_id, updates_node2);
 
     // Merge changes
-    std::vector<Change<std::string, std::string>> changes_from_node1_after =
-        node1.get_changes_since(0);
-    node2.merge_changes(changes_from_node1_after);
-
-    std::vector<Change<std::string, std::string>> changes_from_node2_after =
-        node2.get_changes_since(0);
-    node1.merge_changes(changes_from_node2_after);
+    node1.merge_changes(changes_update2);
+    node2.merge_changes(changes_update1);
 
     // Conflict resolution based on site_id (Node2 has higher site_id)
     std::string expected_tag = "Node2TagUpdate";
