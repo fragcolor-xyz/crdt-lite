@@ -161,12 +161,12 @@ This deterministic process guarantees that all nodes reach a consistent state.
 
 ## External Version Tracking
 
-CRDT-Lite utilizes external version tracking to manage synchronization without requiring identical logical clocks across nodes:
+**External version tracking** in CRDT-Lite is designed to be managed by the users of the library. This means that while CRDT-Lite provides the mechanisms for tracking versions, it does not store or manage these versions internally. Users are responsible for maintaining and persisting the following version information:
 
 1. **Last Version Integrated from Remote (`last_remote_version`):** Tracks the highest `db_version` received from a specific remote node.
 2. **Last Local Version at Integration (`last_local_version_at_remote_integration`):** Records the local `db_version` when the last set of remote changes was integrated.
 
-This mechanism ensures that only relevant changes are considered during merges, optimizing the synchronization process.
+**Important:** CRDT-Lite does not handle the storage or retrieval of these version numbers. Users must implement their own storage solutions (e.g., databases, files, in-memory structures) to persist and manage these version tracking values. This external management allows for flexibility in how synchronization state is maintained across different environments and use cases.
 
 ## Design Considerations
 
