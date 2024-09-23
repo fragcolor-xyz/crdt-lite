@@ -7,13 +7,13 @@
 #include <unordered_map>
 
 // Helper function to generate unique IDs (simulating UUIDs)
-std::string generate_uuid() {
+CrdtString generate_uuid() {
   static uint64_t counter = 0;
   return "uuid-" + std::to_string(++counter);
 }
 
 /// Simple assertion helper
-void assert_true(bool condition, const std::string &message) {
+void assert_true(bool condition, const CrdtString &message) {
   if (!condition) {
     std::cerr << "Assertion failed: " << message << std::endl;
     exit(1);
@@ -23,12 +23,12 @@ void assert_true(bool condition, const std::string &message) {
 int main() {
   // Test Case: Basic Insert and Merge using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id},
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id},
                                                             {"form_id", generate_uuid()},
                                                             {"tag", "Node1Tag"},
                                                             {"created_at", "2023-10-01T12:00:00Z"},
@@ -36,7 +36,7 @@ int main() {
     auto changes1 = node1.insert_or_update(record_id, fields1);
 
     // Node2 inserts the same record with different data
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id},
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id},
                                                             {"form_id", fields1.at("form_id")},
                                                             {"tag", "Node2Tag"},
                                                             {"created_at", "2023-10-01T12:05:00Z"},
@@ -60,12 +60,12 @@ int main() {
 
   // Test Case: Updates with Conflicts using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Insert a shared record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
     auto changes_init1 = node1.insert_or_update(record_id, fields);
     auto changes_init2 = node2.insert_or_update(record_id, fields);
 
@@ -74,11 +74,11 @@ int main() {
     node2.merge_changes(changes_init1);
 
     // Node1 updates 'tag'
-    std::unordered_map<std::string, std::string> updates1 = {{"tag", "Node1UpdatedTag"}};
+    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1UpdatedTag"}};
     auto change_update1 = node1.insert_or_update(record_id, updates1);
 
     // Node2 updates 'tag'
-    std::unordered_map<std::string, std::string> updates2 = {{"tag", "Node2UpdatedTag"}};
+    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2UpdatedTag"}};
     auto change_update2 = node2.insert_or_update(record_id, updates2);
 
     // Merge changes
@@ -94,12 +94,12 @@ int main() {
 
   // Test Case: Delete and Merge using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Insert and sync a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "ToBeDeleted"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "ToBeDeleted"}};
     auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
@@ -125,12 +125,12 @@ int main() {
 
   // Test Case: Tombstone Handling using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Insert a record and delete it on node1
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "Temporary"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
     auto changes_insert = node1.insert_or_update(record_id, fields);
     auto changes_delete = node1.delete_record(record_id);
 
@@ -154,13 +154,13 @@ int main() {
 
   // Test Case: Conflict Resolution with site_id and seq using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Both nodes insert a record with the same id
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id}, {"tag", "Node1Tag"}};
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id}, {"tag", "Node2Tag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "Node1Tag"}};
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "Node2Tag"}};
     auto changes1 = node1.insert_or_update(record_id, fields1);
     auto changes2 = node2.insert_or_update(record_id, fields2);
 
@@ -169,13 +169,13 @@ int main() {
     node2.merge_changes(changes1);
 
     // Both nodes update the 'tag' field multiple times
-    std::unordered_map<std::string, std::string> updates1 = {{"tag", "Node1Tag1"}};
+    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1Tag1"}};
     auto changes_update1 = node1.insert_or_update(record_id, updates1);
 
     updates1 = {{"tag", "Node1Tag2"}};
     auto changes_update2 = node1.insert_or_update(record_id, updates1);
 
-    std::unordered_map<std::string, std::string> updates2 = {{"tag", "Node2Tag1"}};
+    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2Tag1"}};
     auto changes_update3 = node2.insert_or_update(record_id, updates2);
 
     updates2 = {{"tag", "Node2Tag2"}};
@@ -188,7 +188,7 @@ int main() {
     node1.merge_changes(changes_update3);
 
     // Since node2 has a higher site_id, its latest update should prevail
-    std::string expected_tag = "Node2Tag2";
+    CrdtString expected_tag = "Node2Tag2";
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag, "Conflict Resolution: Tag resolution mismatch");
     assert_true(node1.get_data() == node2.get_data(), "Conflict Resolution: Data mismatch");
@@ -197,12 +197,12 @@ int main() {
 
   // Test Case: Logical Clock Update using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "Node1Tag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Node1Tag"}};
     auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Node2 receives the change
@@ -217,17 +217,17 @@ int main() {
 
   // Test Case: Merge without Conflicts using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts a record
-    std::string record_id1 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id1}, {"tag", "Node1Record"}};
+    CrdtString record_id1 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Record"}};
     auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 inserts a different record
-    std::string record_id2 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id2}, {"tag", "Node2Record"}};
+    CrdtString record_id2 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Record"}};
     auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Merge changes
@@ -249,23 +249,23 @@ int main() {
 
   // Test Case: Multiple Merges using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
     auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
     node2.merge_changes(changes_init);
 
     // Node2 updates the record
-    std::unordered_map<std::string, std::string> updates2 = {{"tag", "UpdatedByNode2"}};
+    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "UpdatedByNode2"}};
     auto changes_update2 = node2.insert_or_update(record_id, updates2);
 
     // Node1 updates the record
-    std::unordered_map<std::string, std::string> updates1 = {{"tag", "UpdatedByNode1"}};
+    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "UpdatedByNode1"}};
     auto changes_update1 = node1.insert_or_update(record_id, updates1);
 
     // Merge changes
@@ -273,7 +273,7 @@ int main() {
     node2.merge_changes(changes_update1);
 
     // Since node2 has a higher site_id, its latest update should prevail
-    std::string expected_tag = "UpdatedByNode2";
+    CrdtString expected_tag = "UpdatedByNode2";
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag, "Multiple Merges: Tag resolution mismatch");
     assert_true(node1.get_data() == node2.get_data(), "Multiple Merges: Data mismatch between Node1 and Node2");
@@ -282,12 +282,12 @@ int main() {
 
   // Test Case: Inserting After Deletion using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts and deletes a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "Temporary"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
     auto changes_insert = node1.insert_or_update(record_id, fields);
     auto changes_delete = node1.delete_record(record_id);
 
@@ -315,19 +315,19 @@ int main() {
 
   // Test Case: Offline Changes Then Merge using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Both nodes start with an empty state
 
     // Node1 inserts a record
-    std::string record_id1 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
+    CrdtString record_id1 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
     auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 is offline and inserts a different record
-    std::string record_id2 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
+    CrdtString record_id2 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
     auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Now, node2 comes online and merges changes from node1
@@ -353,13 +353,13 @@ int main() {
 
   // Test Case: Conflicting Updates with Different Last DB Versions using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Both nodes insert the same record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id}, {"tag", "InitialTag"}};
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "InitialTag"}};
     auto changes_init1 = node1.insert_or_update(record_id, fields1);
     auto changes_init2 = node2.insert_or_update(record_id, fields2);
 
@@ -368,14 +368,14 @@ int main() {
     node2.merge_changes(changes_init1);
 
     // Node1 updates 'tag' twice
-    std::unordered_map<std::string, std::string> updates_node1 = {{"tag", "Node1Tag1"}};
+    CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1Tag1"}};
     auto changes_node1_update1 = node1.insert_or_update(record_id, updates_node1);
 
     updates_node1 = {{"tag", "Node1Tag2"}};
     auto changes_node1_update2 = node1.insert_or_update(record_id, updates_node1);
 
     // Node2 updates 'tag' once
-    std::unordered_map<std::string, std::string> updates_node2 = {{"tag", "Node2Tag1"}};
+    CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2Tag1"}};
     auto changes_node2_update1 = node2.insert_or_update(record_id, updates_node2);
 
     // Merge node1's changes into node2
@@ -387,7 +387,7 @@ int main() {
 
     // The 'tag' should reflect the latest update based on db_version and site_id Assuming node1 has a higher db_version due to
     // two updates
-    std::string final_tag = "Node1Tag2";
+    CrdtString final_tag = "Node1Tag2";
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == final_tag,
                 "Conflicting Updates: Final tag should be 'Node1Tag2'");
@@ -399,9 +399,9 @@ int main() {
 
   // Test Case: Clock Synchronization After Merges using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
-    CRDT<std::string, std::string> node3(3);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
+    CRDT<CrdtString, CrdtString> node3(3);
 
     // Merge trackers
     uint64_t last_db_version_node1 = 0;
@@ -409,18 +409,18 @@ int main() {
     uint64_t last_db_version_node3 = 0;
 
     // Node1 inserts a record
-    std::string record_id1 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
+    CrdtString record_id1 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
     auto changes1 = node1.insert_or_update(record_id1, fields1);
 
     // Node2 inserts another record
-    std::string record_id2 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
+    CrdtString record_id2 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
     auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Node3 inserts a third record
-    std::string record_id3 = generate_uuid();
-    std::unordered_map<std::string, std::string> fields3 = {{"id", record_id3}, {"tag", "Node3Tag"}};
+    CrdtString record_id3 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields3 = {{"id", record_id3}, {"tag", "Node3Tag"}};
     auto changes3 = node3.insert_or_update(record_id3, fields3);
 
     // First round of merges
@@ -467,12 +467,12 @@ int main() {
 
   // Test Case: Atomic Sync Per Transaction using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Node1 inserts a record
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
     auto changes_node1 = node1.insert_or_update(record_id, fields);
 
     // Sync immediately after the transaction
@@ -487,22 +487,22 @@ int main() {
 
   // Test Case: Concurrent Updates using insert_or_update
   {
-    CRDT<std::string, std::string> node1(1);
-    CRDT<std::string, std::string> node2(2);
+    CRDT<CrdtString, CrdtString> node1(1);
+    CRDT<CrdtString, CrdtString> node2(2);
 
     // Insert a record on node1
-    std::string record_id = generate_uuid();
-    std::unordered_map<std::string, std::string> fields = {{"id", record_id}, {"tag", "InitialTag"}};
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
     auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
     node2.merge_changes(changes_insert);
 
     // Concurrently update 'tag' on both nodes
-    std::unordered_map<std::string, std::string> updates_node1 = {{"tag", "Node1TagUpdate"}};
+    CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1TagUpdate"}};
     auto changes_update1 = node1.insert_or_update(record_id, updates_node1);
 
-    std::unordered_map<std::string, std::string> updates_node2 = {{"tag", "Node2TagUpdate"}};
+    CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2TagUpdate"}};
     auto changes_update2 = node2.insert_or_update(record_id, updates_node2);
 
     // Merge changes
@@ -510,7 +510,7 @@ int main() {
     node2.merge_changes(changes_update1);
 
     // Conflict resolution based on site_id (Node2 has higher site_id)
-    std::string expected_tag = "Node2TagUpdate";
+    CrdtString expected_tag = "Node2TagUpdate";
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag,
                 "Concurrent Updates: Tag should be 'Node2TagUpdate'");

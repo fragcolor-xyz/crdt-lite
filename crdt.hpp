@@ -2,15 +2,28 @@
 #ifndef CRDT_HPP
 #define CRDT_HPP
 
-#include <algorithm>
-#include <cassert>
-#include <iostream>
-#include <optional>
-#include <sstream>
+// Define this if you want to override the default collection types
+// Basically define these before including this header and ensure this define is set before this header is included
+// in any other files that include this file
+#ifndef CRDT_COLLECTIONS_DEFINED
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+template <typename T> using CrdtVector = std::vector<T>;
+
+using CrdtString = std::string;
+
+template <typename K, typename V> using CrdtMap = std::unordered_map<K, V>;
+
+template <typename K> using CrdtSet = std::unordered_set<K>;
+#endif
+
+#include <algorithm>
+#include <cassert>
+#include <iostream>
+#include <optional>
 
 /// Represents a logical clock for maintaining causality.
 class LogicalClock {
@@ -46,12 +59,12 @@ struct ColumnVersion {
 
 /// Represents a record in the CRDT.
 template <typename V> struct Record {
-  std::unordered_map<std::string, V> fields;
-  std::unordered_map<std::string, ColumnVersion> column_versions;
+  CrdtMap<CrdtString, V> fields;
+  CrdtMap<CrdtString, ColumnVersion> column_versions;
 
   Record() = default;
 
-  Record(std::unordered_map<std::string, V> &&f, std::unordered_map<std::string, ColumnVersion> &&cv)
+  Record(CrdtMap<CrdtString, V> &&f, CrdtMap<CrdtString, ColumnVersion> &&cv)
       : fields(std::move(f)), column_versions(std::move(cv)) {}
 };
 
@@ -82,7 +95,7 @@ template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs
 /// Represents a single change in the CRDT.
 template <typename K, typename V> struct Change {
   K record_id;
-  std::string col_name;
+  CrdtString col_name;
   std::optional<V> value; // std::nullopt represents deletion
   uint64_t col_version;
   uint64_t db_version;
@@ -91,7 +104,7 @@ template <typename K, typename V> struct Change {
 
   Change() = default;
 
-  Change(K rid, std::string cname, std::optional<V> val, uint64_t cver, uint64_t dver, uint64_t sid, uint64_t s)
+  Change(K rid, CrdtString cname, std::optional<V> val, uint64_t cver, uint64_t dver, uint64_t sid, uint64_t s)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
         site_id(sid), seq(s) {}
 };
@@ -111,8 +124,8 @@ public:
   /// # Returns
   ///
   /// A vector of `Change` objects representing the changes made.
-  std::vector<Change<K, V>> insert_or_update(const K &record_id, const std::unordered_map<std::string, V> &fields) {
-    std::vector<Change<K, V>> changes;
+  CrdtVector<Change<K, V>> insert_or_update(const K &record_id, const CrdtMap<CrdtString, V> &fields) {
+    CrdtVector<Change<K, V>> changes;
     uint64_t db_version = clock_.tick();
 
     // Check if the record is tombstoned
@@ -125,7 +138,7 @@ public:
 
     if (is_new_record) {
       // Initialize column versions
-      std::unordered_map<std::string, ColumnVersion> column_versions;
+      CrdtMap<CrdtString, ColumnVersion> column_versions;
       for (const auto &[col_name, _] : fields) {
         column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
         // Create a Change object for each field inserted
@@ -174,8 +187,8 @@ public:
   /// # Returns
   ///
   /// A vector of `Change` objects representing the deletion.
-  std::vector<Change<K, V>> delete_record(const K &record_id) {
-    std::vector<Change<K, V>> changes;
+  CrdtVector<Change<K, V>> delete_record(const K &record_id) {
+    CrdtVector<Change<K, V>> changes;
 
     if (tombstones_.find(record_id) != tombstones_.end()) {
       std::cout << "Delete ignored: Record " << record_id << " is already deleted (tombstoned)." << std::endl;
@@ -191,11 +204,11 @@ public:
     data_.erase(record_id);
 
     // Insert deletion clock info
-    std::unordered_map<std::string, ColumnVersion> deletion_clock;
+    CrdtMap<CrdtString, ColumnVersion> deletion_clock;
     deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_, 0));
 
     // Store deletion info in the data map
-    data_.emplace(record_id, Record<V>(std::unordered_map<std::string, V>(), std::move(deletion_clock)));
+    data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     // Create a Change object for deletion
     changes.emplace_back(Change<K, V>(record_id, "__deleted__", std::nullopt, 1, db_version, node_id_, 0));
@@ -212,8 +225,8 @@ public:
   /// # Returns
   ///
   /// A vector of changes.
-  std::vector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
-    std::vector<Change<K, V>> changes;
+  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
+    CrdtVector<Change<K, V>> changes;
 
     for (const auto &[record_id, record] : data_) {
       for (const auto &[col_name, clock_info] : record.column_versions) {
@@ -239,10 +252,10 @@ public:
   /// # Arguments
   ///
   /// * `changes` - A slice of changes to merge.
-  void merge_changes(const std::vector<Change<K, V>> &changes) {
+  void merge_changes(const CrdtVector<Change<K, V>> &changes) {
     for (const auto &change : changes) {
       const K &record_id = change.record_id;
-      const std::string &col_name = change.col_name;
+      const CrdtString &col_name = change.col_name;
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       uint64_t remote_site_id = change.site_id;
@@ -302,11 +315,11 @@ public:
           data_.erase(record_id);
 
           // Insert deletion clock info
-          std::unordered_map<std::string, ColumnVersion> deletion_clock;
+          CrdtMap<CrdtString, ColumnVersion> deletion_clock;
           deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_site_id, remote_seq));
 
           // Store deletion info in the data map
-          data_.emplace(record_id, Record<V>(std::unordered_map<std::string, V>(), std::move(deletion_clock)));
+          data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
         } else if (tombstones_.find(record_id) == tombstones_.end()) {
           // Handle insertion or update only if the record is not tombstoned
           Record<V> &record = data_[record_id]; // Inserts default if not exists
@@ -345,13 +358,13 @@ public:
   // Accessors for testing
   const LogicalClock &get_clock() const { return clock_; }
 
-  const std::unordered_map<K, Record<V>> &get_data() const { return data_; }
+  const CrdtMap<K, Record<V>> &get_data() const { return data_; }
 
 private:
   uint64_t node_id_;
   LogicalClock clock_;
-  std::unordered_map<K, Record<V>> data_;
-  std::unordered_set<K> tombstones_;
+  CrdtMap<K, Record<V>> data_;
+  CrdtSet<K> tombstones_;
 };
 
 /// Synchronizes two CRDT nodes.

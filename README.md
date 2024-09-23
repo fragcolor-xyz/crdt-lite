@@ -128,7 +128,7 @@ Each operation (insert, update, delete) generates a `Change` object for incremen
 template <typename K, typename V>
 struct Change {
   K record_id;
-  std::string col_name;
+  CrdtString col_name;
   std::optional<V> value;
   uint64_t col_version;
   uint64_t db_version;
@@ -144,7 +144,7 @@ This design minimizes bandwidth usage by transmitting only the necessary changes
 Deleted records are marked with tombstones to prevent their accidental resurrection during merges:
 
 ```cpp
-std::unordered_set<K> tombstones_;
+CrdtSet<K> tombstones_;
 ```
 
 Future updates may include garbage collection mechanisms for old tombstones to optimize storage.
