@@ -18,6 +18,8 @@ using CrdtString = std::string;
 template <typename K, typename V> using CrdtMap = std::unordered_map<K, V>;
 
 template <typename K> using CrdtSet = std::unordered_set<K>;
+
+using CrdtNodeId = uint64_t;
 #endif
 
 #include <algorithm>
@@ -50,11 +52,11 @@ private:
 struct ColumnVersion {
   uint64_t col_version;
   uint64_t db_version;
-  uint64_t site_id;
+  CrdtNodeId node_id;
   uint64_t seq;
 
-  ColumnVersion(uint64_t c = 0, uint64_t d = 0, uint64_t s = 0, uint64_t se = 0)
-      : col_version(c), db_version(d), site_id(s), seq(se) {}
+  ColumnVersion(uint64_t c = 0, uint64_t d = 0, CrdtNodeId n = 0, uint64_t s = 0)
+      : col_version(c), db_version(d), node_id(n), seq(s) {}
 };
 
 /// Represents a record in the CRDT.
@@ -85,7 +87,7 @@ template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs
   for (const auto &[key, value] : lhs.column_versions) {
     auto it = rhs.column_versions.find(key);
     if (it == rhs.column_versions.end() || it->second.col_version != value.col_version ||
-        it->second.db_version != value.db_version || it->second.site_id != value.site_id || it->second.seq != value.seq)
+        it->second.db_version != value.db_version || it->second.node_id != value.node_id || it->second.seq != value.seq)
       return false;
   }
 
@@ -99,20 +101,20 @@ template <typename K, typename V> struct Change {
   std::optional<V> value; // std::nullopt represents deletion
   uint64_t col_version;
   uint64_t db_version;
-  uint64_t site_id;
+  CrdtNodeId node_id; // Changed from uint64_t to CrdtNodeId
   uint64_t seq;
 
   Change() = default;
 
-  Change(K rid, CrdtString cname, std::optional<V> val, uint64_t cver, uint64_t dver, uint64_t sid, uint64_t s)
+  Change(K rid, CrdtString cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid, uint64_t s)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
-        site_id(sid), seq(s) {}
+        node_id(nid), seq(s) {}
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
 template <typename K, typename V> class CRDT {
 public:
-  CRDT(uint64_t node_id) : node_id_(node_id), clock_(), data_(), tombstones_() {}
+  CRDT(CrdtNodeId node_id) : node_id_(node_id), clock_(), data_(), tombstones_() {}
 
   /// Inserts a new record or updates an existing record in the CRDT.
   ///
@@ -163,7 +165,7 @@ public:
           col_it->second.col_version += 1;
           col_it->second.db_version = db_version;
           col_it->second.seq += 1;
-          col_it->second.site_id = node_id_;
+          col_it->second.node_id = node_id_;
         } else {
           // If the column does not exist, initialize it
           record.column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
@@ -239,7 +241,7 @@ public:
             }
           }
           changes.emplace_back(Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version,
-                                            clock_info.site_id, clock_info.seq));
+                                            clock_info.node_id, clock_info.seq));
         }
       }
     }
@@ -258,7 +260,7 @@ public:
       const CrdtString &col_name = change.col_name;
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
-      uint64_t remote_site_id = change.site_id;
+      CrdtNodeId remote_node_id = change.node_id; // Changed from uint64_t to CrdtNodeId
       uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = change.value;
 
@@ -289,17 +291,17 @@ public:
           } else if (change.col_name == "__deleted__" && col_name != "__deleted__") {
             should_accept = false;
           } else if (change.col_name == "__deleted__" && col_name == "__deleted__") {
-            if (remote_site_id > local.site_id) {
+            if (remote_node_id > local.node_id) { // Changed from site_id to node_id
               should_accept = true;
-            } else if (remote_site_id == local.site_id) {
+            } else if (remote_node_id == local.node_id) { // Changed from site_id to node_id
               should_accept = (remote_seq > local.seq);
             } else {
               should_accept = false;
             }
           } else {
-            if (remote_site_id > local.site_id) {
+            if (remote_node_id > local.node_id) { // Changed from site_id to node_id
               should_accept = true;
-            } else if (remote_site_id == local.site_id) {
+            } else if (remote_node_id == local.node_id) { // Changed from site_id to node_id
               should_accept = (remote_seq > local.seq);
             } else {
               should_accept = false;
@@ -316,7 +318,7 @@ public:
 
           // Insert deletion clock info
           CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_site_id, remote_seq));
+          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
 
           // Store deletion info in the data map
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
@@ -330,7 +332,7 @@ public:
           }
 
           // Update the column version info
-          record.column_versions[col_name] = ColumnVersion(remote_col_version, remote_db_version, remote_site_id, remote_seq);
+          record.column_versions[col_name] = ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq);
         }
       }
     }
@@ -361,7 +363,7 @@ public:
   const CrdtMap<K, Record<V>> &get_data() const { return data_; }
 
 private:
-  uint64_t node_id_;
+  CrdtNodeId node_id_; // Changed from uint64_t to CrdtNodeId
   LogicalClock clock_;
   CrdtMap<K, Record<V>> data_;
   CrdtSet<K> tombstones_;
@@ -391,7 +393,7 @@ template <typename K, typename V> struct NodeState {
   CRDT<K, V> crdt;
   uint64_t last_db_version;
 
-  NodeState(uint64_t node_id) : crdt(node_id), last_db_version(0) {}
+  NodeState(CrdtNodeId node_id) : crdt(node_id), last_db_version(0) {}
 
   void sync_from(const CRDT<K, V> &source_crdt) {
     auto changes = source_crdt.get_changes_since(last_db_version);
