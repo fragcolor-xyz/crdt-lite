@@ -13,6 +13,7 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
 - Support for insert, update, and delete operations with tombstone handling
 - Efficient merging mechanism for synchronizing state across nodes
 - Implementations in both Rust and C++ for flexibility and performance
+- External version tracking for robust synchronization management
 
 ## Rust Implementation
 
@@ -47,6 +48,7 @@ Both Rust and C++ implementations share similar core concepts:
 2. **ColumnVersion**: Tracks version information for each column in a record.
 3. **Record**: Represents individual records with fields and their version information.
 4. **CRDT**: The main structure managing overall state, including data records and tombstones.
+5. **External Version Tracking**: Maintains synchronization state between nodes.
 
 Key operations include:
 - Insert: Adds new records
@@ -54,11 +56,25 @@ Key operations include:
 - Delete: Marks records as tombstoned
 - Merge: Synchronizes state between nodes, resolving conflicts
 
-## Limitations and Future Work
+### External Version Tracking
 
-- The current implementation is not thread-safe. Concurrency support is planned for future versions.
+The implementation uses two key values for external version tracking:
+
+1. **Last Version Integrated from Remote (`last_remote_version`)**: Tracks the highest `db_version` received from a specific remote node.
+2. **Last Local Version at Integration (`last_local_version_at_remote_integration`)**: Records the local `db_version` when the last set of remote changes was integrated.
+
+This approach allows for efficient synchronization without requiring identical logical clock values across nodes. It ensures that only relevant changes are considered during merges, optimizing the synchronization process.
+
+## Design Considerations
+
+- The current implementation does not require logical clocks across nodes to be identical, thanks to the external version tracking mechanism.
+- The `get_changes_since` method is designed to retrieve changes efficiently based on the external tracking information.
+- The implementation focuses on minimal storage overhead while maintaining robust conflict resolution capabilities.
+
+## Limitations
+
+- The current implementation is not thread-safe. Concurrency support is not currently planned.
 - Network transport layer is not included. Users must implement their own synchronization mechanism.
-- Performance optimizations for large datasets are yet to be implemented.
 
 ## Contributing
 
