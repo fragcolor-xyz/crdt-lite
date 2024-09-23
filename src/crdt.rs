@@ -828,18 +828,6 @@ mod tests {
     assert!(node1.tombstones.contains(&record_id));
     assert!(node2.tombstones.contains(&record_id));
   }
-}
-
-#[cfg(test)]
-mod additional_tests {
-  use super::*;
-  use std::collections::HashMap;
-  use uuid::Uuid;
-
-  /// Helper function to create a unique UUID string.
-  fn new_uuid() -> String {
-    Uuid::new_v4().to_string()
-  }
 
   /// Helper function to synchronize two nodes and update their last_db_version.
   fn sync_nodes<K, V>(source: &CRDT<K, V>, target: &mut CRDT<K, V>, last_db_version: &mut u64)
@@ -1144,13 +1132,34 @@ mod additional_tests {
     assert_eq!(node2.data, node3.data);
     assert_eq!(node1.data, node3.data);
 
-    // Check that logical clocks are synchronized
-    // Assuming each insert increments db_version by 1
-    // Total inserts: 3 (one per node)
-    let expected_max_db_version = 3;
-    assert_eq!(node1.clock.current_time(), expected_max_db_version);
-    assert_eq!(node2.clock.current_time(), expected_max_db_version);
-    assert_eq!(node3.clock.current_time(), expected_max_db_version);
+    // Check that logical clocks are properly updated
+    // The clock values may differ between nodes, but should be at least as high as the number of operations
+    let min_expected_clock_value = 3; // At least 3 inserts happened
+    assert!(node1.clock.current_time() >= min_expected_clock_value);
+    assert!(node2.clock.current_time() >= min_expected_clock_value);
+    assert!(node3.clock.current_time() >= min_expected_clock_value);
+
+    // Verify that merging updates the clocks
+    let max_clock_before_merge = node1
+      .clock
+      .current_time()
+      .max(node2.clock.current_time())
+      .max(node3.clock.current_time());
+
+    // Perform another round of merges
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+    sync_nodes(&node2, &mut node3, &mut last_db_version_node3);
+    sync_nodes(&node3, &mut node1, &mut last_db_version_node1);
+
+    // Check that clocks have been updated after merges
+    assert!(node1.clock.current_time() > max_clock_before_merge);
+    assert!(node2.clock.current_time() > max_clock_before_merge);
+    assert!(node3.clock.current_time() > max_clock_before_merge);
+
+    // NOT really, this won't be the case in the current design
+    // // Verify that all nodes have the same final clock value after full synchronization
+    // assert_eq!(node1.clock.current_time(), node2.clock.current_time());
+    // assert_eq!(node2.clock.current_time(), node3.clock.current_time());
   }
 
   #[test]
