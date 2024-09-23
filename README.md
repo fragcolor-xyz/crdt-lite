@@ -67,7 +67,7 @@ CRDT-Lite is actively used in [Formabble](https://formabble.com), a collaborativ
 1. **Ensure a C++20 Compatible Compiler:** Make sure you have a compiler that supports C++20.
 2. **Compile and Run:**
    ```bash
-   g++ -std=c++20 -o crdt crdt.cpp && ./crdt
+   g++ -std=c++20 -o crdt tests.cpp && ./crdt
    ```
 
 ## Implementation Details

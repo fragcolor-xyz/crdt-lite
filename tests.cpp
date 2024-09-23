@@ -190,8 +190,7 @@ int main() {
     // Since node2 has a higher site_id, its latest update should prevail
     std::string expected_tag = "Node2Tag2";
 
-    assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag,
-                "Conflict Resolution: Tag resolution mismatch");
+    assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag, "Conflict Resolution: Tag resolution mismatch");
     assert_true(node1.get_data() == node2.get_data(), "Conflict Resolution: Data mismatch");
     std::cout << "Test 'Conflict Resolution with site_id and seq' passed." << std::endl;
   }
@@ -386,7 +385,8 @@ int main() {
     // Merge node2's changes into node1
     node1.merge_changes(changes_node2_update1);
 
-    // The 'tag' should reflect the latest update based on db_version and site_id Assuming node1 has a higher db_version due to two updates
+    // The 'tag' should reflect the latest update based on db_version and site_id Assuming node1 has a higher db_version due to
+    // two updates
     std::string final_tag = "Node1Tag2";
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == final_tag,

@@ -45,8 +45,7 @@ struct ColumnVersion {
 };
 
 /// Represents a record in the CRDT.
-template <typename V>
-struct Record {
+template <typename V> struct Record {
   std::unordered_map<std::string, V> fields;
   std::unordered_map<std::string, ColumnVersion> column_versions;
 
@@ -57,8 +56,7 @@ struct Record {
 };
 
 // Free function to compare two Record<V> instances
-template <typename V>
-bool operator==(const Record<V> &lhs, const Record<V> &rhs) {
+template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs) {
   // Compare fields
   if (lhs.fields.size() != rhs.fields.size())
     return false;
@@ -82,8 +80,7 @@ bool operator==(const Record<V> &lhs, const Record<V> &rhs) {
 }
 
 /// Represents a single change in the CRDT.
-template <typename K, typename V>
-struct Change {
+template <typename K, typename V> struct Change {
   K record_id;
   std::string col_name;
   std::optional<V> value; // std::nullopt represents deletion
@@ -100,8 +97,7 @@ struct Change {
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V>
-class CRDT {
+template <typename K, typename V> class CRDT {
 public:
   CRDT(uint64_t node_id) : node_id_(node_id), clock_(), data_(), tombstones_() {}
 
@@ -362,8 +358,7 @@ private:
 /// Retrieves changes from the source since last_db_version and merges them into
 /// the target. Updates last_db_version to prevent reprocessing the same
 /// changes.
-template <typename K, typename V>
-void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_version) {
+template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
   target.merge_changes(changes);
   // Update last_db_version to the current max db_version in source
@@ -379,8 +374,7 @@ void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_versio
 }
 
 /// Represents the state of a node, tracking the last integrated db_version.
-template <typename K, typename V>
-struct NodeState {
+template <typename K, typename V> struct NodeState {
   CRDT<K, V> crdt;
   uint64_t last_db_version;
 
