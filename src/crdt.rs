@@ -6,47 +6,47 @@ use std::hash::Hash;
 
 /// Represents a logical clock for maintaining causality.
 #[derive(Debug, Clone)]
-struct LogicalClock {
+pub struct LogicalClock {
   time: u64,
 }
 
 impl LogicalClock {
   /// Creates a new LogicalClock starting at time 0.
-  fn new() -> Self {
+  pub fn new() -> Self {
     LogicalClock { time: 0 }
   }
 
   /// Increments the clock for a local event.
-  fn tick(&mut self) -> u64 {
+  pub fn tick(&mut self) -> u64 {
     self.time += 1;
     self.time
   }
 
   /// Updates the clock based on a received time.
-  fn update(&mut self, received_time: u64) -> u64 {
+  pub fn update(&mut self, received_time: u64) -> u64 {
     self.time = std::cmp::max(self.time, received_time);
     self.time += 1;
     self.time
   }
 
   /// Retrieves the current time.
-  fn current_time(&self) -> u64 {
+  pub fn current_time(&self) -> u64 {
     self.time
   }
 }
 
 /// Represents the version information for a column.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ColumnVersion {
-  col_version: u64,
-  db_version: u64,
-  site_id: u64,
-  seq: u64,
+pub struct ColumnVersion {
+  pub col_version: u64,
+  pub db_version: u64,
+  pub site_id: u64,
+  pub seq: u64,
 }
 
 impl ColumnVersion {
   /// Creates a new ColumnVersion.
-  fn new(col_version: u64, db_version: u64, site_id: u64, seq: u64) -> Self {
+  pub fn new(col_version: u64, db_version: u64, site_id: u64, seq: u64) -> Self {
     ColumnVersion {
       col_version,
       db_version,
@@ -58,14 +58,14 @@ impl ColumnVersion {
 
 /// Represents a record in the CRDT.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Record<V> {
-  fields: HashMap<String, V>,
-  column_versions: HashMap<String, ColumnVersion>,
+pub struct Record<V> {
+  pub fields: HashMap<String, V>,
+  pub column_versions: HashMap<String, ColumnVersion>,
 }
 
 impl<V> Record<V> {
   /// Creates a new Record.
-  fn new(fields: HashMap<String, V>, column_versions: HashMap<String, ColumnVersion>) -> Self {
+  pub fn new(fields: HashMap<String, V>, column_versions: HashMap<String, ColumnVersion>) -> Self {
     Record {
       fields,
       column_versions,
@@ -75,14 +75,14 @@ impl<V> Record<V> {
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
 #[derive(Debug, Clone)]
-struct CRDT<K, V>
+pub struct CRDT<K, V>
 where
   K: Eq + Hash + Clone + Debug,
 {
-  node_id: u64,
-  clock: LogicalClock,
-  data: HashMap<K, Record<V>>,
-  tombstones: HashSet<K>,
+  pub node_id: u64,
+  pub clock: LogicalClock,
+  pub data: HashMap<K, Record<V>>,
+  pub tombstones: HashSet<K>,
 }
 
 impl<K, V> CRDT<K, V>
@@ -91,7 +91,7 @@ where
   V: Clone + Debug,
 {
   /// Creates a new CRDT instance.
-  fn new(node_id: u64) -> Self {
+  pub fn new(node_id: u64) -> Self {
     CRDT {
       node_id,
       clock: LogicalClock::new(),
@@ -106,7 +106,7 @@ where
   ///
   /// * `record_id` - The unique identifier for the record.
   /// * `fields` - A hashmap of field names to their values.
-  fn insert(&mut self, record_id: K, fields: HashMap<String, V>) {
+  pub fn insert(&mut self, record_id: K, fields: HashMap<String, V>) {
     // Prevent re-insertion if the record is already tombstoned
     if self.tombstones.contains(&record_id) {
       println!(
@@ -138,7 +138,7 @@ where
   ///
   /// * `record_id` - The unique identifier for the record.
   /// * `updates` - A hashmap of field names to their new values.
-  fn update(&mut self, record_id: &K, updates: HashMap<String, V>) {
+  pub fn update(&mut self, record_id: &K, updates: HashMap<String, V>) {
     if self.tombstones.contains(record_id) {
       println!(
         "Update ignored: Record {:?} is deleted (tombstoned).",
@@ -171,7 +171,7 @@ where
   /// # Arguments
   ///
   /// * `record_id` - The unique identifier for the record.
-  fn delete(&mut self, record_id: &K) {
+  pub fn delete(&mut self, record_id: &K) {
     if self.tombstones.contains(record_id) {
       println!(
         "Delete ignored: Record {:?} is already deleted (tombstoned).",
@@ -211,7 +211,7 @@ where
   /// # Returns
   ///
   /// A vector of changes represented as tuples.
-  fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>> {
+  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>> {
     let mut changes = Vec::new();
 
     for (record_id, columns) in &self.data {
@@ -248,7 +248,7 @@ where
   /// # Arguments
   ///
   /// * `changes` - A slice of changes to merge.
-  fn merge_changes(&mut self, changes: &[Change<K, V>]) {
+  pub fn merge_changes(&mut self, changes: &[Change<K, V>]) {
     for change in changes {
       let record_id = &change.record_id;
       let col_name = &change.col_name;
@@ -358,7 +358,7 @@ where
   }
 
   /// Prints the current data and tombstones for debugging purposes.
-  fn print_data(&self) {
+  pub fn print_data(&self) {
     println!("Node {} Data:", self.node_id);
     for (record_id, record) in &self.data {
       if self.tombstones.contains(record_id) {
@@ -376,14 +376,14 @@ where
 
 /// Represents a single change in the CRDT.
 #[derive(Debug, Clone)]
-struct Change<K, V> {
-  record_id: K,
-  col_name: String,
-  value: Option<V>,
-  col_version: u64,
-  db_version: u64,
-  site_id: u64,
-  seq: u64,
+pub struct Change<K, V> {
+  pub record_id: K,
+  pub col_name: String,
+  pub value: Option<V>,
+  pub col_version: u64,
+  pub db_version: u64,
+  pub site_id: u64,
+  pub seq: u64,
 }
 
 #[cfg(test)]
