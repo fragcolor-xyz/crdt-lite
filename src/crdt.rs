@@ -1,5 +1,12 @@
 // crdt.rs
 
+/*
+Principles:
+Minimal Storage Overhead: Maintaining only the current state without full history.
+Transactional Syncing: Associating each commit with a unique db_version.
+Conflict Resolution: Resolving conflicts based on db_version, site_id, and seq.
+*/
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -211,12 +218,13 @@ where
   /// # Returns
   ///
   /// A vector of changes represented as tuples.
+  /// Retrieves all changes since a given `last_db_version` (inclusive).
   pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>> {
     let mut changes = Vec::new();
 
     for (record_id, columns) in &self.data {
       for (col_name, clock_info) in columns.column_versions.iter() {
-        if clock_info.db_version > last_db_version {
+        if clock_info.db_version >= last_db_version {
           let value = if col_name != "__deleted__" {
             self
               .data
@@ -371,6 +379,43 @@ where
     }
     println!("Tombstones: {:?}", self.tombstones);
     println!();
+  }
+}
+
+pub fn sync_nodes<K, V>(source: &CRDT<K, V>, target: &mut CRDT<K, V>, last_db_version: u64)
+where
+  K: Eq + Hash + Clone + Debug,
+  V: Clone + Debug,
+{
+  let changes = source.get_changes_since(last_db_version);
+  target.merge_changes(&changes);
+}
+
+pub struct NodeState<K, V>
+where
+  K: Eq + Hash + Clone + Debug,
+  V: Clone + Debug,
+{
+  crdt: CRDT<K, V>,
+  last_db_version: u64,
+}
+
+impl<K, V> NodeState<K, V>
+where
+  K: Eq + Hash + Clone + Debug,
+  V: Clone + Debug,
+{
+  pub fn new(node_id: u64) -> Self {
+    NodeState {
+      crdt: CRDT::new(node_id),
+      last_db_version: 0,
+    }
+  }
+
+  pub fn sync_from(&mut self, source: &CRDT<K, V>) {
+    let changes = source.get_changes_since(self.last_db_version);
+    self.crdt.merge_changes(&changes);
+    self.last_db_version = self.crdt.clock.current_time();
   }
 }
 
@@ -782,5 +827,418 @@ mod tests {
     assert!(node2.data.get(&record_id).unwrap().fields.is_empty());
     assert!(node1.tombstones.contains(&record_id));
     assert!(node2.tombstones.contains(&record_id));
+  }
+}
+
+#[cfg(test)]
+mod additional_tests {
+  use super::*;
+  use std::collections::HashMap;
+  use uuid::Uuid;
+
+  /// Helper function to create a unique UUID string.
+  fn new_uuid() -> String {
+    Uuid::new_v4().to_string()
+  }
+
+  /// Helper function to synchronize two nodes and update their last_db_version.
+  fn sync_nodes<K, V>(source: &CRDT<K, V>, target: &mut CRDT<K, V>, last_db_version: &mut u64)
+  where
+    K: Eq + Hash + Clone + Debug,
+    V: Clone + Debug,
+  {
+    let changes = source.get_changes_since(*last_db_version);
+    target.merge_changes(&changes);
+    // Update last_db_version to the current max db_version in source
+    if let Some(max_version) = source
+      .data
+      .values()
+      .flat_map(|r| r.column_versions.values())
+      .map(|cv| cv.db_version)
+      .max()
+    {
+      *last_db_version = max_version;
+    }
+  }
+
+  #[test]
+  fn test_offline_changes_then_merge() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Both nodes start with an empty state
+
+    // Node1 inserts a record
+    let record_id1 = new_uuid();
+    let mut fields1 = HashMap::new();
+    fields1.insert("id".to_string(), record_id1.clone());
+    fields1.insert("tag".to_string(), "Node1Tag".to_string());
+    node1.insert(record_id1.clone(), fields1.clone());
+
+    // Node2 is offline and inserts a different record
+    let record_id2 = new_uuid();
+    let mut fields2 = HashMap::new();
+    fields2.insert("id".to_string(), record_id2.clone());
+    fields2.insert("tag".to_string(), "Node2Tag".to_string());
+    node2.insert(record_id2.clone(), fields2.clone());
+
+    // Now, node2 comes online and merges changes from node1
+    let mut last_db_version_node2 = 0;
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+
+    // Similarly, node1 merges changes from node2
+    let mut last_db_version_node1 = 0;
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // Both nodes should now have both records
+    assert!(node1.data.contains_key(&record_id1));
+    assert!(node1.data.contains_key(&record_id2));
+    assert!(node2.data.contains_key(&record_id1));
+    assert!(node2.data.contains_key(&record_id2));
+    assert_eq!(node1.data, node2.data);
+  }
+
+  #[test]
+  fn test_multiple_offline_merges() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Track last_db_version for each node
+    let mut last_db_version_node1 = 0;
+    let mut last_db_version_node2 = 0;
+
+    // Node1 inserts two records
+    let record_id1 = new_uuid();
+    let mut fields1 = HashMap::new();
+    fields1.insert("id".to_string(), record_id1.clone());
+    fields1.insert("tag".to_string(), "Node1Tag1".to_string());
+    node1.insert(record_id1.clone(), fields1.clone());
+
+    let record_id2 = new_uuid();
+    let mut fields2 = HashMap::new();
+    fields2.insert("id".to_string(), record_id2.clone());
+    fields2.insert("tag".to_string(), "Node1Tag2".to_string());
+    node1.insert(record_id2.clone(), fields2.clone());
+
+    // Node2 is offline and inserts one record
+    let record_id3 = new_uuid();
+    let mut fields3 = HashMap::new();
+    fields3.insert("id".to_string(), record_id3.clone());
+    fields3.insert("tag".to_string(), "Node2Tag1".to_string());
+    node2.insert(record_id3.clone(), fields3.clone());
+
+    // Node2 performs an update on its record
+    let mut updates_node2 = HashMap::new();
+    updates_node2.insert("tag".to_string(), "Node2Tag1Updated".to_string());
+    node2.update(&record_id3, updates_node2.clone());
+
+    // Node1 performs an update on record_id1
+    let mut updates_node1 = HashMap::new();
+    updates_node1.insert("tag".to_string(), "Node1Tag1Updated".to_string());
+    node1.update(&record_id1, updates_node1.clone());
+
+    // First merge: node1 merges changes from node2
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // Second merge: node2 merges changes from node1
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+
+    // Third merge: node1 merges any new changes from node2
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // Both nodes should now have all three records
+    assert!(node1.data.contains_key(&record_id1));
+    assert!(node1.data.contains_key(&record_id2));
+    assert!(node1.data.contains_key(&record_id3));
+    assert!(node2.data.contains_key(&record_id1));
+    assert!(node2.data.contains_key(&record_id2));
+    assert!(node2.data.contains_key(&record_id3));
+
+    // Verify updates
+    assert_eq!(
+      node1
+        .data
+        .get(&record_id1)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      "Node1Tag1Updated"
+    );
+    assert_eq!(
+      node1
+        .data
+        .get(&record_id3)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      "Node2Tag1Updated"
+    );
+    assert_eq!(node1.data, node2.data);
+  }
+
+  #[test]
+  fn test_deletion_and_reinsertion_with_different_versions() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Track last_db_version for each node
+    let mut last_db_version_node1 = 0;
+    let mut last_db_version_node2 = 0;
+
+    // Node1 inserts a record
+    let record_id = new_uuid();
+    let mut fields = HashMap::new();
+    fields.insert("id".to_string(), record_id.clone());
+    fields.insert("tag".to_string(), "InitialTag".to_string());
+    node1.insert(record_id.clone(), fields.clone());
+
+    // Merge Node1's insertion into Node2
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+
+    // Node1 deletes the record
+    node1.delete(&record_id);
+
+    // Node2 updates the record while offline
+    let mut updates_node2 = HashMap::new();
+    updates_node2.insert("tag".to_string(), "Node2UpdatedTag".to_string());
+    node2.update(&record_id, updates_node2.clone());
+
+    // Merge Node1's deletion into Node2
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+
+    // Merge Node2's update into Node1
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // The deletion should prevail since it has a higher db_version
+    assert!(node1.data.get(&record_id).unwrap().fields.is_empty());
+    assert!(node2.data.get(&record_id).unwrap().fields.is_empty());
+    assert!(node1.tombstones.contains(&record_id));
+    assert!(node2.tombstones.contains(&record_id));
+  }
+
+  #[test]
+  fn test_conflicting_updates_with_different_last_db_versions() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Track last_db_version for each node
+    let mut last_db_version_node1 = 0;
+    let mut last_db_version_node2 = 0;
+
+    // Both nodes insert the same record
+    let record_id = new_uuid();
+    let mut fields1 = HashMap::new();
+    fields1.insert("id".to_string(), record_id.clone());
+    fields1.insert("tag".to_string(), "InitialTag".to_string());
+    node1.insert(record_id.clone(), fields1.clone());
+
+    let mut fields2 = HashMap::new();
+    fields2.insert("id".to_string(), record_id.clone());
+    fields2.insert("tag".to_string(), "InitialTag".to_string());
+    node2.insert(record_id.clone(), fields2.clone());
+
+    // Merge initial inserts
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // Node1 updates 'tag' twice
+    let mut updates_node1 = HashMap::new();
+    updates_node1.insert("tag".to_string(), "Node1Tag1".to_string());
+    node1.update(&record_id, updates_node1.clone());
+
+    updates_node1.insert("tag".to_string(), "Node1Tag2".to_string());
+    node1.update(&record_id, updates_node1.clone());
+
+    // Node2 updates 'tag' once
+    let mut updates_node2 = HashMap::new();
+    updates_node2.insert("tag".to_string(), "Node2Tag1".to_string());
+    node2.update(&record_id, updates_node2.clone());
+
+    // Merge node1's changes into node2
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+
+    // Merge node2's changes into node1
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+
+    // The 'tag' should reflect the latest update based on db_version and site_id
+    // Assuming node1 has a higher db_version due to two updates
+    let final_tag = "Node1Tag2";
+
+    assert_eq!(
+      node1
+        .data
+        .get(&record_id)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      final_tag
+    );
+    assert_eq!(
+      node2
+        .data
+        .get(&record_id)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      final_tag
+    );
+    assert_eq!(node1.data, node2.data);
+  }
+
+  #[test]
+  fn test_clock_synchronization_after_merges() {
+    // Initialize three nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+    let mut node3: CRDT<String, String> = CRDT::new(3);
+
+    // Track last_db_version for each node
+    let mut last_db_version_node1 = 0;
+    let mut last_db_version_node2 = 0;
+    let mut last_db_version_node3 = 0;
+
+    // Node1 inserts a record
+    let record_id1 = new_uuid();
+    let mut fields1 = HashMap::new();
+    fields1.insert("id".to_string(), record_id1.clone());
+    fields1.insert("tag".to_string(), "Node1Tag".to_string());
+    node1.insert(record_id1.clone(), fields1.clone());
+
+    // Node2 inserts another record
+    let record_id2 = new_uuid();
+    let mut fields2 = HashMap::new();
+    fields2.insert("id".to_string(), record_id2.clone());
+    fields2.insert("tag".to_string(), "Node2Tag".to_string());
+    node2.insert(record_id2.clone(), fields2.clone());
+
+    // Node3 inserts a third record
+    let record_id3 = new_uuid();
+    let mut fields3 = HashMap::new();
+    fields3.insert("id".to_string(), record_id3.clone());
+    fields3.insert("tag".to_string(), "Node3Tag".to_string());
+    node3.insert(record_id3.clone(), fields3.clone());
+
+    // First round of merges
+    // Merge node1's changes into node2 and node3
+    sync_nodes(&node1, &mut node2, &mut last_db_version_node2);
+    sync_nodes(&node1, &mut node3, &mut last_db_version_node3);
+
+    // Merge node2's changes into node1 and node3
+    sync_nodes(&node2, &mut node1, &mut last_db_version_node1);
+    sync_nodes(&node2, &mut node3, &mut last_db_version_node3);
+
+    // Merge node3's changes into node1 and node2
+    sync_nodes(&node3, &mut node1, &mut last_db_version_node1);
+    sync_nodes(&node3, &mut node2, &mut last_db_version_node2);
+
+    // All nodes should have all three records
+    assert_eq!(node1.data, node2.data);
+    assert_eq!(node2.data, node3.data);
+    assert_eq!(node1.data, node3.data);
+
+    // Check that logical clocks are synchronized
+    // Assuming each insert increments db_version by 1
+    // Total inserts: 3 (one per node)
+    let expected_max_db_version = 3;
+    assert_eq!(node1.clock.current_time(), expected_max_db_version);
+    assert_eq!(node2.clock.current_time(), expected_max_db_version);
+    assert_eq!(node3.clock.current_time(), expected_max_db_version);
+  }
+
+  #[test]
+  fn test_atomic_sync_per_transaction() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Node1 inserts a record
+    let record_id = new_uuid();
+    let mut fields = HashMap::new();
+    fields.insert("id".to_string(), record_id.clone());
+    fields.insert("tag".to_string(), "InitialTag".to_string());
+    node1.insert(record_id.clone(), fields.clone());
+
+    // Sync immediately after the transaction
+    let changes_node1 = node1.get_changes_since(0);
+    node2.merge_changes(&changes_node1);
+
+    // Verify synchronization
+    assert!(node2.data.contains_key(&record_id));
+    assert_eq!(
+      node2
+        .data
+        .get(&record_id)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      "InitialTag"
+    );
+  }
+
+  #[test]
+  fn test_concurrent_updates() {
+    // Initialize two nodes
+    let mut node1: CRDT<String, String> = CRDT::new(1);
+    let mut node2: CRDT<String, String> = CRDT::new(2);
+
+    // Insert a record on node1
+    let record_id = new_uuid();
+    let mut fields = HashMap::new();
+    fields.insert("id".to_string(), record_id.clone());
+    fields.insert("tag".to_string(), "InitialTag".to_string());
+    node1.insert(record_id.clone(), fields.clone());
+
+    // Merge to node2
+    let changes_node1 = node1.get_changes_since(0);
+    node2.merge_changes(&changes_node1);
+
+    // Concurrently update 'tag' on both nodes
+    let mut updates_node1 = HashMap::new();
+    updates_node1.insert("tag".to_string(), "Node1TagUpdate".to_string());
+    node1.update(&record_id, updates_node1.clone());
+
+    let mut updates_node2 = HashMap::new();
+    updates_node2.insert("tag".to_string(), "Node2TagUpdate".to_string());
+    node2.update(&record_id, updates_node2.clone());
+
+    // Merge changes
+    let changes_from_node1 = node1.get_changes_since(0);
+    node2.merge_changes(&changes_from_node1);
+
+    let changes_from_node2 = node2.get_changes_since(0);
+    node1.merge_changes(&changes_from_node2);
+
+    // Conflict resolution based on site_id
+    let expected_tag = "Node2TagUpdate";
+
+    assert_eq!(
+      node1
+        .data
+        .get(&record_id)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      expected_tag
+    );
+    assert_eq!(
+      node2
+        .data
+        .get(&record_id)
+        .unwrap()
+        .fields
+        .get("tag")
+        .unwrap(),
+      expected_tag
+    );
   }
 }
