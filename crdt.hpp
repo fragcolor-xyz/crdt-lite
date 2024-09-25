@@ -390,27 +390,4 @@ template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V>
   target.merge_changes(std::move(changes));
 }
 
-/// Represents the state of a node, tracking the last integrated db_version.
-template <typename K, typename V> struct NodeState {
-  CRDT<K, V> crdt;
-  uint64_t last_db_version;
-
-  NodeState(CrdtNodeId node_id) : crdt(node_id), last_db_version(0) {}
-
-  void sync_from(const CRDT<K, V> &source_crdt) {
-    auto changes = source_crdt.get_changes_since(last_db_version);
-    crdt.merge_changes(changes);
-    // Update last_db_version to the current max db_version in source_crdt
-    uint64_t max_version = 0;
-    for (const auto &change : changes) {
-      if (change.db_version > max_version) {
-        max_version = change.db_version;
-      }
-    }
-    if (max_version > last_db_version) {
-      last_db_version = max_version;
-    }
-  }
-};
-
 #endif // CRDT_HPP
