@@ -44,10 +44,10 @@ int main() {
     auto changes2 = node2.insert_or_update(record_id, fields2);
 
     // Merge node2's changes into node1
-    node1.merge_changes(changes2);
+    node1.merge_changes(std::move(changes2));
 
     // Merge node1's changes into node2
-    node2.merge_changes(changes1);
+    node2.merge_changes(std::move(changes1));
 
     // Both nodes should resolve the conflict and have the same data
     assert_true(node1.get_data() == node2.get_data(), "Basic Insert and Merge: Data mismatch");
@@ -70,8 +70,8 @@ int main() {
     auto changes_init2 = node2.insert_or_update(record_id, fields);
 
     // Merge initial inserts
-    node1.merge_changes(changes_init2);
-    node2.merge_changes(changes_init1);
+    node1.merge_changes(std::move(changes_init2));
+    node2.merge_changes(std::move(changes_init1));
 
     // Node1 updates 'tag'
     CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1UpdatedTag"}};
@@ -82,8 +82,8 @@ int main() {
     auto change_update2 = node2.insert_or_update(record_id, updates2);
 
     // Merge changes
-    node1.merge_changes(change_update2);
-    node2.merge_changes(change_update1);
+    node1.merge_changes(std::move(change_update2));
+    node2.merge_changes(std::move(change_update1));
 
     // Conflict resolved based on site_id (Node2 has higher site_id)
     assert_true(node1.get_data().at(record_id).fields.at("tag") == "Node2UpdatedTag",
@@ -103,13 +103,13 @@ int main() {
     auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    node2.merge_changes(changes_init);
+    node2.merge_changes(std::move(changes_init));
 
     // Node1 deletes the record
     auto changes_delete = node1.delete_record(record_id);
 
     // Merge the deletion to node2
-    node2.merge_changes(changes_delete);
+    node2.merge_changes(std::move(changes_delete));
 
     // Both nodes should reflect the deletion
     assert_true(node1.get_data().at(record_id).fields.empty(), "Delete and Merge: Node1 should have empty fields");
@@ -135,14 +135,14 @@ int main() {
     auto changes_delete = node1.delete_record(record_id);
 
     // Merge changes to node2
-    node2.merge_changes(changes_insert);
-    node2.merge_changes(changes_delete);
+    node2.merge_changes(std::move(changes_insert));
+    node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
     auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
 
     // Merge changes back to node1
-    node1.merge_changes(changes_attempt_insert);
+    node1.merge_changes(std::move(changes_attempt_insert));
 
     // Node2 should respect the tombstone
     assert_true(node2.get_data().at(record_id).fields.empty(), "Tombstone Handling: Node2 should have empty fields");
@@ -165,8 +165,8 @@ int main() {
     auto changes2 = node2.insert_or_update(record_id, fields2);
 
     // Merge changes
-    node1.merge_changes(changes2);
-    node2.merge_changes(changes1);
+    node1.merge_changes(std::move(changes2));
+    node2.merge_changes(std::move(changes1));
 
     // Both nodes update the 'tag' field multiple times
     CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1Tag1"}};
@@ -182,10 +182,10 @@ int main() {
     auto changes_update4 = node2.insert_or_update(record_id, updates2);
 
     // Merge changes
-    node1.merge_changes(changes_update4);
-    node2.merge_changes(changes_update2);
-    node2.merge_changes(changes_update1);
-    node1.merge_changes(changes_update3);
+    node1.merge_changes(std::move(changes_update4));
+    node2.merge_changes(std::move(changes_update2));
+    node2.merge_changes(std::move(changes_update1));
+    node1.merge_changes(std::move(changes_update3));
 
     // Since node2 has a higher site_id, its latest update should prevail
     CrdtString expected_tag = "Node2Tag2";
@@ -206,7 +206,7 @@ int main() {
     auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Node2 receives the change
-    node2.merge_changes(changes_insert);
+    node2.merge_changes(std::move(changes_insert));
 
     // Node2's clock should be updated
     assert_true(node2.get_clock().current_time() > 0, "Logical Clock Update: Node2 clock should be greater than 0");
@@ -231,8 +231,8 @@ int main() {
     auto changes2 = node2.insert_or_update(record_id2, fields2);
 
     // Merge changes
-    node1.merge_changes(changes2);
-    node2.merge_changes(changes1);
+    node1.merge_changes(std::move(changes2));
+    node2.merge_changes(std::move(changes1));
 
     // Both nodes should have both records
     assert_true(node1.get_data().find(record_id1) != node1.get_data().end(),
@@ -258,7 +258,7 @@ int main() {
     auto changes_init = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    node2.merge_changes(changes_init);
+    node2.merge_changes(std::move(changes_init));
 
     // Node2 updates the record
     CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "UpdatedByNode2"}};
@@ -269,8 +269,8 @@ int main() {
     auto changes_update1 = node1.insert_or_update(record_id, updates1);
 
     // Merge changes
-    node1.merge_changes(changes_update2);
-    node2.merge_changes(changes_update1);
+    node1.merge_changes(std::move(changes_update2));
+    node2.merge_changes(std::move(changes_update1));
 
     // Since node2 has a higher site_id, its latest update should prevail
     CrdtString expected_tag = "UpdatedByNode2";
@@ -292,14 +292,14 @@ int main() {
     auto changes_delete = node1.delete_record(record_id);
 
     // Merge deletion to node2
-    node2.merge_changes(changes_insert);
-    node2.merge_changes(changes_delete);
+    node2.merge_changes(std::move(changes_insert));
+    node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
     auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
 
     // Merge changes back to node1
-    node1.merge_changes(changes_attempt_insert);
+    node1.merge_changes(std::move(changes_attempt_insert));
 
     // The deletion should prevail
     assert_true(node1.get_data().at(record_id).fields.empty(), "Inserting After Deletion: Node1 should have empty fields");
@@ -364,8 +364,8 @@ int main() {
     auto changes_init2 = node2.insert_or_update(record_id, fields2);
 
     // Merge initial inserts
-    node1.merge_changes(changes_init2);
-    node2.merge_changes(changes_init1);
+    node1.merge_changes(std::move(changes_init2));
+    node2.merge_changes(std::move(changes_init1));
 
     // Node1 updates 'tag' twice
     CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1Tag1"}};
@@ -379,11 +379,11 @@ int main() {
     auto changes_node2_update1 = node2.insert_or_update(record_id, updates_node2);
 
     // Merge node1's changes into node2
-    node2.merge_changes(changes_node1_update1);
-    node2.merge_changes(changes_node1_update2);
+    node2.merge_changes(std::move(changes_node1_update1));
+    node2.merge_changes(std::move(changes_node1_update2));
 
     // Merge node2's changes into node1
-    node1.merge_changes(changes_node2_update1);
+    node1.merge_changes(std::move(changes_node2_update1));
 
     // The 'tag' should reflect the latest update based on db_version and site_id Assuming node1 has a higher db_version due to
     // two updates
@@ -476,7 +476,7 @@ int main() {
     auto changes_node1 = node1.insert_or_update(record_id, fields);
 
     // Sync immediately after the transaction
-    node2.merge_changes(changes_node1);
+    node2.merge_changes(std::move(changes_node1));
 
     // Verify synchronization
     assert_true(node2.get_data().find(record_id) != node2.get_data().end(),
@@ -496,7 +496,7 @@ int main() {
     auto changes_insert = node1.insert_or_update(record_id, fields);
 
     // Merge to node2
-    node2.merge_changes(changes_insert);
+    node2.merge_changes(std::move(changes_insert));
 
     // Concurrently update 'tag' on both nodes
     CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1TagUpdate"}};
@@ -506,8 +506,8 @@ int main() {
     auto changes_update2 = node2.insert_or_update(record_id, updates_node2);
 
     // Merge changes
-    node1.merge_changes(changes_update2);
-    node2.merge_changes(changes_update1);
+    node1.merge_changes(std::move(changes_update2));
+    node2.merge_changes(std::move(changes_update1));
 
     // Conflict resolution based on site_id (Node2 has higher site_id)
     CrdtString expected_tag = "Node2TagUpdate";

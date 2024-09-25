@@ -254,15 +254,15 @@ public:
   /// # Arguments
   ///
   /// * `changes` - A slice of changes to merge.
-  void merge_changes(const CrdtVector<Change<K, V>> &changes) {
-    for (const auto &change : changes) {
+  void merge_changes(CrdtVector<Change<K, V>> &&changes) {
+    for (auto &&change : changes) {
       const K &record_id = change.record_id;
       const CrdtString &col_name = change.col_name;
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
       uint64_t remote_seq = change.seq;
-      std::optional<V> remote_value = change.value;
+      std::optional<V> remote_value = std::move(change.value);
 
       // Update logical clock
       clock_.update(remote_db_version);
@@ -375,7 +375,7 @@ private:
 /// changes.
 template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
-  target.merge_changes(changes);
+
   // Update last_db_version to the current max db_version in source
   uint64_t max_version = 0;
   for (const auto &change : changes) {
@@ -386,6 +386,8 @@ template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V>
   if (max_version > last_db_version) {
     last_db_version = max_version;
   }
+
+  target.merge_changes(std::move(changes));
 }
 
 /// Represents the state of a node, tracking the last integrated db_version.
