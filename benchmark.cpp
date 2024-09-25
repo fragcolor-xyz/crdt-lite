@@ -62,7 +62,7 @@ private:
       fields.emplace("field1", "value1_" + std::to_string(i));
       fields.emplace("field2", "value2_" + std::to_string(i));
 
-      node1.insert_or_update(rid, fields);
+      node1.insert_or_update(rid, std::move(fields));
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -87,7 +87,7 @@ private:
       int field_num = field_dist(rng);
       fields.emplace("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates));
 
-      node1.insert_or_update(rid, fields);
+      node1.insert_or_update(rid, std::move(fields));
       updates++;
     }
 

@@ -55,8 +55,7 @@ struct ColumnVersion {
   CrdtNodeId node_id;
   uint64_t seq;
 
-  ColumnVersion(uint64_t c = 0, uint64_t d = 0, CrdtNodeId n = 0, uint64_t s = 0)
-      : col_version(c), db_version(d), node_id(n), seq(s) {}
+  ColumnVersion(uint64_t c, uint64_t d, CrdtNodeId n, uint64_t s) : col_version(c), db_version(d), node_id(n), seq(s) {}
 };
 
 /// Represents a record in the CRDT.
@@ -126,7 +125,7 @@ public:
   /// # Returns
   ///
   /// A vector of `Change` objects representing the changes made.
-  CrdtVector<Change<K, V>> insert_or_update(const K &record_id, const CrdtMap<CrdtString, V> &fields) {
+  CrdtVector<Change<K, V>> insert_or_update(const K &record_id, CrdtMap<CrdtString, V> &&fields) {
     CrdtVector<Change<K, V>> changes;
     uint64_t db_version = clock_.tick();
 
@@ -141,15 +140,15 @@ public:
     if (is_new_record) {
       // Initialize column versions
       CrdtMap<CrdtString, ColumnVersion> column_versions;
-      for (const auto &[col_name, _] : fields) {
+      for (const auto &[col_name, value] : fields) {
         column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
         // Create a Change object for each field inserted
-        changes.emplace_back(Change<K, V>(record_id, col_name, fields.at(col_name), 1, db_version, node_id_, 0));
+        changes.emplace_back(Change<K, V>(record_id, col_name, value, 1, db_version, node_id_, 0));
       }
 
       // Insert the record
       Record<V> record;
-      record.fields = fields;
+      record.fields = std::move(fields);
       record.column_versions = std::move(column_versions);
       data_.emplace(record_id, std::move(record));
     } else {
@@ -157,23 +156,26 @@ public:
       Record<V> &record = data_.at(record_id);
       for (const auto &[col_name, value] : fields) {
         // Update the value
-        record.fields[col_name] = value;
+        record.fields.insert_or_assign(col_name, std::move(value));
 
         // Update the clock for this column
         auto col_it = record.column_versions.find(col_name);
+        uint64_t col_version;
+        uint64_t seq;
         if (col_it != record.column_versions.end()) {
-          col_it->second.col_version += 1;
           col_it->second.db_version = db_version;
-          col_it->second.seq += 1;
           col_it->second.node_id = node_id_;
+          col_version = col_it->second.col_version += 1;
+          seq = col_it->second.seq += 1;
         } else {
           // If the column does not exist, initialize it
           record.column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
+          col_version = 1;
+          seq = 0;
         }
 
         // Create a Change object for each field updated
-        changes.emplace_back(Change<K, V>(record_id, col_name, value, record.column_versions[col_name].col_version, db_version,
-                                          node_id_, record.column_versions[col_name].seq));
+        changes.emplace_back(Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, seq));
       }
     }
 
@@ -332,7 +334,8 @@ public:
           }
 
           // Update the column version info
-          record.column_versions[col_name] = ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq);
+          record.column_versions.insert_or_assign(
+              col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
         }
       }
     }

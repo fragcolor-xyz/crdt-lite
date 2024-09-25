@@ -28,20 +28,21 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
+    CrdtString form_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id},
-                                                            {"form_id", generate_uuid()},
+                                                            {"form_id", form_id},
                                                             {"tag", "Node1Tag"},
                                                             {"created_at", "2023-10-01T12:00:00Z"},
                                                             {"created_by", "User1"}};
-    auto changes1 = node1.insert_or_update(record_id, fields1);
+    auto changes1 = node1.insert_or_update(record_id, std::move(fields1));
 
     // Node2 inserts the same record with different data
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id},
-                                                            {"form_id", fields1.at("form_id")},
+                                                            {"form_id", form_id},
                                                             {"tag", "Node2Tag"},
                                                             {"created_at", "2023-10-01T12:05:00Z"},
                                                             {"created_by", "User2"}};
-    auto changes2 = node2.insert_or_update(record_id, fields2);
+    auto changes2 = node2.insert_or_update(record_id, std::move(fields2));
 
     // Merge node2's changes into node1
     node1.merge_changes(std::move(changes2));
@@ -66,8 +67,8 @@ int main() {
     // Insert a shared record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init1 = node1.insert_or_update(record_id, fields);
-    auto changes_init2 = node2.insert_or_update(record_id, fields);
+    auto changes_init1 = node1.insert_or_update(record_id, std::move(fields));
+    auto changes_init2 = node2.insert_or_update(record_id, std::move(fields));
 
     // Merge initial inserts
     node1.merge_changes(std::move(changes_init2));
@@ -75,11 +76,11 @@ int main() {
 
     // Node1 updates 'tag'
     CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1UpdatedTag"}};
-    auto change_update1 = node1.insert_or_update(record_id, updates1);
+    auto change_update1 = node1.insert_or_update(record_id, std::move(updates1));
 
     // Node2 updates 'tag'
     CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2UpdatedTag"}};
-    auto change_update2 = node2.insert_or_update(record_id, updates2);
+    auto change_update2 = node2.insert_or_update(record_id, std::move(updates2));
 
     // Merge changes
     node1.merge_changes(std::move(change_update2));
@@ -100,7 +101,7 @@ int main() {
     // Insert and sync a record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "ToBeDeleted"}};
-    auto changes_init = node1.insert_or_update(record_id, fields);
+    auto changes_init = node1.insert_or_update(record_id, std::move(fields));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_init));
@@ -131,7 +132,7 @@ int main() {
     // Insert a record and delete it on node1
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
-    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
     auto changes_delete = node1.delete_record(record_id);
 
     // Merge changes to node2
@@ -139,7 +140,7 @@ int main() {
     node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
-    auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
+    auto changes_attempt_insert = node2.insert_or_update(record_id, std::move(fields));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -161,8 +162,8 @@ int main() {
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "Node1Tag"}};
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "Node2Tag"}};
-    auto changes1 = node1.insert_or_update(record_id, fields1);
-    auto changes2 = node2.insert_or_update(record_id, fields2);
+    auto changes1 = node1.insert_or_update(record_id, std::move(fields1));
+    auto changes2 = node2.insert_or_update(record_id, std::move(fields2));
 
     // Merge changes
     node1.merge_changes(std::move(changes2));
@@ -170,16 +171,16 @@ int main() {
 
     // Both nodes update the 'tag' field multiple times
     CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1Tag1"}};
-    auto changes_update1 = node1.insert_or_update(record_id, updates1);
+    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates1));
 
     updates1 = {{"tag", "Node1Tag2"}};
-    auto changes_update2 = node1.insert_or_update(record_id, updates1);
+    auto changes_update2 = node1.insert_or_update(record_id, std::move(updates1));
 
     CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2Tag1"}};
-    auto changes_update3 = node2.insert_or_update(record_id, updates2);
+    auto changes_update3 = node2.insert_or_update(record_id, std::move(updates2));
 
     updates2 = {{"tag", "Node2Tag2"}};
-    auto changes_update4 = node2.insert_or_update(record_id, updates2);
+    auto changes_update4 = node2.insert_or_update(record_id, std::move(updates2));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update4));
@@ -203,7 +204,7 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Node1Tag"}};
-    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
 
     // Node2 receives the change
     node2.merge_changes(std::move(changes_insert));
@@ -223,12 +224,12 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id1 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Record"}};
-    auto changes1 = node1.insert_or_update(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
 
     // Node2 inserts a different record
     CrdtString record_id2 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Record"}};
-    auto changes2 = node2.insert_or_update(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
 
     // Merge changes
     node1.merge_changes(std::move(changes2));
@@ -255,18 +256,18 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init = node1.insert_or_update(record_id, fields);
+    auto changes_init = node1.insert_or_update(record_id, std::move(fields));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_init));
 
     // Node2 updates the record
     CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "UpdatedByNode2"}};
-    auto changes_update2 = node2.insert_or_update(record_id, updates2);
+    auto changes_update2 = node2.insert_or_update(record_id, std::move(updates2));
 
     // Node1 updates the record
     CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "UpdatedByNode1"}};
-    auto changes_update1 = node1.insert_or_update(record_id, updates1);
+    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates1));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update2));
@@ -288,7 +289,7 @@ int main() {
     // Node1 inserts and deletes a record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
-    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
     auto changes_delete = node1.delete_record(record_id);
 
     // Merge deletion to node2
@@ -296,7 +297,7 @@ int main() {
     node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
-    auto changes_attempt_insert = node2.insert_or_update(record_id, fields);
+    auto changes_attempt_insert = node2.insert_or_update(record_id, std::move(fields));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -323,12 +324,12 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id1 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
-    auto changes1 = node1.insert_or_update(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
 
     // Node2 is offline and inserts a different record
     CrdtString record_id2 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
-    auto changes2 = node2.insert_or_update(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
 
     // Now, node2 comes online and merges changes from node1
     uint64_t last_db_version_node2 = 0;
@@ -360,8 +361,8 @@ int main() {
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "InitialTag"}};
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init1 = node1.insert_or_update(record_id, fields1);
-    auto changes_init2 = node2.insert_or_update(record_id, fields2);
+    auto changes_init1 = node1.insert_or_update(record_id, std::move(fields1));
+    auto changes_init2 = node2.insert_or_update(record_id, std::move(fields2));
 
     // Merge initial inserts
     node1.merge_changes(std::move(changes_init2));
@@ -369,14 +370,14 @@ int main() {
 
     // Node1 updates 'tag' twice
     CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1Tag1"}};
-    auto changes_node1_update1 = node1.insert_or_update(record_id, updates_node1);
+    auto changes_node1_update1 = node1.insert_or_update(record_id, std::move(updates_node1));
 
     updates_node1 = {{"tag", "Node1Tag2"}};
-    auto changes_node1_update2 = node1.insert_or_update(record_id, updates_node1);
+    auto changes_node1_update2 = node1.insert_or_update(record_id, std::move(updates_node1));
 
     // Node2 updates 'tag' once
     CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2Tag1"}};
-    auto changes_node2_update1 = node2.insert_or_update(record_id, updates_node2);
+    auto changes_node2_update1 = node2.insert_or_update(record_id, std::move(updates_node2));
 
     // Merge node1's changes into node2
     node2.merge_changes(std::move(changes_node1_update1));
@@ -411,17 +412,17 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id1 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
-    auto changes1 = node1.insert_or_update(record_id1, fields1);
+    auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
 
     // Node2 inserts another record
     CrdtString record_id2 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
-    auto changes2 = node2.insert_or_update(record_id2, fields2);
+    auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
 
     // Node3 inserts a third record
     CrdtString record_id3 = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields3 = {{"id", record_id3}, {"tag", "Node3Tag"}};
-    auto changes3 = node3.insert_or_update(record_id3, fields3);
+    auto changes3 = node3.insert_or_update(record_id3, std::move(fields3));
 
     // First round of merges
     // Merge node1's changes into node2 and node3
@@ -473,7 +474,7 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_node1 = node1.insert_or_update(record_id, fields);
+    auto changes_node1 = node1.insert_or_update(record_id, std::move(fields));
 
     // Sync immediately after the transaction
     node2.merge_changes(std::move(changes_node1));
@@ -493,17 +494,17 @@ int main() {
     // Insert a record on node1
     CrdtString record_id = generate_uuid();
     CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_insert = node1.insert_or_update(record_id, fields);
+    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_insert));
 
     // Concurrently update 'tag' on both nodes
     CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1TagUpdate"}};
-    auto changes_update1 = node1.insert_or_update(record_id, updates_node1);
+    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates_node1));
 
     CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2TagUpdate"}};
-    auto changes_update2 = node2.insert_or_update(record_id, updates_node2);
+    auto changes_update2 = node2.insert_or_update(record_id, std::move(updates_node2));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update2));
