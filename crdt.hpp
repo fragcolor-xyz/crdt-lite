@@ -185,62 +185,57 @@ public:
   ///
   /// # Returns
   ///
-  /// A vector of `Change` objects representing the changes made.
-  CrdtVector<Change<K, V>> insert_or_update(const K &record_id, CrdtMap<CrdtString, V> &&fields) {
+  /// A vector of `Change` objects representing the changes made, or void if ReturnChanges is false.
+  template <bool ReturnChanges = true>
+  std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> insert_or_update(const K &record_id,
+                                                                                     CrdtMap<CrdtString, V> &&fields) {
     CrdtVector<Change<K, V>> changes;
     uint64_t db_version = clock_.tick();
 
     // Check if the record is tombstoned
     if (tombstones_.find(record_id) != tombstones_.end()) {
       std::cout << "Insert/Update ignored: Record " << record_id << " is deleted (tombstoned)." << std::endl;
-      return changes; // No changes to return
+      if constexpr (ReturnChanges) {
+        return changes;
+      } else {
+        return;
+      }
     }
 
     bool is_new_record = data_.find(record_id) == data_.end();
+    Record<V> &record = is_new_record ? data_[record_id] : data_.at(record_id);
 
-    if (is_new_record) {
-      // Initialize column versions
-      CrdtMap<CrdtString, ColumnVersion> column_versions;
-      for (const auto &[col_name, value] : fields) {
-        column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
-        // Create a Change object for each field inserted
-        changes.emplace_back(Change<K, V>(record_id, col_name, value, 1, db_version, node_id_, 0));
-      }
-
-      // Insert the record
-      Record<V> record;
-      record.fields = std::move(fields);
-      record.column_versions = std::move(column_versions);
-      data_.emplace(record_id, std::move(record));
-    } else {
-      // Update existing record
-      Record<V> &record = data_.at(record_id);
-      for (const auto &[col_name, value] : fields) {
-        // Update the value
-        record.fields.insert_or_assign(col_name, std::move(value));
-
-        // Update the clock for this column
+    for (const auto &[col_name, value] : fields) {
+      uint64_t col_version, seq;
+      if (is_new_record) {
+        col_version = 1;
+        seq = 0;
+        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, seq));
+      } else {
         auto col_it = record.column_versions.find(col_name);
-        uint64_t col_version;
-        uint64_t seq;
         if (col_it != record.column_versions.end()) {
+          col_version = ++col_it->second.col_version;
+          seq = ++col_it->second.seq;
           col_it->second.db_version = db_version;
           col_it->second.node_id = node_id_;
-          col_version = col_it->second.col_version += 1;
-          seq = col_it->second.seq += 1;
         } else {
-          // If the column does not exist, initialize it
-          record.column_versions.emplace(col_name, ColumnVersion(1, db_version, node_id_, 0));
           col_version = 1;
           seq = 0;
+          record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, seq));
         }
+      }
 
-        // Create a Change object for each field updated
-        changes.emplace_back(Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, seq));
+      if constexpr (ReturnChanges) {
+        record.fields[col_name] = value;
+        changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_, seq));
+      } else {
+        record.fields[std::move(col_name)] = std::move(value);
       }
     }
 
-    return changes;
+    if constexpr (ReturnChanges) {
+      return changes;
+    }
   }
 
   /// Deletes a record by marking it as tombstoned.
@@ -251,21 +246,23 @@ public:
   ///
   /// # Returns
   ///
-  /// A vector of `Change` objects representing the deletion.
-  CrdtVector<Change<K, V>> delete_record(const K &record_id) {
+  /// A vector of `Change` objects representing the deletion, or void if ReturnChanges is false.
+  template <bool ReturnChanges = true>
+  std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> delete_record(const K &record_id) {
     CrdtVector<Change<K, V>> changes;
-
     if (tombstones_.find(record_id) != tombstones_.end()) {
       std::cout << "Delete ignored: Record " << record_id << " is already deleted (tombstoned)." << std::endl;
-      return changes; // No changes to return
+      if constexpr (ReturnChanges) {
+        return changes;
+      } else {
+        return;
+      }
     }
 
     uint64_t db_version = clock_.tick();
 
-    // Mark as tombstone
+    // Mark as tombstone and remove data
     tombstones_.emplace(record_id);
-
-    // Remove data
     data_.erase(record_id);
 
     // Insert deletion clock info
@@ -275,10 +272,10 @@ public:
     // Store deletion info in the data map
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
-    // Create a Change object for deletion
-    changes.emplace_back(Change<K, V>(record_id, "__deleted__", std::nullopt, 1, db_version, node_id_, 0));
-
-    return changes;
+    if constexpr (ReturnChanges) {
+      changes.emplace_back(Change<K, V>(record_id, "__deleted__", std::nullopt, 1, db_version, node_id_, 0));
+      return changes;
+    }
   }
 
   /// Retrieves all changes since a given `last_db_version`.
