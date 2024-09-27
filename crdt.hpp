@@ -194,7 +194,6 @@ public:
 
     // Check if the record is tombstoned
     if (tombstones_.find(record_id) != tombstones_.end()) {
-      std::cout << "Insert/Update ignored: Record " << record_id << " is deleted (tombstoned)." << std::endl;
       if constexpr (ReturnChanges) {
         return changes;
       } else {
@@ -252,7 +251,6 @@ public:
   std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> delete_record(const K &record_id) {
     CrdtVector<Change<K, V>> changes;
     if (tombstones_.find(record_id) != tombstones_.end()) {
-      std::cout << "Delete ignored: Record " << record_id << " is already deleted (tombstoned)." << std::endl;
       if constexpr (ReturnChanges) {
         return changes;
       } else {
