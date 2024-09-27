@@ -99,8 +99,8 @@ template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs
 /// Represents a single change in the CRDT.
 template <typename K, typename V> struct Change {
   K record_id;
-  CrdtString col_name;
-  std::optional<V> value; // std::nullopt represents deletion
+  std::optional<CrdtString> col_name; // std::nullopt represents tombstone of the record
+  std::optional<V> value;             // note std::nullopt represents deletion of the column, not the record
   uint64_t col_version;
   uint64_t db_version;
   CrdtNodeId node_id;
@@ -108,7 +108,7 @@ template <typename K, typename V> struct Change {
 
   Change() = default;
 
-  Change(K rid, CrdtString cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid, uint64_t s)
+  Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid, uint64_t s)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
         node_id(nid), seq(s) {}
 };
@@ -140,14 +140,14 @@ public:
     // Apply each change to reconstruct the CRDT state
     for (auto &&change : changes) {
       const K &record_id = change.record_id;
-      CrdtString col_name = std::move(change.col_name);
+      std::optional<CrdtString> col_name = std::move(change.col_name);
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
       uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = std::move(change.value);
 
-      if (col_name == "__deleted__") {
+      if (!col_name.has_value()) {
         // Handle deletion
         tombstones_.emplace(record_id);
         data_.erase(record_id);
@@ -272,7 +272,7 @@ public:
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     if constexpr (ReturnChanges) {
-      changes.emplace_back(Change<K, V>(record_id, "__deleted__", std::nullopt, 1, db_version, node_id_, 0));
+      changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, 0));
       return changes;
     }
   }
@@ -324,7 +324,7 @@ public:
 
     for (auto &&change : changes) {
       const K &record_id = change.record_id;
-      CrdtString col_name = std::move(change.col_name);
+      std::optional<CrdtString> col_name = std::move(change.col_name);
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
@@ -338,7 +338,7 @@ public:
       auto record_it = data_.find(record_id);
       ColumnVersion *local_col_info = nullptr;
       if (record_it != data_.end()) {
-        auto col_it = record_it->second.column_versions.find(col_name);
+        auto col_it = record_it->second.column_versions.find(col_name ? col_name.value() : "__deleted__");
         if (col_it != record_it->second.column_versions.end()) {
           local_col_info = &col_it->second;
         }
@@ -380,7 +380,7 @@ public:
       }
 
       if (should_accept) {
-        if (col_name == "__deleted__") {
+        if (!col_name.has_value()) {
           // Handle deletion
           tombstones_.emplace(record_id);
           data_.erase(record_id);
@@ -391,34 +391,41 @@ public:
 
           // Store deletion info in the data map
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+
+          if constexpr (ReturnAcceptedChanges) {
+            accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
+                                                       remote_db_version, remote_node_id, remote_seq));
+          }
         } else if (tombstones_.find(record_id) == tombstones_.end()) {
           // Handle insertion or update if the record is not tombstoned
           Record<V> &record = data_[record_id]; // Inserts default if not exists
 
           // Update field value
-          if (remote_value.has_value()) {
+          if (remote_value.has_value() && col_name.has_value()) {
             // move if ReturnAcceptedChanges is false, otherwise copy
             if constexpr (!ReturnAcceptedChanges) {
-              record.fields[col_name] = std::move(remote_value.value());
+              record.fields[col_name.value()] = std::move(remote_value.value());
             } else {
-              record.fields[col_name] = remote_value.value();
+              record.fields[col_name.value()] = remote_value.value();
             }
           } else {
             // If remote_value is std::nullopt, remove the field
-            record.fields.erase(col_name);
+            record.fields.erase(col_name ? col_name.value() : "__deleted__");
           }
 
           if constexpr (ReturnAcceptedChanges) {
             // Update the column version info
             record.column_versions.insert_or_assign(
-                col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+                col_name ? std::move(col_name.value()) : "__deleted__",
+                ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
 
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
                                                        remote_col_version, remote_db_version, remote_node_id, remote_seq));
           } else {
             // Update the column version info
             record.column_versions.insert_or_assign(
-                std::move(col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+                col_name ? std::move(col_name.value()) : "__deleted__",
+                ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
           }
         }
       }
