@@ -399,19 +399,28 @@ public:
 
           // Update field value
           if (remote_value.has_value()) {
-            record.fields[col_name] = std::move(remote_value.value());
+            // move if ReturnAcceptedChanges is false, otherwise copy
+            if constexpr (!ReturnAcceptedChanges) {
+              record.fields[col_name] = std::move(remote_value.value());
+            } else {
+              record.fields[col_name] = remote_value.value();
+            }
           } else {
             // If remote_value is std::nullopt, remove the field
             record.fields.erase(col_name);
           }
 
-          // Update the column version info
-          record.column_versions.insert_or_assign(
-              col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
-
           if constexpr (ReturnAcceptedChanges) {
-            accepted_changes.emplace_back(Change<K, V>(record_id, col_name, remote_value, remote_col_version, remote_db_version,
-                                                       remote_node_id, remote_seq));
+            // Update the column version info
+            record.column_versions.insert_or_assign(
+                col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+
+            accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
+                                                       remote_col_version, remote_db_version, remote_node_id, remote_seq));
+          } else {
+            // Update the column version info
+            record.column_versions.insert_or_assign(
+                std::move(col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
           }
         }
       }
