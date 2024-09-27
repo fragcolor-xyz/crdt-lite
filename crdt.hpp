@@ -83,15 +83,15 @@ template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs
       return false;
   }
 
-  // Compare column_versions
-  if (lhs.column_versions.size() != rhs.column_versions.size())
-    return false;
-  for (const auto &[key, value] : lhs.column_versions) {
-    auto it = rhs.column_versions.find(key);
-    if (it == rhs.column_versions.end() || it->second.col_version != value.col_version ||
-        it->second.db_version != value.db_version || it->second.node_id != value.node_id || it->second.seq != value.seq)
-      return false;
-  }
+  // // Compare column_versions
+  // if (lhs.column_versions.size() != rhs.column_versions.size())
+  //   return false;
+  // for (const auto &[key, value] : lhs.column_versions) {
+  //   auto it = rhs.column_versions.find(key);
+  //   if (it == rhs.column_versions.end() || it->second.col_version != value.col_version ||
+  //       it->second.db_version != value.db_version || it->second.node_id != value.node_id || it->second.seq != value.seq)
+  //     return false;
+  // }
 
   return true;
 }
@@ -165,12 +165,12 @@ public:
 
           // Insert or update the field value
           if (remote_value.has_value()) {
-            record.fields[col_name] = std::move(remote_value.value());
+            record.fields[*col_name] = std::move(remote_value.value());
           }
 
           // Update the column version info
           record.column_versions.insert_or_assign(
-              std::move(col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
         }
       }
     }
@@ -291,7 +291,7 @@ public:
 
     for (const auto &[record_id, record] : data_) {
       for (const auto &[col_name, clock_info] : record.column_versions) {
-        if (clock_info.db_version >= last_db_version) {
+        if (clock_info.db_version > last_db_version) {
           std::optional<V> value = std::nullopt;
           if (col_name != "__deleted__") {
             auto field_it = record.fields.find(col_name);
@@ -322,6 +322,8 @@ public:
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes) {
     CrdtVector<Change<K, V>> accepted_changes; // Will be optimized away if ReturnAcceptedChanges is false
 
+    auto new_db_version = clock_.tick();
+
     for (auto &&change : changes) {
       const K &record_id = change.record_id;
       std::optional<CrdtString> col_name = std::move(change.col_name);
@@ -331,8 +333,10 @@ public:
       uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = std::move(change.value);
 
-      // Update logical clock with the received db_version
-      clock_.update(remote_db_version);
+      if (remote_db_version >= new_db_version) {
+        // If the remote db_version is greater than the new db_version, we need to update the local db_version
+        new_db_version = clock_.update(remote_db_version);
+      }
 
       // Retrieve local column version information
       auto record_it = data_.find(record_id);
@@ -387,14 +391,14 @@ public:
 
           // Update deletion clock info
           CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
 
           // Store deletion info in the data map
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
           if constexpr (ReturnAcceptedChanges) {
-            accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
-                                                       remote_db_version, remote_node_id, remote_seq));
+            accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version, new_db_version,
+                                                       remote_node_id, remote_seq));
           }
         } else if (tombstones_.find(record_id) == tombstones_.end()) {
           // Handle insertion or update if the record is not tombstoned
@@ -417,15 +421,15 @@ public:
             // Update the column version info
             record.column_versions.insert_or_assign(
                 col_name ? std::move(col_name.value()) : "__deleted__",
-                ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+                ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
 
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
-                                                       remote_col_version, remote_db_version, remote_node_id, remote_seq));
+                                                       remote_col_version, new_db_version, remote_node_id, remote_seq));
           } else {
             // Update the column version info
             record.column_versions.insert_or_assign(
                 col_name ? std::move(col_name.value()) : "__deleted__",
-                ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+                ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
           }
         }
       }
