@@ -422,7 +422,7 @@ public:
           if constexpr (ReturnAcceptedChanges) {
             // Update the column version info
             record.column_versions.insert_or_assign(
-                col_name ? std::move(col_name.value()) : "__deleted__",
+                col_name ? col_name.value() : "__deleted__",
                 ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
 
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
@@ -475,7 +475,8 @@ public:
     // Use two-pointer technique to compress in-place
     size_t write = 0;
     for (size_t read = 1; read < changes.size(); ++read) {
-      if (changes[read].record_id != changes[write].record_id || changes[read].col_name != changes[write].col_name) {
+      if (changes[read].record_id != changes[write].record_id || changes[read].col_name != changes[write].col_name ||
+          !changes[write].col_name.has_value()) { // Keep record deletions
         ++write;
         if (write != read) {
           changes[write] = std::move(changes[read]);
