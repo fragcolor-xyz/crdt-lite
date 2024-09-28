@@ -82,15 +82,7 @@ template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs
       return false;
   }
 
-  // // Compare column_versions
-  // if (lhs.column_versions.size() != rhs.column_versions.size())
-  //   return false;
-  // for (const auto &[key, value] : lhs.column_versions) {
-  //   auto it = rhs.column_versions.find(key);
-  //   if (it == rhs.column_versions.end() || it->second.col_version != value.col_version ||
-  //       it->second.db_version != value.db_version || it->second.node_id != value.node_id || it->second.seq != value.seq)
-  //     return false;
-  // }
+  // We don't care about column_versions, as those will be different for each node
 
   return true;
 }
