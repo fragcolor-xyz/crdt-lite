@@ -23,7 +23,6 @@ using CrdtNodeId = uint64_t;
 #endif
 
 #include <algorithm>
-#include <cassert>
 #include <iostream>
 #include <optional>
 
@@ -117,6 +116,7 @@ template <typename K, typename V> struct Change {
 template <typename K, typename V> class CRDT {
 public:
   // Create a new empty CRDT
+  // Complexity: O(1)
   CRDT(CrdtNodeId node_id) : node_id_(node_id), clock_(), data_(), tombstones_() {}
 
   /// Create a CRDT from a list of changes (e.g., loaded from disk).
@@ -125,6 +125,8 @@ public:
   ///
   /// * `node_id` - The unique identifier for this CRDT node.
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
+  ///
+  /// Complexity: O(n), where n is the number of changes
   CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
     // Determine the maximum db_version from the changes
     uint64_t max_db_version = 0;
@@ -186,6 +188,8 @@ public:
   /// # Returns
   ///
   /// A vector of `Change` objects representing the changes made, or void if ReturnChanges is false.
+  ///
+  /// Complexity: O(m), where m is the number of fields in the input
   template <bool ReturnChanges = true>
   std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> insert_or_update(const K &record_id,
                                                                                      CrdtMap<CrdtString, V> &&fields) {
@@ -247,6 +251,8 @@ public:
   /// # Returns
   ///
   /// A vector of `Change` objects representing the deletion, or void if ReturnChanges is false.
+  ///
+  /// Complexity: O(1)
   template <bool ReturnChanges = true>
   std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> delete_record(const K &record_id) {
     CrdtVector<Change<K, V>> changes;
@@ -286,6 +292,8 @@ public:
   /// # Returns
   ///
   /// A vector of changes.
+  ///
+  /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
   CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
     CrdtVector<Change<K, V>> changes;
 
@@ -318,6 +326,8 @@ public:
   ///
   /// If `ReturnAcceptedChanges` is `true`, returns a vector of accepted changes.
   /// Otherwise, returns `void`.
+  ///
+  /// Complexity: O(c), where c is the number of changes to merge
   template <bool ReturnAcceptedChanges = false>
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes) {
     CrdtVector<Change<K, V>> accepted_changes; // Will be optimized away if ReturnAcceptedChanges is false
@@ -441,6 +451,8 @@ public:
   }
 
   /// Prints the current data and tombstones for debugging purposes.
+  ///
+  /// Complexity: O(n * m), where n is the number of records and m is the average number of fields per record
   void print_data() const {
     std::cout << "Node " << node_id_ << " Data:" << std::endl;
     for (const auto &[record_id, record] : data_) {
@@ -460,8 +472,10 @@ public:
   }
 
   // Accessors for testing
+  // Complexity: O(1)
   const LogicalClock &get_clock() const { return clock_; }
 
+  // Complexity: O(1)
   const CrdtMap<K, Record<V>> &get_data() const { return data_; }
 
 private:
@@ -475,6 +489,9 @@ private:
 /// Retrieves changes from the source since last_db_version and merges them into
 /// the target. Updates last_db_version to prevent reprocessing the same
 /// changes.
+///
+/// Complexity: O(c + m), where c is the number of changes since last_db_version,
+/// and m is the complexity of merge_changes
 template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
 
