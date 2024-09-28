@@ -442,6 +442,50 @@ public:
     }
   }
 
+  /// Compresses a vector of changes in-place by removing redundant changes that overwrite each other.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A vector of changes to compress (will be modified in-place).
+  ///
+  /// # Returns
+  ///
+  /// The number of changes remaining after compression.
+  ///
+  /// Complexity: O(n log n), where n is the number of changes
+  static void compress_changes(CrdtVector<Change<K, V>> &changes) {
+    if (changes.empty())
+      return;
+
+    // Sort changes based on record_id, col_name, and then by precedence rules
+    std::sort(changes.begin(), changes.end(), [](const Change<K, V> &a, const Change<K, V> &b) {
+      if (a.record_id != b.record_id)
+        return a.record_id < b.record_id;
+      if (a.col_name != b.col_name)
+        return a.col_name < b.col_name;
+      if (a.col_version != b.col_version)
+        return a.col_version > b.col_version;
+      if (a.db_version != b.db_version)
+        return a.db_version > b.db_version;
+      if (a.node_id != b.node_id)
+        return a.node_id > b.node_id;
+      return a.seq > b.seq;
+    });
+
+    // Use two-pointer technique to compress in-place
+    size_t write = 0;
+    for (size_t read = 1; read < changes.size(); ++read) {
+      if (changes[read].record_id != changes[write].record_id || changes[read].col_name != changes[write].col_name) {
+        ++write;
+        if (write != read) {
+          changes[write] = std::move(changes[read]);
+        }
+      }
+    }
+
+    changes.resize(write + 1);
+  }
+
   /// Prints the current data and tombstones for debugging purposes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of fields per record
