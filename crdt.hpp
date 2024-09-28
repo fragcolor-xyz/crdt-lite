@@ -120,54 +120,25 @@ public:
   ///
   /// Complexity: O(n), where n is the number of changes
   CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
-    // Determine the maximum db_version from the changes
-    uint64_t max_db_version = 0;
-    for (const auto &change : changes) {
-      if (change.db_version > max_db_version) {
-        max_db_version = change.db_version;
-      }
-    }
+    apply_changes(std::move(changes));
+  }
 
-    // Set the logical clock to the maximum db_version
-    clock_.set_time(max_db_version);
+  /// Resets the CRDT to a state as if it was constructed with the given changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
+  ///
+  /// Complexity: O(n), where n is the number of changes
+  void reset(CrdtVector<Change<K, V>> &&changes) {
+    // Clear existing data
+    data_.clear();
+    tombstones_.clear();
 
-    // Apply each change to reconstruct the CRDT state
-    for (auto &&change : changes) {
-      const K &record_id = change.record_id;
-      std::optional<CrdtString> col_name = std::move(change.col_name);
-      uint64_t remote_col_version = change.col_version;
-      uint64_t remote_db_version = change.db_version;
-      CrdtNodeId remote_node_id = change.node_id;
-      uint64_t remote_seq = change.seq;
-      std::optional<V> remote_value = std::move(change.value);
+    // Reset the logical clock
+    clock_ = LogicalClock();
 
-      if (!col_name.has_value()) {
-        // Handle deletion
-        tombstones_.emplace(record_id);
-        data_.erase(record_id);
-
-        // Insert deletion clock info
-        CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-        deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
-
-        // Store deletion info in the data map
-        data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
-      } else {
-        if (tombstones_.find(record_id) == tombstones_.end()) {
-          // Handle insertion or update
-          Record<V> &record = data_[record_id]; // Inserts default if not exists
-
-          // Insert or update the field value
-          if (remote_value.has_value()) {
-            record.fields[*col_name] = std::move(remote_value.value());
-          }
-
-          // Update the column version info
-          record.column_versions.insert_or_assign(
-              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
-        }
-      }
-    }
+    apply_changes(std::move(changes));
   }
 
   /// Inserts a new record or updates an existing record in the CRDT.
@@ -532,6 +503,64 @@ private:
   LogicalClock clock_;
   CrdtMap<K, Record<V>> data_;
   CrdtSet<K> tombstones_;
+
+  /// Applies a list of changes to reconstruct the CRDT state.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A list of changes to apply.
+  ///
+  /// Complexity: O(n), where n is the number of changes
+  void apply_changes(CrdtVector<Change<K, V>> &&changes) {
+    // Determine the maximum db_version from the changes
+    uint64_t max_db_version = 0;
+    for (const auto &change : changes) {
+      if (change.db_version > max_db_version) {
+        max_db_version = change.db_version;
+      }
+    }
+
+    // Set the logical clock to the maximum db_version
+    clock_.set_time(max_db_version);
+
+    // Apply each change to reconstruct the CRDT state
+    for (auto &&change : changes) {
+      const K &record_id = change.record_id;
+      std::optional<CrdtString> col_name = std::move(change.col_name);
+      uint64_t remote_col_version = change.col_version;
+      uint64_t remote_db_version = change.db_version;
+      CrdtNodeId remote_node_id = change.node_id;
+      uint64_t remote_seq = change.seq;
+      std::optional<V> remote_value = std::move(change.value);
+
+      if (!col_name.has_value()) {
+        // Handle deletion
+        tombstones_.emplace(record_id);
+        data_.erase(record_id);
+
+        // Insert deletion clock info
+        CrdtMap<CrdtString, ColumnVersion> deletion_clock;
+        deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+
+        // Store deletion info in the data map
+        data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+      } else {
+        if (tombstones_.find(record_id) == tombstones_.end()) {
+          // Handle insertion or update
+          Record<V> &record = data_[record_id]; // Inserts default if not exists
+
+          // Insert or update the field value
+          if (remote_value.has_value()) {
+            record.fields[*col_name] = std::move(remote_value.value());
+          }
+
+          // Update the column version info
+          record.column_versions.insert_or_assign(
+              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+        }
+      }
+    }
+  }
 };
 
 /// Synchronizes two CRDT nodes.
