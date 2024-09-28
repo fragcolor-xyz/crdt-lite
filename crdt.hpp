@@ -457,10 +457,12 @@ public:
     if (changes.empty())
       return;
 
-    // Sort changes based on record_id, col_name, and then by precedence rules
+    // Sort changes based on record_id, col_name (with nullopt last), and then by precedence rules
     std::sort(changes.begin(), changes.end(), [](const Change<K, V> &a, const Change<K, V> &b) {
       if (a.record_id != b.record_id)
         return a.record_id < b.record_id;
+      if (a.col_name.has_value() != b.col_name.has_value())
+        return b.col_name.has_value(); // Deletions (nullopt) come last for each record
       if (a.col_name != b.col_name)
         return a.col_name < b.col_name;
       if (a.col_version != b.col_version)
@@ -475,13 +477,23 @@ public:
     // Use two-pointer technique to compress in-place
     size_t write = 0;
     for (size_t read = 1; read < changes.size(); ++read) {
-      if (changes[read].record_id != changes[write].record_id || changes[read].col_name != changes[write].col_name ||
-          !changes[write].col_name.has_value()) { // Keep record deletions
+      if (changes[read].record_id != changes[write].record_id) {
+        // New record, always keep it
+        ++write;
+        if (write != read) {
+          changes[write] = std::move(changes[read]);
+        }
+      } else if (!changes[read].col_name.has_value()) {
+        // Current read is a deletion, keep it and skip all previous changes for this record
+        write = read;
+      } else if (changes[read].col_name != changes[write].col_name) {
+        // New column for the same record
         ++write;
         if (write != read) {
           changes[write] = std::move(changes[read]);
         }
       }
+      // Else: same record and column, keep the existing one (which is the most recent due to sorting)
     }
 
     changes.resize(write + 1);
