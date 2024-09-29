@@ -50,9 +50,10 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
 
 - **Generic CRDT Structure:** Supports custom key and value types.
 - **Logical Clock:** Maintains causality across events.
-- **Fine-Grained Conflict Resolution:** Based on column versions, site IDs, and sequence numbers.
+- **Fine-Grained Conflict Resolution:** Based on column versions, database versions, and node IDs.
 - **CRUD Operations:** Insert, update, and delete operations with tombstone handling.
 - **Efficient Merging:** Synchronizes state across nodes effectively.
+- **Change Compression:** Optimizes change propagation by removing redundant changes.
 - **Multi-Language Support:** Implemented in C++ for flexibility and performance.
 - **External Version Tracking:** Robust synchronization management without requiring identical logical clocks across nodes.
 
@@ -86,6 +87,8 @@ CRDT-Lite's C++ implementation is designed with core concepts and principles to 
        time_ = std::max(time_, received_time);
        return ++time_;
      }
+     void set_time(uint64_t t) { time_ = t; }
+     uint64_t current_time() const { return time_; }
    };
    ```
 2. **ColumnVersion:** Tracks version information for each column in a record.
@@ -93,7 +96,7 @@ CRDT-Lite's C++ implementation is designed with core concepts and principles to 
    struct ColumnVersion {
      uint64_t col_version;
      uint64_t db_version;
-     uint64_t site_id;
+     CrdtNodeId node_id;
    };
    ```
 3. **Record:** Represents individual records with fields and their version information.
@@ -106,7 +109,7 @@ CRDT-Lite employs a straightforward approach to manage causality without the com
 
 - **Logical Clock:** Each node maintains a single logical clock that increments with each operation.
 - **Column Version:** Each field in a record has its own version information, replacing the need for vector clocks.
-- **External Version Tracking:** Tracks `last_db_version` and `last_local_version_at_remote_integration` to manage synchronization efficiently.
+- **External Version Tracking:** Tracks `last_db_version` to manage synchronization efficiently.
 
 ### Conflict Resolution
 
@@ -126,7 +129,7 @@ Each operation (insert, update, delete) generates a `Change` object for incremen
 template <typename K, typename V>
 struct Change {
   K record_id;
-  CrdtString col_name;
+  std::optional<CrdtString> col_name;
   std::optional<V> value;
   uint64_t col_version;
   uint64_t db_version;
@@ -134,7 +137,7 @@ struct Change {
 };
 ```
 
-This design minimizes bandwidth usage by transmitting only the necessary changes during synchronization.
+This design minimizes bandwidth usage by transmitting only the necessary changes during synchronization. The `compress_changes` method further optimizes change propagation by removing redundant changes.
 
 ### Tombstone Handling
 
@@ -144,7 +147,7 @@ Deleted records are marked with tombstones to prevent their accidental resurrect
 CrdtSet<K> tombstones_;
 ```
 
-Future updates may include garbage collection mechanisms for old tombstones to optimize storage.
+Deletions are represented by changes with `col_name` set to `std::nullopt`.
 
 ### Merge Operation
 
@@ -158,12 +161,11 @@ This deterministic process guarantees that all nodes reach a consistent state.
 
 ## External Version Tracking
 
-**External version tracking** in CRDT-Lite is designed to be managed by the users of the library. This means that while CRDT-Lite provides the mechanisms for tracking versions, it does not store or manage these versions internally. Users are responsible for maintaining and persisting the following version information:
+External version tracking in CRDT-Lite is designed to be managed by the users of the library. Users are responsible for maintaining and persisting the following version information:
 
-1. **Last Version Integrated from Remote (`last_remote_version`):** Tracks the highest `db_version` received from a specific remote node.
-2. **Last Local Version at Integration (`last_local_version_at_remote_integration`):** Records the local `db_version` when the last set of remote changes was integrated.
+1. **Last Version Integrated from Remote (`last_db_version`):** Tracks the highest `db_version` received from a specific remote node.
 
-**Important:** CRDT-Lite does not handle the storage or retrieval of these version numbers. Users must implement their own storage solutions (e.g., databases, files, in-memory structures) to persist and manage these version tracking values. This external management allows for flexibility in how synchronization state is maintained across different environments and use cases.
+The `sync_nodes` function updates `last_db_version` based on the maximum `db_version` in the changes being synchronized.
 
 ## Design Considerations
 
@@ -177,16 +179,17 @@ CRDT-Lite is crafted with a focus on simplicity, efficiency, and scalability, ad
 ### Conflict Resolution
 
 - **Fine-Grained:** Operates at the field level for precise conflict management.
-- **Deterministic:** Uses a combination of column version, database version, site ID, and sequence number to resolve conflicts predictably.
+- **Deterministic:** Uses a combination of column version, database version, and node ID to resolve conflicts predictably.
 
 ### Efficiency
 
 - **Minimal Storage Overhead:** Stores only the current state without historical data.
 - **Change-Based Operations:** Facilitates efficient incremental updates and synchronization.
+- **Change Compression:** Optimizes change propagation by removing redundant changes.
 
 ### Scalability
 
-- **Supports Many Nodes:** Utilizes UUIDs for site IDs to handle a large or unpredictable number of nodes.
+- **Supports Many Nodes:** Utilizes node IDs to handle a large or unpredictable number of nodes.
 - **Optimized for Multiple Fields:** Efficiently manages records with numerous fields.
 
 ## Limitations
@@ -197,7 +200,7 @@ CRDT-Lite is crafted with a focus on simplicity, efficiency, and scalability, ad
 ## FAQ
 
 **Q: How does CRDT-Lite handle tombstones for deleted records?**  
-A: Tombstones are maintained to properly handle deletions across the distributed system. Future updates may include a garbage collection mechanism for old tombstones.
+A: Tombstones are maintained to properly handle deletions across the distributed system. Deletions are represented by changes with `col_name` set to `std::nullopt`.
 
 **Q: Is there support for composite fields or atomic updates to multiple related fields?**  
 A: Currently, fields are treated individually. A Redis-like approach with long keys (e.g., `fbl/pose/translation`) can handle composite data. Full support for composite fields may be added in future updates.
@@ -206,15 +209,15 @@ A: Currently, fields are treated individually. A Redis-like approach with long k
 A: CRDT-Lite focuses on data consistency and conflict resolution. Security measures like encryption should be implemented at the network layer or application layer as appropriate for your use case.
 
 **Q: Can the system handle large numbers of concurrent updates?**  
-A: Yes, the conflict resolution mechanism ensures that all nodes will eventually reach a consistent state, even with many concurrent updates. The resolution is deterministic, using site ID and sequence number for tiebreaking when necessary.
+A: Yes, the conflict resolution mechanism ensures that all nodes will eventually reach a consistent state, even with many concurrent updates. The resolution is deterministic, using node ID for tiebreaking when necessary.
 
 **Q: How efficient is the synchronization process?**  
-A: CRDT-Lite uses a change-based operation system, allowing for efficient incremental updates between frequently communicating nodes. This significantly reduces overhead in lively connected systems.
+A: CRDT-Lite uses a change-based operation system with change compression, allowing for efficient incremental updates between frequently communicating nodes. This significantly reduces overhead in lively connected systems.
 
 ## Future Enhancements
 
 - **Tombstone Garbage Collection:** Implement mechanisms to remove old tombstones.
-- **Bandwidth Optimization:** Enhance efficiency for large datasets.
+- **Bandwidth Optimization:** Further enhance efficiency for large datasets.
 - **Custom Merge Functions:** Allow users to define specific merge behaviors for unique use cases.
 
 ## Contributing
