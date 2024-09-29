@@ -103,11 +103,17 @@ template <typename K, typename V> struct Change {
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V> class CRDT {
+template <typename K, typename V> class CRDT : public std::enable_shared_from_this<CRDT<K, V>> {
 public:
   // Create a new empty CRDT
   // Complexity: O(1)
-  CRDT(CrdtNodeId node_id) : node_id_(node_id), clock_(), data_(), tombstones_() {}
+  CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT<K, V>> parent = nullptr)
+      : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent) {
+    if (parent_) {
+      // set clock to parent's clock
+      clock_ = parent_->clock_;
+    }
+  }
 
   /// Create a CRDT from a list of changes (e.g., loaded from disk).
   ///
@@ -158,7 +164,7 @@ public:
     uint64_t db_version = clock_.tick();
 
     // Check if the record is tombstoned
-    if (tombstones_.find(record_id) != tombstones_.end()) {
+    if (is_record_tombstoned(record_id)) {
       if constexpr (ReturnChanges) {
         return changes;
       } else {
@@ -166,24 +172,18 @@ public:
       }
     }
 
-    bool is_new_record = data_.find(record_id) == data_.end();
-    Record<V> &record = is_new_record ? data_[record_id] : data_.at(record_id);
+    Record<V> &record = get_or_create_record_unchecked(record_id);
 
     for (const auto &[col_name, value] : fields) {
       uint64_t col_version;
-      if (is_new_record) {
+      auto col_it = record.column_versions.find(col_name);
+      if (col_it != record.column_versions.end()) {
+        col_version = ++col_it->second.col_version;
+        col_it->second.db_version = db_version;
+        col_it->second.node_id = node_id_;
+      } else {
         col_version = 1;
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_));
-      } else {
-        auto col_it = record.column_versions.find(col_name);
-        if (col_it != record.column_versions.end()) {
-          col_version = ++col_it->second.col_version;
-          col_it->second.db_version = db_version;
-          col_it->second.node_id = node_id_;
-        } else {
-          col_version = 1;
-          record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_));
-        }
       }
 
       if constexpr (ReturnChanges) {
@@ -213,7 +213,7 @@ public:
   template <bool ReturnChanges = true>
   std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> delete_record(const K &record_id) {
     CrdtVector<Change<K, V>> changes;
-    if (tombstones_.find(record_id) != tombstones_.end()) {
+    if (is_record_tombstoned(record_id)) {
       if constexpr (ReturnChanges) {
         return changes;
       } else {
@@ -254,6 +254,12 @@ public:
   CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
     CrdtVector<Change<K, V>> changes;
 
+    // get changes from parent
+    if (parent_) {
+      auto parent_changes = parent_->get_changes_since(last_db_version);
+      changes.insert(changes.end(), parent_changes.begin(), parent_changes.end());
+    }
+
     for (const auto &[record_id, record] : data_) {
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.db_version > last_db_version) {
@@ -268,6 +274,14 @@ public:
               Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version, clock_info.node_id));
         }
       }
+    }
+
+    if (parent_) {
+      // since we merge from the parent, we need to also run a compression pass
+      // to remove changes that have been overwritten by top level changes
+      // since we compare at first by col_version, it's fine even if our db_version is lower
+      // since we merge from the parent, we know that the changes are applied in order and col_version should always be increasing
+      compress_changes(changes);
     }
 
     return changes;
@@ -286,7 +300,8 @@ public:
   ///
   /// Complexity: O(c), where c is the number of changes to merge
   template <bool ReturnAcceptedChanges = false>
-  std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes) {
+  std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
+                                                                                          bool ignore_parent = false) {
     CrdtVector<Change<K, V>> accepted_changes; // Will be optimized away if ReturnAcceptedChanges is false
 
     auto new_db_version = clock_.tick();
@@ -305,11 +320,11 @@ public:
       }
 
       // Retrieve local column version information
-      auto record_it = data_.find(record_id);
+      auto record_ptr = get_record_ptr(record_id, ignore_parent);
       ColumnVersion *local_col_info = nullptr;
-      if (record_it != data_.end()) {
-        auto col_it = record_it->second.column_versions.find(col_name ? col_name.value() : "__deleted__");
-        if (col_it != record_it->second.column_versions.end()) {
+      if (record_ptr != nullptr) {
+        auto col_it = record_ptr->column_versions.find(col_name ? col_name.value() : "__deleted__");
+        if (col_it != record_ptr->column_versions.end()) {
           local_col_info = &col_it->second;
         }
       }
@@ -359,9 +374,9 @@ public:
             accepted_changes.emplace_back(
                 Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version, new_db_version, remote_node_id));
           }
-        } else if (tombstones_.find(record_id) == tombstones_.end()) {
-          // Handle insertion or update if the record is not tombstoned
-          Record<V> &record = data_[record_id]; // Inserts default if not exists
+        } else if (!is_record_tombstoned(record_id, ignore_parent)) {
+          // Handle insertion or update
+          Record<V> &record = get_or_create_record_unchecked(record_id, ignore_parent);
 
           // Update field value
           if (remote_value.has_value() && col_name.has_value()) {
@@ -477,14 +492,28 @@ public:
   // Complexity: O(1)
   const LogicalClock &get_clock() const { return clock_; }
 
-  // Complexity: O(1)
-  const CrdtMap<K, Record<V>> &get_data() const { return data_; }
+  // Updated get_data() method
+  CrdtMap<K, Record<V>> get_data() const {
+    if (!parent_) {
+      return data_;
+    }
+
+    CrdtMap<K, Record<V>> combined_data = parent_->get_data();
+    for (const auto &[key, record] : data_) {
+      combined_data[key] = record;
+    }
+    return combined_data;
+  }
 
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
   CrdtMap<K, Record<V>> data_;
   CrdtSet<K> tombstones_;
+
+  // our clock won't be shared with the parent
+  // we optionally allow to merge from the parent or push to the parent
+  std::shared_ptr<CRDT<K, V>> parent_;
 
   /// Applies a list of changes to reconstruct the CRDT state.
   ///
@@ -526,9 +555,9 @@ private:
         // Store deletion info in the data map
         data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
       } else {
-        if (tombstones_.find(record_id) == tombstones_.end()) {
+        if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
-          Record<V> &record = data_[record_id]; // Inserts default if not exists
+          Record<V> &record = get_or_create_record_unchecked(record_id);
 
           // Insert or update the field value
           if (remote_value.has_value()) {
@@ -540,6 +569,39 @@ private:
                                                   ColumnVersion(remote_col_version, remote_db_version, remote_node_id));
         }
       }
+    }
+  }
+
+  bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
+    if (tombstones_.find(record_id) != tombstones_.end()) {
+      return true;
+    }
+    if (parent_ && !ignore_parent) {
+      return parent_->is_record_tombstoned(record_id);
+    }
+    return false;
+  }
+
+  // Notice that this will not check if the record is tombstoned! Such check should be done by the caller
+  Record<V> &get_or_create_record_unchecked(const K &record_id, bool ignore_parent = false) {
+    auto [it, inserted] = data_.try_emplace(record_id);
+    if (inserted && parent_ && !ignore_parent) {
+      if (auto parent_record = parent_->get_record_ptr(record_id)) {
+        it->second = *parent_record;
+      }
+    }
+    return it->second;
+  }
+
+  Record<V> *get_record_ptr(const K &record_id, bool ignore_parent = false) {
+    auto it = data_.find(record_id);
+    if (it != data_.end()) {
+      return &(it->second);
+    }
+    if (ignore_parent) {
+      return nullptr;
+    } else {
+      return parent_ ? parent_->get_record_ptr(record_id) : nullptr;
     }
   }
 };

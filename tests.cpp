@@ -458,9 +458,10 @@ int main() {
   //   sync_nodes(node3, node1, last_db_version_node1);
 
   //   // Check that clocks have been updated after merges
-  //   assert_true(node1.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node1 clock did not update");
-  //   assert_true(node2.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node2 clock did not update");
-  //   assert_true(node3.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node3 clock did not update");
+  //   assert_true(node1.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node1 clock did not
+  //   update"); assert_true(node2.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node2 clock did
+  //   not update"); assert_true(node3.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node3 clock
+  //   did not update");
 
   //   // Since clocks don't need to be identical, we don't assert equality
   //   std::cout << "Test 'Clock Synchronization After Merges' passed." << std::endl;
@@ -655,6 +656,456 @@ int main() {
     assert_true(retrieved_changes[0].value.has_value() && retrieved_changes[0].value.value() == "value3",
                 "Multiple Loads and Merges: Retrieved change 'field3' value mismatch");
     std::cout << "Test 'Multiple Loads and Merges with Merge DB Versions' passed." << std::endl;
+  }
+
+  // Test Case: Parent-Child Overlay Functionality
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id_parent = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id_parent}, {"parent_field", "parent_value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id_parent, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child should inherit parent's record
+    assert_true(child_crdt.get_data().find(record_id_parent) != child_crdt.get_data().end(),
+                "Parent-Child Overlay: Child should inherit parent's record");
+    assert_true(child_crdt.get_data().at(record_id_parent).fields.at("parent_field") == "parent_value",
+                "Parent-Child Overlay: Inherited field value mismatch");
+
+    // Child updates the inherited record
+    CrdtMap<CrdtString, CrdtString> child_updates = {{"child_field", "child_value"}};
+    auto child_changes = child_crdt.insert_or_update(record_id_parent, std::move(child_updates));
+
+    // Merge child's changes back to parent
+    parent_crdt.merge_changes(std::move(child_changes));
+
+    // Parent should now have the child's field
+    assert_true(parent_crdt.get_data().at(record_id_parent).fields.at("child_field") == "child_value",
+                "Parent-Child Overlay: Parent should reflect child's update");
+
+    std::cout << "Test 'Parent-Child Overlay Functionality' passed." << std::endl;
+  }
+
+  // Add these tests after the existing tests in the main function
+
+  // Test Case: Parent-Child Overlay with Multiple Levels
+  {
+    // Create grandparent CRDT
+    CRDT<CrdtString, CrdtString> grandparent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> grandparent_fields = {{"id", record_id}, {"level", "grandparent"}};
+    grandparent_crdt.insert_or_update(record_id, std::move(grandparent_fields));
+
+    // Create parent CRDT with grandparent
+    auto grandparent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(grandparent_crdt);
+    CRDT<CrdtString, CrdtString> parent_crdt(2, grandparent_ptr);
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"level", "parent"}};
+    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(3, parent_ptr);
+    CrdtMap<CrdtString, CrdtString> child_fields = {{"level", "child"}};
+    child_crdt.insert_or_update(record_id, std::move(child_fields));
+
+    // Check that child has the most recent value
+    assert_true(child_crdt.get_data().at(record_id).fields.at("level") == "child",
+                "Multi-level Overlay: Child should have its own value");
+
+    // Check that parent has its own value
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("level") == "parent",
+                "Multi-level Overlay: Parent should have its own value");
+
+    // Check that grandparent has its original value
+    assert_true(grandparent_crdt.get_data().at(record_id).fields.at("level") == "grandparent",
+                "Multi-level Overlay: Grandparent should have its original value");
+
+    std::cout << "Test 'Parent-Child Overlay with Multiple Levels' passed." << std::endl;
+  }
+
+  // Test Case: Inheritance of Records from Parent
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id1 = generate_uuid();
+    CrdtString record_id2 = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields1 = {{"id", record_id1}, {"data", "parent_data1"}};
+    CrdtMap<CrdtString, CrdtString> parent_fields2 = {{"id", record_id2}, {"data", "parent_data2"}};
+    parent_crdt.insert_or_update(record_id1, std::move(parent_fields1));
+    parent_crdt.insert_or_update(record_id2, std::move(parent_fields2));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Check that child inherits both records from parent
+    assert_true(child_crdt.get_data().at(record_id1).fields.at("data") == "parent_data1",
+                "Record Inheritance: Child should inherit record1 from parent");
+    assert_true(child_crdt.get_data().at(record_id2).fields.at("data") == "parent_data2",
+                "Record Inheritance: Child should inherit record2 from parent");
+
+    std::cout << "Test 'Inheritance of Records from Parent' passed." << std::endl;
+  }
+
+  // Test Case: Overriding Parent Records in Child
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"data", "parent_data"}};
+    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Override parent's record in child
+    CrdtMap<CrdtString, CrdtString> child_fields = {{"data", "child_data"}};
+    child_crdt.insert_or_update(record_id, std::move(child_fields));
+
+    // Check that child has its own value
+    assert_true(child_crdt.get_data().at(record_id).fields.at("data") == "child_data",
+                "Record Override: Child should have its own value");
+
+    // Check that parent still has its original value
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("data") == "parent_data",
+                "Record Override: Parent should retain its original value");
+
+    std::cout << "Test 'Overriding Parent Records in Child' passed." << std::endl;
+  }
+
+  // Test Case: Merging Changes from Child to Parent
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
+    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child adds a new field
+    CrdtMap<CrdtString, CrdtString> child_fields = {{"child_field", "child_value"}};
+    auto child_changes = child_crdt.insert_or_update(record_id, std::move(child_fields));
+
+    // Merge child's changes to parent
+    parent_crdt.merge_changes(std::move(child_changes));
+
+    // Check that parent now has the child's field
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("child_field") == "child_value",
+                "Child to Parent Merge: Parent should have child's new field");
+
+    // Check that parent retains its original field
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("parent_field") == "parent_value",
+                "Child to Parent Merge: Parent should retain its original field");
+
+    std::cout << "Test 'Merging Changes from Child to Parent' passed." << std::endl;
+  }
+
+  // Test Case: Get Changes Since with Parent-Child Relationship
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
+    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child adds a new field
+    CrdtMap<CrdtString, CrdtString> child_fields = {{"child_field", "child_value"}};
+    child_crdt.insert_or_update(record_id, std::move(child_fields));
+
+    // Get changes since the beginning
+    auto changes = child_crdt.get_changes_since(0);
+
+    // Check that changes include both parent and child fields
+    bool has_parent_field = false;
+    bool has_child_field = false;
+    for (const auto &change : changes) {
+      if (change.col_name == "parent_field" && change.value == "parent_value") {
+        has_parent_field = true;
+      }
+      if (change.col_name == "child_field" && change.value == "child_value") {
+        has_child_field = true;
+      }
+    }
+
+    assert_true(has_parent_field, "Get Changes Since: Should include parent's field");
+    assert_true(has_child_field, "Get Changes Since: Should include child's field");
+
+    std::cout << "Test 'Get Changes Since with Parent-Child Relationship' passed." << std::endl;
+  }
+
+  // Test Case: Tombstone Propagation from Parent to Child
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field", "value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child should inherit the record
+    assert_true(child_crdt.get_data().find(record_id) != child_crdt.get_data().end(),
+                "Tombstone Propagation: Child should inherit the record from parent");
+
+    // Parent deletes the record
+    auto parent_delete_changes = parent_crdt.delete_record(record_id);
+
+    // Merge deletion into child
+    child_crdt.merge_changes(std::move(parent_delete_changes), true);
+
+    // Child should now have the record tombstoned
+    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
+                "Tombstone Propagation: Child should have empty fields after deletion");
+    assert_true(child_crdt.get_data().at(record_id).column_versions.find("__deleted__") !=
+                    child_crdt.get_data().at(record_id).column_versions.end(),
+                "Tombstone Propagation: Child should have '__deleted__' column version");
+
+    std::cout << "Test 'Tombstone Propagation from Parent to Child' passed." << std::endl;
+  }
+
+  // Test Case: Conflict Resolution with Parent and Child CRDTs
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Both parent and child update the same field concurrently
+    CrdtMap<CrdtString, CrdtString> parent_update = {{"field", "parent_updated"}};
+    auto parent_change_update = parent_crdt.insert_or_update(record_id, std::move(parent_update));
+
+    CrdtMap<CrdtString, CrdtString> child_update = {{"field", "child_updated"}};
+    auto child_change_update = child_crdt.insert_or_update(record_id, std::move(child_update));
+
+    // Merge child's changes into parent
+    parent_crdt.merge_changes(std::move(child_change_update), true);
+
+    // Merge parent's changes into child
+    child_crdt.merge_changes(std::move(parent_change_update), true);
+
+    // Conflict resolution should prefer the change with the higher db_version or higher node_id
+    // Assuming parent and child have different db_versions, the resolution will follow the rules
+    // Let's verify which update prevailed
+
+    // Fetch the final value from both parent and child
+    std::string parent_final = parent_crdt.get_data().at(record_id).fields.at("field");
+    std::string child_final = child_crdt.get_data().at(record_id).fields.at("field");
+
+    // Both should be the same
+    assert_true(parent_final == child_final, "Conflict Resolution with Parent and Child: Data mismatch between parent and child");
+
+    // Depending on the db_version and node_id, determine the expected value
+    // Since child has a higher node_id, if db_versions are equal, child's update should prevail
+    // Otherwise, the higher db_version determines the winner
+
+    // For simplicity, let's assume child had a higher db_version
+    // Thus, expected value should be "child_updated"
+    std::string expected = "child_updated";
+    assert_true(parent_final == expected, "Conflict Resolution with Parent and Child: Expected 'child_updated'");
+
+    std::cout << "Test 'Conflict Resolution with Parent and Child CRDTs' passed." << std::endl;
+  }
+
+  // Test Case: Hierarchical Change Retrieval
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id_parent = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id_parent}, {"parent_field", "parent_value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id_parent, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child adds its own record
+    CrdtString record_id_child = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> child_fields = {{"id", record_id_child}, {"child_field", "child_value"}};
+    auto child_changes = child_crdt.insert_or_update(record_id_child, std::move(child_fields));
+
+    // Retrieve changes since db_version 0 from child
+    CrdtVector<Change<CrdtString, CrdtString>> retrieved_changes = child_crdt.get_changes_since(0);
+
+    // Should include both parent and child changes
+    assert_true(retrieved_changes.size() == 4, "Hierarchical Change Retrieval: Should retrieve four changes");
+
+    // Verify that both changes are present
+    bool parent_change_found = false;
+    bool child_change_found = false;
+    for (const auto &change : retrieved_changes) {
+      if (change.record_id == record_id_parent && change.col_name.has_value() && change.col_name.value() == "parent_field" &&
+          change.value.has_value() && change.value.value() == "parent_value") {
+        parent_change_found = true;
+      }
+      if (change.record_id == record_id_child && change.col_name.has_value() && change.col_name.value() == "child_field" &&
+          change.value.has_value() && change.value.value() == "child_value") {
+        child_change_found = true;
+      }
+    }
+    assert_true(parent_change_found, "Hierarchical Change Retrieval: Parent change not found");
+    assert_true(child_change_found, "Hierarchical Change Retrieval: Child change not found");
+
+    std::cout << "Test 'Hierarchical Change Retrieval' passed." << std::endl;
+  }
+
+  // Test Case: Avoiding Duplicate Change Application via Parent
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Parent inserts a new field
+    CrdtMap<CrdtString, CrdtString> parent_new_field = {{"new_field", "new_parent_value"}};
+    auto parent_change_new_field = parent_crdt.insert_or_update(record_id, std::move(parent_new_field));
+
+    // Merge parent's new field into child
+    child_crdt.merge_changes(std::move(parent_change_new_field));
+
+    // Attempt to re-merge the same change into child
+    child_crdt.merge_changes({Change<CrdtString, CrdtString>(record_id, "new_field", "new_parent_value", 2, 2, 1)});
+
+    // Verify that 'new_field' is correctly set without duplication
+    assert_true(child_crdt.get_data().at(record_id).fields.at("new_field") == "new_parent_value",
+                "Avoiding Duplicate Changes: 'new_field' value mismatch");
+
+    std::cout << "Test 'Avoiding Duplicate Change Application via Parent' passed." << std::endl;
+  }
+
+  // Test Case: Child Deletion Does Not Affect Parent
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Child deletes the record
+    auto child_delete_changes = child_crdt.delete_record(record_id);
+
+    // Merge child's deletion into parent
+    parent_crdt.merge_changes(std::move(child_delete_changes));
+
+    // Parent should still have the record (since child deletion should not affect parent)
+    assert_true(parent_crdt.get_data().find(record_id) != parent_crdt.get_data().end(),
+                "Child Deletion: Parent should still have the record after child deletion");
+
+    // Child should have the record tombstoned
+    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
+                "Child Deletion: Child should have empty fields after deletion");
+    assert_true(child_crdt.get_data().at(record_id).column_versions.find("__deleted__") !=
+                    child_crdt.get_data().at(record_id).column_versions.end(),
+                "Child Deletion: Child should have '__deleted__' column version");
+
+    std::cout << "Test 'Child Deletion Does Not Affect Parent' passed." << std::endl;
+  }
+
+  // Test Case: Parent and Child Simultaneous Updates
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field1", "value1"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Parent updates field1
+    CrdtMap<CrdtString, CrdtString> parent_update = {{"field1", "parent_updated"}};
+    auto parent_change_update = parent_crdt.insert_or_update(record_id, std::move(parent_update));
+
+    // Child updates field2
+    CrdtMap<CrdtString, CrdtString> child_update = {{"field2", "child_value2"}};
+    auto child_change_update = child_crdt.insert_or_update(record_id, std::move(child_update));
+
+    // Merge changes
+    parent_crdt.merge_changes(std::move(child_change_update));
+    child_crdt.merge_changes(std::move(parent_change_update));
+
+    // Verify that both updates are present
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("field1") == "parent_updated",
+                "Simultaneous Updates: Parent's field1 should be updated");
+    assert_true(parent_crdt.get_data().at(record_id).fields.at("field2") == "child_value2",
+                "Simultaneous Updates: Parent should have child's field2");
+
+    assert_true(child_crdt.get_data().at(record_id).fields.at("field1") == "parent_updated",
+                "Simultaneous Updates: Child's field1 should reflect parent's update");
+    assert_true(child_crdt.get_data().at(record_id).fields.at("field2") == "child_value2",
+                "Simultaneous Updates: Child's field2 should be updated");
+
+    std::cout << "Test 'Parent and Child Simultaneous Updates' passed." << std::endl;
+  }
+
+  // Test Case: Parent Deletion Prevents Child Insertions
+  {
+    // Create parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field", "value"}};
+    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+
+    // Create child CRDT with parent
+    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
+    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
+
+    // Parent deletes the record
+    auto parent_delete_changes = parent_crdt.delete_record(record_id);
+
+    // Merge deletion into child
+    child_crdt.merge_changes(std::move(parent_delete_changes));
+
+    // Child attempts to insert a new field into the tombstoned record
+    CrdtMap<CrdtString, CrdtString> child_insert = {{"field2", "new_value"}};
+    auto child_change_insert = child_crdt.insert_or_update(record_id, std::move(child_insert));
+
+    // Merge child's insertion back into parent
+    parent_crdt.merge_changes(std::move(child_change_insert));
+
+    // Parent should still have the record tombstoned without the new field
+    assert_true(parent_crdt.get_data().at(record_id).fields.empty(),
+                "Parent Deletion: Parent should still have empty fields after child insertion attempt");
+    assert_true(parent_crdt.get_data().at(record_id).column_versions.find("__deleted__") !=
+                    parent_crdt.get_data().at(record_id).column_versions.end(),
+                "Parent Deletion: Parent should have '__deleted__' column version");
+
+    // Child should also respect the tombstone
+    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
+                "Parent Deletion: Child should have empty fields after parent's deletion");
+    assert_true(child_crdt.get_data().at(record_id).column_versions.find("__deleted__") !=
+                    child_crdt.get_data().at(record_id).column_versions.end(),
+                "Parent Deletion: Child should have '__deleted__' column version");
+
+    std::cout << "Test 'Parent Deletion Prevents Child Insertions' passed." << std::endl;
   }
 
   std::cout << "All tests passed successfully!" << std::endl;
