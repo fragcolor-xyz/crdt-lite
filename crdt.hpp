@@ -188,8 +188,7 @@ public:
 
       if constexpr (ReturnChanges) {
         record.fields[col_name] = value;
-        changes.emplace_back(
-            Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_));
+        changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_));
       } else {
         record.fields[std::move(col_name)] = std::move(value);
       }
@@ -265,8 +264,8 @@ public:
               value = field_it->second;
             }
           }
-          changes.emplace_back(Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version,
-                                            clock_info.node_id));
+          changes.emplace_back(
+              Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version, clock_info.node_id));
         }
       }
     }
@@ -357,8 +356,8 @@ public:
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
           if constexpr (ReturnAcceptedChanges) {
-            accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version, new_db_version,
-                                                       remote_node_id));
+            accepted_changes.emplace_back(
+                Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version, new_db_version, remote_node_id));
           }
         } else if (tombstones_.find(record_id) == tombstones_.end()) {
           // Handle insertion or update if the record is not tombstoned
@@ -379,17 +378,15 @@ public:
 
           if constexpr (ReturnAcceptedChanges) {
             // Update the column version info
-            record.column_versions.insert_or_assign(
-                col_name ? col_name.value() : "__deleted__",
-                ColumnVersion(remote_col_version, new_db_version, remote_node_id));
+            record.column_versions.insert_or_assign(col_name ? col_name.value() : "__deleted__",
+                                                    ColumnVersion(remote_col_version, new_db_version, remote_node_id));
 
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
                                                        remote_col_version, new_db_version, remote_node_id));
           } else {
             // Update the column version info
-            record.column_versions.insert_or_assign(
-                col_name ? std::move(col_name.value()) : "__deleted__",
-                ColumnVersion(remote_col_version, new_db_version, remote_node_id));
+            record.column_versions.insert_or_assign(col_name ? std::move(col_name.value()) : "__deleted__",
+                                                    ColumnVersion(remote_col_version, new_db_version, remote_node_id));
           }
         }
       }
@@ -427,9 +424,7 @@ public:
         return a.col_version > b.col_version;
       if (a.db_version != b.db_version)
         return a.db_version > b.db_version;
-      if (a.node_id != b.node_id)
-        return a.node_id > b.node_id;
-      return a.seq > b.seq;
+      return a.node_id > b.node_id;
     });
 
     // Use two-pointer technique to compress in-place
@@ -541,8 +536,8 @@ private:
           }
 
           // Update the column version info
-          record.column_versions.insert_or_assign(
-              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id));
+          record.column_versions.insert_or_assign(std::move(*col_name),
+                                                  ColumnVersion(remote_col_version, remote_db_version, remote_node_id));
         }
       }
     }
