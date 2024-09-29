@@ -3,7 +3,7 @@
 > [!WARNING]
 > This project is in early development and not intended for production use.
 
-CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types (CRDTs) in both Rust and C++. It provides a generic CRDT structure suitable for distributed systems requiring eventual consistency. CRDT-Lite is currently being used in [Formabble](https://formabble.com), a collaborative game engine, and will be integrated into a derived product that we will announce soon.
+CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types (CRDTs) in C++. It provides a generic CRDT structure suitable for distributed systems requiring eventual consistency. CRDT-Lite is currently being used in [Formabble](https://formabble.com), a collaborative game engine, and will be integrated into a derived product that we will announce soon.
 
 ## Table of Contents
 
@@ -12,7 +12,6 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
   - [Features](#features)
   - [Usage](#usage)
   - [Quick Start](#quick-start)
-    - [Rust Implementation](#rust-implementation)
     - [C++ Implementation](#c-implementation)
   - [Implementation Details](#implementation-details)
     - [Core Components](#core-components)
@@ -55,7 +54,7 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
 - **Fine-Grained Conflict Resolution:** Based on column versions, site IDs, and sequence numbers.
 - **CRUD Operations:** Insert, update, and delete operations with tombstone handling.
 - **Efficient Merging:** Synchronizes state across nodes effectively.
-- **Multi-Language Support:** Implemented in both Rust and C++ for flexibility and performance.
+- **Multi-Language Support:** Implemented in C++ for flexibility and performance.
 - **External Version Tracking:** Robust synchronization management without requiring identical logical clocks across nodes.
 
 ## Usage
@@ -63,19 +62,6 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
 CRDT-Lite is actively used in [Formabble](https://formabble.com), a collaborative game engine designed to facilitate real-time collaboration in game development. By leveraging CRDT-Lite, Formabble ensures consistent and conflict-free data synchronization across multiple users and instances. Additionally, CRDT-Lite will be integrated into a derived product that we will announce soon, further demonstrating its versatility and effectiveness in real-world applications.
 
 ## Quick Start
-
-### Rust Implementation
-
-1. **Install Rust:** If you don't have Rust installed, get it from [rustup.rs](https://rustup.rs/).
-2. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/yourusername/crdt-lite.git
-   cd crdt-lite
-   ```
-3. **Build and Run Tests:**
-   ```bash
-   cargo test
-   ```
 
 ### C++ Implementation
 
@@ -87,7 +73,7 @@ CRDT-Lite is actively used in [Formabble](https://formabble.com), a collaborativ
 
 ## Implementation Details
 
-CRDT-Lite's Rust and C++ implementations share similar core concepts and design principles, ensuring consistency across both languages.
+CRDT-Lite's C++ implementation is designed with core concepts and principles to ensure consistency and efficiency.
 
 ### Core Components
 
