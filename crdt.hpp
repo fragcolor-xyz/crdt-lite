@@ -110,8 +110,12 @@ public:
   CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT<K, V>> parent = nullptr)
       : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent) {
     if (parent_) {
-      // set clock to parent's clock
+      // Set clock to parent's clock
       clock_ = parent_->clock_;
+      // Capture the base version from the parent
+      base_version_ = parent_->clock_.current_time();
+    } else {
+      base_version_ = 0; // No parent, base_version_ is 0
     }
   }
 
@@ -143,6 +147,96 @@ public:
     clock_ = LogicalClock();
 
     apply_changes(std::move(changes));
+  }
+
+  /// Generates inverse changes for a given set of changes based on the parent state.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A vector of changes to invert.
+  ///
+  /// # Returns
+  ///
+  /// A vector of inverse `Change` objects.
+  CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) const {
+    CrdtVector<Change<K, V>> inverse_changes;
+
+    for (const auto &change : changes) {
+      const K &record_id = change.record_id;
+      const std::optional<CrdtString> &col_name = change.col_name;
+      const std::optional<V> &value = change.value;
+
+      if (!col_name.has_value()) {
+        // The change was a record deletion (tombstone)
+        // To revert, restore the record's state from the parent
+        auto parent_record_ptr = parent_->get_record_ptr(record_id);
+        if (parent_record_ptr) {
+          // Restore all fields from the parent
+          for (const auto &[parent_col, parent_val] : parent_record_ptr->fields) {
+            inverse_changes.emplace_back(Change<K, V>(record_id, parent_col, parent_val,
+                                                      parent_record_ptr->column_versions.at(parent_col).col_version,
+                                                      parent_->get_clock().current_time(), parent_->node_id_));
+          }
+          // Remove the tombstone
+          inverse_changes.emplace_back(Change<K, V>(record_id,
+                                                    std::nullopt, // nullptr indicates a tombstone removal
+                                                    std::nullopt,
+                                                    0, // Column version 0 signifies removal of tombstone
+                                                    parent_->get_clock().current_time(), parent_->node_id_));
+        }
+      } else {
+        // The change was an insertion or update of a column
+        CrdtString col = *col_name;
+        auto parent_record_ptr = parent_->get_record_ptr(record_id);
+        if (parent_record_ptr) {
+          auto parent_field_it = parent_record_ptr->fields.find(col);
+          if (parent_field_it != parent_record_ptr->fields.end()) {
+            // The parent has a value for this column; set it back to the parent's value
+            inverse_changes.emplace_back(Change<K, V>(record_id, col, parent_field_it->second,
+                                                      parent_record_ptr->column_versions.at(col).col_version,
+                                                      parent_->get_clock().current_time(), parent_->node_id_));
+          } else {
+            // The parent does not have this column; delete it to revert
+            inverse_changes.emplace_back(Change<K, V>(record_id, col,
+                                                      std::nullopt, // Indicates deletion
+                                                      0,            // Column version 0 signifies deletion
+                                                      parent_->get_clock().current_time(), parent_->node_id_));
+          }
+        } else {
+          // The parent does not have the record; remove the entire record to revert
+          inverse_changes.emplace_back(Change<K, V>(record_id,
+                                                    std::nullopt, // nullptr indicates a tombstone for the entire record
+                                                    std::nullopt,
+                                                    0, // Column version 0 signifies a tombstone
+                                                    parent_->get_clock().current_time(), parent_->node_id_));
+        }
+      }
+    }
+
+    return inverse_changes;
+  }
+
+  /// Reverts all changes made by this CRDT since it was created from the parent.
+  ///
+  /// # Returns
+  ///
+  /// A vector of `Change` objects representing the inverse changes needed to undo the child’s changes.
+  ///
+  /// # Complexity
+  ///
+  /// O(c), where c is the number of changes since `base_version_`
+  CrdtVector<Change<K, V>> revert() {
+    if (!parent_) {
+      throw std::runtime_error("Cannot revert without a parent CRDT.");
+    }
+
+    // Step 1: Retrieve all changes made by the child since base_version_
+    CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
+
+    // Step 2: Generate inverse changes using the generalized function
+    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes);
+
+    return inverse_changes;
   }
 
   /// Inserts a new record or updates an existing record in the CRDT.
@@ -514,6 +608,7 @@ private:
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
   std::shared_ptr<CRDT<K, V>> parent_;
+  uint64_t base_version_; // Tracks the parent’s db_version at the time of child creation
 
   /// Applies a list of changes to reconstruct the CRDT state.
   ///
