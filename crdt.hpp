@@ -55,9 +55,8 @@ struct ColumnVersion {
   uint64_t col_version;
   uint64_t db_version;
   CrdtNodeId node_id;
-  uint64_t seq;
 
-  ColumnVersion(uint64_t c, uint64_t d, CrdtNodeId n, uint64_t s) : col_version(c), db_version(d), node_id(n), seq(s) {}
+  ColumnVersion(uint64_t c, uint64_t d, CrdtNodeId n) : col_version(c), db_version(d), node_id(n) {}
 };
 
 /// Represents a record in the CRDT.
@@ -95,13 +94,12 @@ template <typename K, typename V> struct Change {
   uint64_t col_version;
   uint64_t db_version;
   CrdtNodeId node_id;
-  uint64_t seq;
 
   Change() = default;
 
-  Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid, uint64_t s)
+  Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
-        node_id(nid), seq(s) {}
+        node_id(nid) {}
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
@@ -172,29 +170,26 @@ public:
     Record<V> &record = is_new_record ? data_[record_id] : data_.at(record_id);
 
     for (const auto &[col_name, value] : fields) {
-      uint64_t col_version, seq;
+      uint64_t col_version;
       if (is_new_record) {
         col_version = 1;
-        seq = 0;
-        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, seq));
+        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_));
       } else {
         auto col_it = record.column_versions.find(col_name);
         if (col_it != record.column_versions.end()) {
           col_version = ++col_it->second.col_version;
-          seq = ++col_it->second.seq;
           col_it->second.db_version = db_version;
           col_it->second.node_id = node_id_;
         } else {
           col_version = 1;
-          seq = 0;
-          record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, seq));
+          record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_));
         }
       }
 
       if constexpr (ReturnChanges) {
         record.fields[col_name] = value;
         changes.emplace_back(
-            Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_, seq));
+            Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_));
       } else {
         record.fields[std::move(col_name)] = std::move(value);
       }
@@ -235,13 +230,13 @@ public:
 
     // Insert deletion clock info
     CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_, 0));
+    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_));
 
     // Store deletion info in the data map
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     if constexpr (ReturnChanges) {
-      changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, 0));
+      changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_));
       return changes;
     }
   }
@@ -271,7 +266,7 @@ public:
             }
           }
           changes.emplace_back(Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version,
-                                            clock_info.node_id, clock_info.seq));
+                                            clock_info.node_id));
         }
       }
     }
@@ -303,7 +298,6 @@ public:
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
-      uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = std::move(change.value);
 
       if (remote_db_version >= new_db_version) {
@@ -343,15 +337,8 @@ public:
           } else if (remote_db_version < local.db_version) {
             should_accept = false;
           } else {
-            // db_version is equal; use node_id and seq for tiebreaking
-            if (remote_node_id > local.node_id) {
-              should_accept = true;
-            } else if (remote_node_id < local.node_id) {
-              should_accept = false;
-            } else {
-              // node_id is equal; compare seq
-              should_accept = (remote_seq > local.seq);
-            }
+            // db_version is equal; use node_id for final tiebreaking
+            should_accept = (remote_node_id > local.node_id);
           }
         }
       }
@@ -364,14 +351,14 @@ public:
 
           // Update deletion clock info
           CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
+          deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, new_db_version, remote_node_id));
 
           // Store deletion info in the data map
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version, new_db_version,
-                                                       remote_node_id, remote_seq));
+                                                       remote_node_id));
           }
         } else if (tombstones_.find(record_id) == tombstones_.end()) {
           // Handle insertion or update if the record is not tombstoned
@@ -394,15 +381,15 @@ public:
             // Update the column version info
             record.column_versions.insert_or_assign(
                 col_name ? col_name.value() : "__deleted__",
-                ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
+                ColumnVersion(remote_col_version, new_db_version, remote_node_id));
 
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
-                                                       remote_col_version, new_db_version, remote_node_id, remote_seq));
+                                                       remote_col_version, new_db_version, remote_node_id));
           } else {
             // Update the column version info
             record.column_versions.insert_or_assign(
                 col_name ? std::move(col_name.value()) : "__deleted__",
-                ColumnVersion(remote_col_version, new_db_version, remote_node_id, remote_seq));
+                ColumnVersion(remote_col_version, new_db_version, remote_node_id));
           }
         }
       }
@@ -530,7 +517,6 @@ private:
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
-      uint64_t remote_seq = change.seq;
       std::optional<V> remote_value = std::move(change.value);
 
       if (!col_name.has_value()) {
@@ -540,7 +526,7 @@ private:
 
         // Insert deletion clock info
         CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-        deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+        deletion_clock.emplace("__deleted__", ColumnVersion(remote_col_version, remote_db_version, remote_node_id));
 
         // Store deletion info in the data map
         data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
@@ -556,7 +542,7 @@ private:
 
           // Update the column version info
           record.column_versions.insert_or_assign(
-              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_seq));
+              std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id));
         }
       }
     }

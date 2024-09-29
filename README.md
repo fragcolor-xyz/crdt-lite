@@ -40,7 +40,6 @@ CRDT-Lite is a lightweight implementation of Conflict-free Replicated Data Types
       - [Importance of Attribute Comparison Order](#importance-of-attribute-comparison-order)
         - [1. Column Version (`col_version`) Before Database Version (`db_version`)](#1-column-version-col_version-before-database-version-db_version)
         - [2. Database Version (`db_version`) Before Node ID (`node_id`)](#2-database-version-db_version-before-node-id-node_id)
-        - [3. Node ID (`node_id`) Before Sequence Number (`seq`)](#3-node-id-node_id-before-sequence-number-seq)
       - [Example Scenarios](#example-scenarios)
         - [Scenario 1: Concurrent Updates to the Same Field](#scenario-1-concurrent-updates-to-the-same-field)
         - [Scenario 2: Deletion vs. Update](#scenario-2-deletion-vs-update)
@@ -95,7 +94,6 @@ CRDT-Lite's C++ implementation is designed with core concepts and principles to 
      uint64_t col_version;
      uint64_t db_version;
      uint64_t site_id;
-     uint64_t seq;
    };
    ```
 3. **Record:** Represents individual records with fields and their version information.
@@ -116,8 +114,7 @@ Conflicts are resolved deterministically using a combination of:
 
 1. **Column Version:** Tracks changes at the field level.
 2. **Database Version (`db_version`):** Provides a global ordering of changes.
-3. **Site ID:** Breaks ties between concurrent changes from different nodes.
-4. **Sequence Number (`seq`):** Orders changes from the same site.
+3. **Node ID:** Breaks ties between concurrent changes from different nodes.
 
 The merge algorithm prioritizes these factors in the above order to ensure consistent conflict resolution across all nodes.
 
@@ -133,8 +130,7 @@ struct Change {
   std::optional<V> value;
   uint64_t col_version;
   uint64_t db_version;
-  uint64_t site_id;
-  uint64_t seq;
+  CrdtNodeId node_id;
 };
 ```
 
@@ -247,15 +243,14 @@ The conflict resolution algorithm uses the following attributes, in order of pri
 
 1. **Column Version (`col_version`)**: Represents the version of a specific column (field) within a record. It increments with each change to that column.
 2. **Database Version (`db_version`)**: A logical clock that provides a causal ordering of changes across the entire database.
-3. **Node ID (`node_id`)**: A unique identifier for each node (site) in the distributed system. It helps break ties when `col_version` and `db_version` are equal.
-4. **Sequence Number (`seq`)**: A counter that increments with each change from the same node, ensuring ordering of changes from the same site.
+3. **Node ID (`node_id`)**: A unique identifier for each node in the distributed system. It helps break ties when `col_version` and `db_version` are equal.
 
 #### Merge Algorithm Steps
 
 When integrating incoming changes, the algorithm processes each change individually using the following steps:
 
 1. **Update Logical Clock**: The local logical clock (`db_version`) is updated to be at least as high as the incoming `db_version`.
-2. **Retrieve Local Version Information**: For the record and column in question, retrieve the local `col_version`, `db_version`, `node_id`, and `seq`.
+2. **Retrieve Local Version Information**: For the record and column in question, retrieve the local `col_version`, `db_version`, and `node_id`.
 3. **Determine Acceptance of Change**: Compare the incoming change's attributes with the local attributes in the following order:
    - **Column Version (`col_version`)**:
      - **If incoming `col_version` > local `col_version`**: Accept the change.
@@ -267,11 +262,7 @@ When integrating incoming changes, the algorithm processes each change individua
      - **If equal**, proceed to the next attribute.
    - **Node ID (`node_id`)**:
      - **If incoming `node_id` > local `node_id`**: Accept the change.
-     - **If incoming `node_id` < local `node_id`**: Reject the change.
-     - **If equal**, proceed to the next attribute.
-   - **Sequence Number (`seq`)**:
-     - **If incoming `seq` > local `seq`**: Accept the change.
-     - **If incoming `seq` <= local `seq`**: Reject the change.
+     - **If incoming `node_id` <= local `node_id`**: Reject the change.
 4. **Apply Accepted Changes**:
    - **If accepted**:
      - **Updates and Insertions**: Update the field's value and version information.
@@ -301,19 +292,14 @@ The order in which attributes are compared is critical for maintaining the corre
 - **Causal Ordering**: `db_version` acts as a logical clock that captures the causal history of changes across the entire database. By comparing `db_version` after `col_version`, we respect the causal relationships between changes.
 - **Global Consistency**: Using `db_version` ensures that changes are ordered consistently across nodes, even when `col_version` is the same.
 
-##### 3. Node ID (`node_id`) Before Sequence Number (`seq`)
-
-- **Tie-Breaking Between Nodes**: When `col_version` and `db_version` are equal, `node_id` provides a deterministic way to break ties between changes originating from different nodes.
-- **Sequence Within a Node**: `seq` is used to order changes from the same node when all other attributes are equal.
-
 #### Example Scenarios
 
 ##### Scenario 1: Concurrent Updates to the Same Field
 
 - **Node A** updates field `F` in record `R`:
-  - `col_version = 2`, `db_version = 5`, `node_id = 1`, `seq = 10`.
+  - `col_version = 2`, `db_version = 5`, `node_id = 1`.
 - **Node B** updates field `F` in record `R` concurrently:
-  - `col_version = 2`, `db_version = 6`, `node_id = 2`, `seq = 7`.
+  - `col_version = 2`, `db_version = 6`, `node_id = 2`.
 
 **Conflict Resolution**:
 
@@ -325,9 +311,9 @@ The order in which attributes are compared is critical for maintaining the corre
 ##### Scenario 2: Deletion vs. Update
 
 - **Node A** deletes record `R`:
-  - Updates `"__deleted__"` column with `col_version = 3`, `db_version = 8`, `node_id = 1`, `seq = 15`.
+  - Updates `"__deleted__"` column with `col_version = 3`, `db_version = 8`, `node_id = 1`.
 - **Node B** updates field `F` in record `R`:
-  - `col_version = 2`, `db_version = 7`, `node_id = 2`, `seq = 12`.
+  - `col_version = 2`, `db_version = 7`, `node_id = 2`.
 
 **Conflict Resolution** for field `F`:
 

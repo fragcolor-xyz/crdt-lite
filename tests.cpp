@@ -153,7 +153,7 @@ int main() {
     std::cout << "Test 'Tombstone Handling' passed." << std::endl;
   }
 
-  // Test Case: Conflict Resolution with site_id and seq using insert_or_update
+  // Test Case: Conflict Resolution with site_id using insert_or_update
   {
     CRDT<CrdtString, CrdtString> node1(1);
     CRDT<CrdtString, CrdtString> node2(2);
@@ -193,7 +193,7 @@ int main() {
 
     assert_true(node1.get_data().at(record_id).fields.at("tag") == expected_tag, "Conflict Resolution: Tag resolution mismatch");
     assert_true(node1.get_data() == node2.get_data(), "Conflict Resolution: Data mismatch");
-    std::cout << "Test 'Conflict Resolution with site_id and seq' passed." << std::endl;
+    std::cout << "Test 'Conflict Resolution with site_id' passed." << std::endl;
   }
 
   // Test Case: Logical Clock Update using insert_or_update
@@ -528,7 +528,7 @@ int main() {
     uint64_t seq = 1;
 
     CrdtString record_id = generate_uuid();
-    changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id, seq++));
+    changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id));
     CRDT<CrdtString, CrdtString> crdt_loaded(node_id, std::move(changes));
 
     // Make additional changes after loading
@@ -555,11 +555,11 @@ int main() {
     uint64_t seq = 1;
 
     CrdtString record_id = generate_uuid();
-    changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id, seq++));
+    changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id));
     CRDT<CrdtString, CrdtString> crdt_loaded(node_id, std::move(changes));
 
     // Attempt to merge the same changes again
-    crdt_loaded.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id, seq)});
+    crdt_loaded.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id)});
 
     // Verify that no duplicate changes are applied
     const auto &data = crdt_loaded.get_data();
@@ -576,20 +576,20 @@ int main() {
     uint64_t seq1 = 1;
 
     CrdtString record_id = generate_uuid();
-    changes_node1.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node1_value1", 1, 1, node1_id, seq1++));
+    changes_node1.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node1_value1", 1, 1, node1_id));
     CRDT<CrdtString, CrdtString> node1_crdt(node1_id, std::move(changes_node1));
 
     CrdtVector<Change<CrdtString, CrdtString>> changes_node2;
     CrdtNodeId node2_id = 2;
     uint64_t seq2 = 1;
-    changes_node2.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node2_value1", 2, 2, node2_id, seq2++));
+    changes_node2.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node2_value1", 2, 2, node2_id));
     CRDT<CrdtString, CrdtString> node2_crdt(node2_id, std::move(changes_node2));
 
     // Merge node2 into node1
-    node1_crdt.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "node2_value1", 2, 2, node2_id, seq2)});
+    node1_crdt.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "node2_value1", 2, 2, node2_id)});
 
     // Merge node1 into node2
-    node2_crdt.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "node1_value1", 1, 1, node1_id, seq1)});
+    node2_crdt.merge_changes({Change<CrdtString, CrdtString>(record_id, "field1", "node1_value1", 1, 1, node1_id)});
 
     // Verify conflict resolution based on db_version and node_id
     // node2's change should prevail since it has a higher db_version
@@ -635,16 +635,16 @@ int main() {
     uint64_t seq = 1;
 
     CrdtString record_id1 = generate_uuid();
-    changes_load1.emplace_back(Change<CrdtString, CrdtString>(record_id1, "field1", "value1", 1, 1, node_id, seq++));
+    changes_load1.emplace_back(Change<CrdtString, CrdtString>(record_id1, "field1", "value1", 1, 1, node_id));
     CRDT<CrdtString, CrdtString> crdt1(node_id, std::move(changes_load1));
 
     CrdtVector<Change<CrdtString, CrdtString>> changes_load2;
     CrdtString record_id2 = generate_uuid();
-    changes_load2.emplace_back(Change<CrdtString, CrdtString>(record_id2, "field2", "value2", 2, 2, node_id, seq++));
+    changes_load2.emplace_back(Change<CrdtString, CrdtString>(record_id2, "field2", "value2", 2, 2, node_id));
     CRDT<CrdtString, CrdtString> crdt2(node_id, std::move(changes_load2));
 
     // Merge crdt2 into crdt1
-    crdt1.merge_changes({Change<CrdtString, CrdtString>(record_id2, "field2", "value2", 2, 2, node_id, seq)});
+    crdt1.merge_changes({Change<CrdtString, CrdtString>(record_id2, "field2", "value2", 2, 2, node_id)});
 
     // Make additional changes
     CrdtMap<CrdtString, CrdtString> new_fields = {{"field3", "value3"}};
