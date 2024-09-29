@@ -525,7 +525,6 @@ int main() {
     // Initialize CRDT with pre-loaded changes
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     CrdtNodeId node_id = 1;
-    uint64_t seq = 1;
 
     CrdtString record_id = generate_uuid();
     changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id));
@@ -552,7 +551,6 @@ int main() {
     // Initialize CRDT with pre-loaded changes
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     CrdtNodeId node_id = 1;
-    uint64_t seq = 1;
 
     CrdtString record_id = generate_uuid();
     changes.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "value1", 1, 1, node_id));
@@ -573,7 +571,6 @@ int main() {
     // Initialize two CRDTs with pre-loaded changes
     CrdtVector<Change<CrdtString, CrdtString>> changes_node1;
     CrdtNodeId node1_id = 1;
-    uint64_t seq1 = 1;
 
     CrdtString record_id = generate_uuid();
     changes_node1.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node1_value1", 1, 1, node1_id));
@@ -581,7 +578,6 @@ int main() {
 
     CrdtVector<Change<CrdtString, CrdtString>> changes_node2;
     CrdtNodeId node2_id = 2;
-    uint64_t seq2 = 1;
     changes_node2.emplace_back(Change<CrdtString, CrdtString>(record_id, "field1", "node2_value1", 2, 2, node2_id));
     CRDT<CrdtString, CrdtString> node2_crdt(node2_id, std::move(changes_node2));
 
@@ -632,7 +628,6 @@ int main() {
     // Simulate loading from disk multiple times
     CrdtVector<Change<CrdtString, CrdtString>> changes_load1;
     CrdtNodeId node_id = 1;
-    uint64_t seq = 1;
 
     CrdtString record_id1 = generate_uuid();
     changes_load1.emplace_back(Change<CrdtString, CrdtString>(record_id1, "field1", "value1", 1, 1, node_id));
