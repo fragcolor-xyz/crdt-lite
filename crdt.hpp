@@ -25,6 +25,7 @@ using CrdtNodeId = uint64_t;
 #include <algorithm>
 #include <iostream>
 #include <optional>
+#include <memory>
 
 /// Represents a logical clock for maintaining causality.
 class LogicalClock {
