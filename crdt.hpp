@@ -158,7 +158,16 @@ public:
   /// # Returns
   ///
   /// A vector of inverse `Change` objects.
-  CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) const {
+  /// Generates inverse changes for a given set of changes based on the specified source (parent or top-level CRDT).
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A vector of changes to invert.
+  ///
+  /// # Returns
+  ///
+  /// A vector of inverse `Change` objects.
+  template <bool UseParent = false> CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -168,47 +177,42 @@ public:
 
       if (!col_name.has_value()) {
         // The change was a record deletion (tombstone)
-        // To revert, restore the record's state from the parent
-        auto parent_record_ptr = parent_->get_record_ptr(record_id);
-        if (parent_record_ptr) {
-          // Restore all fields from the parent
-          for (const auto &[parent_col, parent_val] : parent_record_ptr->fields) {
+        // To revert, restore the record's state from the specified source
+        auto record_ptr = UseParent ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        if (record_ptr) {
+          // Restore all fields from the record
+          for (const auto &[parent_col, parent_val] : record_ptr->fields) {
             inverse_changes.emplace_back(Change<K, V>(record_id, parent_col, parent_val,
-                                                      parent_record_ptr->column_versions.at(parent_col).col_version,
-                                                      parent_->get_clock().current_time(), parent_->node_id_));
+                                                      record_ptr->column_versions.at(parent_col).col_version,
+                                                      record_ptr->column_versions.at(parent_col).db_version, node_id_));
           }
           // Remove the tombstone
-          inverse_changes.emplace_back(Change<K, V>(record_id,
-                                                    std::nullopt, // nullptr indicates a tombstone removal
-                                                    std::nullopt,
+          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
                                                     0, // Column version 0 signifies removal of tombstone
-                                                    parent_->get_clock().current_time(), parent_->node_id_));
+                                                    clock_.current_time(), node_id_));
         }
       } else {
         // The change was an insertion or update of a column
         CrdtString col = *col_name;
-        auto parent_record_ptr = parent_->get_record_ptr(record_id);
-        if (parent_record_ptr) {
-          auto parent_field_it = parent_record_ptr->fields.find(col);
-          if (parent_field_it != parent_record_ptr->fields.end()) {
-            // The parent has a value for this column; set it back to the parent's value
-            inverse_changes.emplace_back(Change<K, V>(record_id, col, parent_field_it->second,
-                                                      parent_record_ptr->column_versions.at(col).col_version,
-                                                      parent_->get_clock().current_time(), parent_->node_id_));
+        auto record_ptr = UseParent ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        if (record_ptr) {
+          auto field_it = record_ptr->fields.find(col);
+          if (field_it != record_ptr->fields.end()) {
+            // The record has a value for this column; set it back to the record's value
+            inverse_changes.emplace_back(Change<K, V>(record_id, col, field_it->second,
+                                                      record_ptr->column_versions.at(col).col_version,
+                                                      record_ptr->column_versions.at(col).db_version, node_id_));
           } else {
-            // The parent does not have this column; delete it to revert
-            inverse_changes.emplace_back(Change<K, V>(record_id, col,
-                                                      std::nullopt, // Indicates deletion
-                                                      0,            // Column version 0 signifies deletion
-                                                      parent_->get_clock().current_time(), parent_->node_id_));
+            // The record does not have this column; delete it to revert
+            inverse_changes.emplace_back(Change<K, V>(record_id, col, std::nullopt, // Indicates deletion
+                                                      0,                            // Column version 0 signifies deletion
+                                                      clock_.current_time(), node_id_));
           }
         } else {
-          // The parent does not have the record; remove the entire record to revert
-          inverse_changes.emplace_back(Change<K, V>(record_id,
-                                                    std::nullopt, // nullptr indicates a tombstone for the entire record
-                                                    std::nullopt,
+          // The record does not have the record; remove the entire record to revert
+          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
                                                     0, // Column version 0 signifies a tombstone
-                                                    parent_->get_clock().current_time(), parent_->node_id_));
+                                                    clock_.current_time(), node_id_));
         }
       }
     }
@@ -234,7 +238,7 @@ public:
     CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
 
     // Step 2: Generate inverse changes using the generalized function
-    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes);
+    CrdtVector<Change<K, V>> inverse_changes = invert_changes<true>(child_changes);
 
     return inverse_changes;
   }
