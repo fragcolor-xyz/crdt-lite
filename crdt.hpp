@@ -401,12 +401,15 @@ public:
   template <bool ReturnAcceptedChanges = false>
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
                                                                                           bool ignore_parent = false) {
-    if (changes.empty()) {
-      // avoid unnecessary work and clock updates
-      return;
-    }
-
     CrdtVector<Change<K, V>> accepted_changes; // Will be optimized away if ReturnAcceptedChanges is false
+
+    if (changes.empty()) {
+      if constexpr (ReturnAcceptedChanges) {
+        return accepted_changes;
+      } else {
+        return;
+      }
+    }
 
     auto new_db_version = clock_.tick();
 
