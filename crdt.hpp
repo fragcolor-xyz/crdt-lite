@@ -9,12 +9,14 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <vector>
 
 template <typename T> using CrdtVector = std::vector<T>;
 using CrdtString = std::string;
 template <typename K, typename V> using CrdtMap = std::unordered_map<K, V>;
 template <typename K> using CrdtSet = std::unordered_set<K>;
+template <typename T, typename Comparator> using CrdtSortedSet = std::set<T, Comparator>;
 using CrdtNodeId = uint64_t;
 #endif
 
@@ -117,6 +119,8 @@ template <typename K, typename V> struct ChangeComparator {
     if (a.db_version != b.db_version)
       return a.db_version > b.db_version;
     return a.node_id > b.node_id;
+    // Add this line:
+    return false; // Consider equal if all fields match
   }
 };
 
@@ -543,9 +547,9 @@ public:
   /// * `changes` - A vector of changes to compress (will be modified in-place).
   ///
   /// Complexity: O(n log n), where n is the number of changes
-  template <bool Sorted = false>
-  static void compress_changes(CrdtVector<Change<K, V>> &changes) {
-    if (changes.empty()) return;
+  template <bool Sorted = false> static void compress_changes(CrdtVector<Change<K, V>> &changes) {
+    if (changes.empty())
+      return;
 
     auto new_end = compress_changes<Sorted>(changes.begin(), changes.end());
     changes.erase(new_end, changes.end());
@@ -563,9 +567,9 @@ public:
   /// Iterator to the new end of the range after compression.
   ///
   /// Complexity: O(n log n), where n is the number of changes
-  template <bool Sorted = false, typename Iterator>
-  static Iterator compress_changes(Iterator begin, Iterator end) {
-    if (begin == end) return end;
+  template <bool Sorted = false, typename Iterator> static Iterator compress_changes(Iterator begin, Iterator end) {
+    if (begin == end)
+      return end;
 
     if constexpr (!Sorted) {
       // Sort changes using the ChangeComparator
