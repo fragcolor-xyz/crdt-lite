@@ -12,14 +12,14 @@
 #include <vector>
 
 template <typename T> using CrdtVector = std::vector<T>;
-
 using CrdtString = std::string;
-
 template <typename K, typename V> using CrdtMap = std::unordered_map<K, V>;
-
 template <typename K> using CrdtSet = std::unordered_set<K>;
-
 using CrdtNodeId = uint64_t;
+#endif
+
+#ifndef CRDT_SORT_FUNC
+#define CRDT_SORT_FUNC std::sort
 #endif
 
 #include <algorithm>
@@ -101,6 +101,23 @@ template <typename K, typename V> struct Change {
   Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
         node_id(nid) {}
+};
+
+/// Comparator for sorting Changes
+template <typename K, typename V> struct ChangeComparator {
+  bool operator()(const Change<K, V> &a, const Change<K, V> &b) const {
+    if (a.record_id != b.record_id)
+      return a.record_id < b.record_id;
+    if (a.col_name.has_value() != b.col_name.has_value())
+      return b.col_name.has_value(); // Deletions (nullopt) come last for each record
+    if (a.col_name != b.col_name)
+      return a.col_name < b.col_name;
+    if (a.col_version != b.col_version)
+      return a.col_version > b.col_version;
+    if (a.db_version != b.db_version)
+      return a.db_version > b.db_version;
+    return a.node_id > b.node_id;
+  }
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
@@ -530,24 +547,14 @@ public:
   /// The number of changes remaining after compression.
   ///
   /// Complexity: O(n log n), where n is the number of changes
-  static void compress_changes(CrdtVector<Change<K, V>> &changes) {
+  template <bool Sorted = false> static void compress_changes(CrdtVector<Change<K, V>> &changes) {
     if (changes.empty())
       return;
 
-    // Sort changes based on record_id, col_name (with nullopt last), and then by precedence rules
-    std::sort(changes.begin(), changes.end(), [](const Change<K, V> &a, const Change<K, V> &b) {
-      if (a.record_id != b.record_id)
-        return a.record_id < b.record_id;
-      if (a.col_name.has_value() != b.col_name.has_value())
-        return b.col_name.has_value(); // Deletions (nullopt) come last for each record
-      if (a.col_name != b.col_name)
-        return a.col_name < b.col_name;
-      if (a.col_version != b.col_version)
-        return a.col_version > b.col_version;
-      if (a.db_version != b.db_version)
-        return a.db_version > b.db_version;
-      return a.node_id > b.node_id;
-    });
+    if constexpr (!Sorted) {
+      // Sort changes using the ChangeComparator
+      CRDT_SORT_FUNC(changes.begin(), changes.end(), ChangeComparator<K, V>());
+    }
 
     // Use two-pointer technique to compress in-place
     size_t write = 0;
@@ -558,9 +565,9 @@ public:
         if (write != read) {
           changes[write] = std::move(changes[read]);
         }
-      } else if (!changes[read].col_name.has_value()) {
+      } else if (!changes[read].col_name.has_value() && changes[write].col_name.has_value()) {
         // Current read is a deletion, keep it and skip all previous changes for this record
-        write = read;
+        changes[write] = std::move(changes[read]);
       } else if (changes[read].col_name != changes[write].col_name) {
         // New column for the same record
         ++write;

@@ -1151,6 +1151,365 @@ int main() {
     // std::cout << "Test 'Reverting a Child CRDT Restores Parent's State' passed." << std::endl;
   }
 
+  // Test Case 1: Compress with No Changes
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+    assert_true(changes.empty(), "Compress Changes: No changes should remain after compression.");
+    std::cout << "Test 'Compress with No Changes' passed." << std::endl;
+  }
+
+  // Test Case 2: Single Change should remain unchanged
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value1", 1, 1, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    assert_true(changes.size() == 1, "Compress Changes: Single change should remain unchanged.");
+    assert_true(changes[0].record_id == "record1" && changes[0].col_name == "col1" && changes[0].value == "value1",
+                "Compress Changes: Single change content mismatch.");
+    std::cout << "Test 'Single Change Unchanged' passed." << std::endl;
+  }
+
+  // Test Case 3: Multiple Changes on Different Records and Columns
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col2", "value2", 1, 2, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record3", "col3", "value3", 1, 3, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    assert_true(changes.size() == 3, "Compress Changes: All distinct changes should remain.");
+    std::cout << "Test 'Multiple Distinct Changes' passed." << std::endl;
+  }
+
+  // Test Case 4: Multiple Changes on the Same Record and Same Column
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Older change
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "old_value", 1, 1, 1));
+    // Newer change
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "new_value", 2, 2, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    assert_true(changes.size() == 1, "Compress Changes: Only the latest change should remain.");
+    assert_true(changes[0].value == "new_value", "Compress Changes: Latest change value mismatch.");
+    std::cout << "Test 'Multiple Changes Same Record and Column' passed." << std::endl;
+  }
+
+  // Test Case 5: Multiple Changes on the Same Record but Different Columns
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "value2", 1, 2, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col3", "value3", 1, 3, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    assert_true(changes.size() == 3, "Compress Changes: Changes on different columns should remain.");
+    std::cout << "Test 'Multiple Changes Same Record Different Columns' passed." << std::endl;
+  }
+
+  // Test Case 6: Interleaved Changes on Multiple Records and Columns
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Record1, Column1
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v2", 2, 2, 1));
+    // Record2, Column2
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col2", "v3", 1, 3, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col2", "v4", 2, 4, 1));
+    // Record1, Column3
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col3", "v5", 1, 5, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, col1: "v2"
+    // - record2, col2: "v4"
+    // - record1, col3: "v5"
+    assert_true(changes.size() == 3, "Compress Changes: Should compress to latest changes per column.");
+    for (const auto &change : changes) {
+      if (change.record_id == "record1" && change.col_name == "col1") {
+        assert_true(change.value == "v2", "Compress Changes: record1 col1 value mismatch.");
+      } else if (change.record_id == "record2" && change.col_name == "col2") {
+        assert_true(change.value == "v4", "Compress Changes: record2 col2 value mismatch.");
+      } else if (change.record_id == "record1" && change.col_name == "col3") {
+        assert_true(change.value == "v5", "Compress Changes: record1 col3 value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Interleaved Changes on Multiple Records and Columns' passed." << std::endl;
+  }
+
+  // Test Case 7: Changes Including Deletions
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Insertions
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "value2", 1, 2, 1));
+    // Update col1
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value3", 2, 3, 1));
+    // Delete col2
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", std::nullopt, 2, 4, 1));
+    // Insert col3
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col3", "value4", 1, 5, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, col1: "value3"
+    // - record1, col2: deletion (std::nullopt)
+    // - record1, col3: "value4"
+    assert_true(changes.size() == 3, "Compress Changes: Should compress updates and deletions correctly.");
+    for (const auto &change : changes) {
+      if (change.record_id == "record1" && change.col_name == "col1") {
+        assert_true(change.value == "value3", "Compress Changes: record1 col1 latest value mismatch.");
+      } else if (change.record_id == "record1" && change.col_name == "col2") {
+        assert_true(!change.value.has_value(), "Compress Changes: record1 col2 should be deleted.");
+      } else if (change.record_id == "record1" && change.col_name == "col3") {
+        assert_true(change.value == "value4", "Compress Changes: record1 col3 value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Changes Including Deletions' passed." << std::endl;
+  }
+
+  // Test Case 8: Multiple Deletions on the Same Record
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // First deletion
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 1, 1, 1));
+    // Second deletion (redundant)
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 2, 2, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, __deleted__: latest deletion
+    assert_true(changes.size() == 1, "Compress Changes: Multiple deletions should compress to latest.");
+    assert_true(!changes[0].col_name.has_value(), "Compress Changes: Deletion should have no column name.");
+    assert_true(!changes[0].value.has_value(), "Compress Changes: Deletion should have no value.");
+    assert_true(changes[0].col_version == 2, "Compress Changes: Latest deletion col_version mismatch.");
+    std::cout << "Test 'Multiple Deletions on the Same Record' passed." << std::endl;
+  }
+
+  // Test Case 9: Mixed Inserts, Updates, and Deletions Across Multiple Records
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Record1
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v2", 2, 2, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "r1c2_v1", 1, 3, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", std::nullopt, 2, 4, 1)); // Deletion
+    // Record2
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v1", 1, 5, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v2", 2, 6, 1));
+    // Record3
+    changes.emplace_back(Change<CrdtString, CrdtString>("record3", "col1", "r3c1_v1", 1, 7, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, col1: "r1c1_v2"
+    // - record1, col2: deletion
+    // - record2, col1: "r2c1_v2"
+    // - record3, col1: "r3c1_v1"
+    assert_true(changes.size() == 4, "Compress Changes: Mixed operations should compress correctly.");
+    for (const auto &change : changes) {
+      if (change.record_id == "record1" && change.col_name == "col1") {
+        assert_true(change.value == "r1c1_v2", "Compress Changes: record1 col1 latest value mismatch.");
+      } else if (change.record_id == "record1" && change.col_name == "col2") {
+        assert_true(!change.value.has_value(), "Compress Changes: record1 col2 should be deleted.");
+      } else if (change.record_id == "record2" && change.col_name == "col1") {
+        assert_true(change.value == "r2c1_v2", "Compress Changes: record2 col1 latest value mismatch.");
+      } else if (change.record_id == "record3" && change.col_name == "col1") {
+        assert_true(change.value == "r3c1_v1", "Compress Changes: record3 col1 value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Mixed Inserts, Updates, and Deletions Across Multiple Records' passed." << std::endl;
+  }
+
+  // Test Case 10: Compression Order Verification
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Out-of-order changes
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v1", 1, 5, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v2", 2, 2, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v2", 2, 6, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "r1c2_v1", 1, 3, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "r1c2_v2", 2, 4, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, col1: "r1c1_v2"
+    // - record1, col2: "r1c2_v2"
+    // - record2, col1: "r2c1_v2"
+    assert_true(changes.size() == 3, "Compress Changes: Compression should handle out-of-order changes correctly.");
+    for (const auto &change : changes) {
+      if (change.record_id == "record1" && change.col_name == "col1") {
+        assert_true(change.value == "r1c1_v2", "Compress Changes: record1 col1 latest value mismatch.");
+      } else if (change.record_id == "record1" && change.col_name == "col2") {
+        assert_true(change.value == "r1c2_v2", "Compress Changes: record1 col2 latest value mismatch.");
+      } else if (change.record_id == "record2" && change.col_name == "col1") {
+        assert_true(change.value == "r2c1_v2", "Compress Changes: record2 col1 latest value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Compression Order Verification' passed." << std::endl;
+  }
+
+  // Test Case 11: Compression with Only Deletions
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Multiple deletions on different records
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", std::nullopt, std::nullopt, 1, 2, 1));
+    // Redundant deletions
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 2, 3, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", std::nullopt, std::nullopt, 2, 4, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, __deleted__ with latest version
+    // - record2, __deleted__ with latest version
+    assert_true(changes.size() == 2, "Compress Changes: Only latest deletions per record should remain.");
+    for (const auto &change : changes) {
+      assert_true(!change.col_name.has_value(), "Compress Changes: Deletion should have no column name.");
+      assert_true(!change.value.has_value(), "Compress Changes: Deletion should have no value.");
+      if (change.record_id == "record1") {
+        assert_true(change.col_version == 2, "Compress Changes: record1 latest deletion version mismatch.");
+      } else if (change.record_id == "record2") {
+        assert_true(change.col_version == 2, "Compress Changes: record2 latest deletion version mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected record ID present.");
+      }
+    }
+    std::cout << "Test 'Compression with Only Deletions' passed." << std::endl;
+  }
+
+  // // Test Case 12: Compression with Mixed Insertions and Deletions on the Same Record
+  // {
+  //   CrdtVector<Change<CrdtString, CrdtString>> changes;
+  //   // Insertions
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v1", 1, 1, 1));
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "v2", 1, 2, 1));
+  //   // Deletion of record1
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 2, 3, 1));
+  //   // Re-insertion after deletion (should be treated as a new state)
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v3", 3, 4, 1));
+
+  //   CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+  //   // Expected compressed changes:
+  //   // - record1, __deleted__ at version 2
+  //   // - record1, col1: "v3" at version 3
+  //   assert_true(changes.size() == 2, "Compress Changes: Should handle mixed insertions and deletions correctly.");
+  //   for (const auto &change : changes) {
+  //     if (change.record_id == "record1" && !change.col_name.has_value()) {
+  //       assert_true(change.col_version == 2, "Compress Changes: record1 deletion version mismatch.");
+  //     } else if (change.record_id == "record1" && change.col_name == "col1") {
+  //       assert_true(change.value == "v3", "Compress Changes: record1 col1 latest value mismatch.");
+  //       assert_true(change.col_version == 3, "Compress Changes: record1 col1 latest version mismatch.");
+  //     } else {
+  //       assert_true(false, "Compress Changes: Unexpected change present.");
+  //     }
+  //   }
+  //   std::cout << "Test 'Mixed Insertions and Deletions on the Same Record' passed." << std::endl;
+  // }
+
+  // Test Case 13: Compression with Multiple Columns and Deletions
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Record1, Column1
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "v2", 2, 2, 1));
+    // Record1, Column2
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", "v3", 1, 3, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col2", std::nullopt, 2, 4, 1));
+    // Record1, Column3
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col3", "v4", 1, 5, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    // Expected compressed changes:
+    // - record1, col1: "v2"
+    // - record1, col2: deletion
+    // - record1, col3: "v4"
+    assert_true(changes.size() == 3, "Compress Changes: Should correctly compress multiple columns with deletions.");
+    for (const auto &change : changes) {
+      if (change.record_id == "record1" && change.col_name == "col1") {
+        assert_true(change.value == "v2", "Compress Changes: record1 col1 latest value mismatch.");
+      } else if (change.record_id == "record1" && change.col_name == "col2") {
+        assert_true(!change.value.has_value(), "Compress Changes: record1 col2 should be deleted.");
+      } else if (change.record_id == "record1" && change.col_name == "col3") {
+        assert_true(change.value == "v4", "Compress Changes: record1 col3 value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Multiple Columns with Deletions' passed." << std::endl;
+  }
+
+  // // Test Case 14: Compression with Overlapping Changes Across Records
+  // {
+  //   CrdtVector<Change<CrdtString, CrdtString>> changes;
+  //   // Record1
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v1", 1, 1, 1));
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v2", 2, 2, 1));
+  //   // Record2
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v1", 1, 3, 1));
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v2", 2, 4, 1));
+  //   // Record1 Deletion
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record1", std::nullopt, std::nullopt, 3, 5, 1));
+  //   // Record2 Update
+  //   changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col1", "r2c1_v3", 3, 6, 1));
+
+  //   CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+  //   // Expected compressed changes:
+  //   // - record1, __deleted__ at version 3
+  //   // - record2, col1: "r2c1_v3" at version 3
+  //   assert_true(changes.size() == 2, "Compress Changes: Overlapping changes across records should compress correctly.");
+  //   for (const auto &change : changes) {
+  //     if (change.record_id == "record1") {
+  //       assert_true(!change.col_name.has_value(), "Compress Changes: record1 should be deleted.");
+  //       assert_true(change.col_version == 3, "Compress Changes: record1 deletion version mismatch.");
+  //     } else if (change.record_id == "record2" && change.col_name == "col1") {
+  //       assert_true(change.value == "r2c1_v3", "Compress Changes: record2 col1 latest value mismatch.");
+  //       assert_true(change.col_version == 3, "Compress Changes: record2 col1 latest version mismatch.");
+  //     } else {
+  //       assert_true(false, "Compress Changes: Unexpected change present.");
+  //     }
+  //   }
+  //   std::cout << "Test 'Overlapping Changes Across Records' passed." << std::endl;
+  // }
+
+  // Test Case 15: Compression with Multiple Insertions and No Overwrites
+  {
+    CrdtVector<Change<CrdtString, CrdtString>> changes;
+    // Multiple insertions on different records
+    changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "r1c1_v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record2", "col2", "r2c2_v1", 1, 2, 1));
+    changes.emplace_back(Change<CrdtString, CrdtString>("record3", "col3", "r3c3_v1", 1, 3, 1));
+
+    CRDT<CrdtString, CrdtString>::compress_changes(changes);
+
+    assert_true(changes.size() == 3, "Compress Changes: All distinct insertions should remain.");
+    std::cout << "Test 'Multiple Insertions with No Overwrites' passed." << std::endl;
+  }
+
   std::cout << "All tests passed successfully!" << std::endl;
   return 0;
 }
