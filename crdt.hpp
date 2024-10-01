@@ -118,8 +118,8 @@ template <typename K, typename V> struct ChangeComparator {
       return a.col_version > b.col_version;
     if (a.db_version != b.db_version)
       return a.db_version > b.db_version;
-    return a.node_id > b.node_id;
-    // Add this line:
+    if (a.node_id != b.node_id)
+      return a.node_id > b.node_id;
     return false; // Consider equal if all fields match
   }
 };
