@@ -542,43 +542,59 @@ public:
   ///
   /// * `changes` - A vector of changes to compress (will be modified in-place).
   ///
+  /// Complexity: O(n log n), where n is the number of changes
+  template <bool Sorted = false>
+  static void compress_changes(CrdtVector<Change<K, V>> &changes) {
+    if (changes.empty()) return;
+
+    auto new_end = compress_changes<Sorted>(changes.begin(), changes.end());
+    changes.erase(new_end, changes.end());
+  }
+
+  /// Compresses a range of changes by removing redundant changes that overwrite each other.
+  ///
+  /// # Arguments
+  ///
+  /// * `begin` - Iterator to the beginning of the range.
+  /// * `end` - Iterator to the end of the range.
+  ///
   /// # Returns
   ///
-  /// The number of changes remaining after compression.
+  /// Iterator to the new end of the range after compression.
   ///
   /// Complexity: O(n log n), where n is the number of changes
-  template <bool Sorted = false> static void compress_changes(CrdtVector<Change<K, V>> &changes) {
-    if (changes.empty())
-      return;
+  template <bool Sorted = false, typename Iterator>
+  static Iterator compress_changes(Iterator begin, Iterator end) {
+    if (begin == end) return end;
 
     if constexpr (!Sorted) {
       // Sort changes using the ChangeComparator
-      CRDT_SORT_FUNC(changes.begin(), changes.end(), ChangeComparator<K, V>());
+      CRDT_SORT_FUNC(begin, end, ChangeComparator<K, V>());
     }
 
     // Use two-pointer technique to compress in-place
-    size_t write = 0;
-    for (size_t read = 1; read < changes.size(); ++read) {
-      if (changes[read].record_id != changes[write].record_id) {
+    Iterator write = begin;
+    for (Iterator read = std::next(begin); read != end; ++read) {
+      if (read->record_id != write->record_id) {
         // New record, always keep it
         ++write;
         if (write != read) {
-          changes[write] = std::move(changes[read]);
+          *write = std::move(*read);
         }
-      } else if (!changes[read].col_name.has_value() && changes[write].col_name.has_value()) {
+      } else if (!read->col_name.has_value() && write->col_name.has_value()) {
         // Current read is a deletion, keep it and skip all previous changes for this record
-        changes[write] = std::move(changes[read]);
-      } else if (changes[read].col_name != changes[write].col_name) {
+        *write = std::move(*read);
+      } else if (read->col_name != write->col_name) {
         // New column for the same record
         ++write;
         if (write != read) {
-          changes[write] = std::move(changes[read]);
+          *write = std::move(*read);
         }
       }
       // Else: same record and column, keep the existing one (which is the most recent due to sorting)
     }
 
-    changes.resize(write + 1);
+    return std::next(write);
   }
 
   /// Prints the current data and tombstones for debugging purposes.
