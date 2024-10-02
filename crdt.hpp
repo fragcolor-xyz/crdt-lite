@@ -384,14 +384,16 @@ public:
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.db_version > last_db_version) {
           std::optional<V> value = std::nullopt;
+          std::optional<CrdtString> name = std::nullopt;
           if (col_name != "__deleted__") {
             auto field_it = record.fields.find(col_name);
             if (field_it != record.fields.end()) {
               value = field_it->second;
             }
+            name = col_name;
           }
-          changes.emplace_back(
-              Change<K, V>(record_id, col_name, value, clock_info.col_version, clock_info.db_version, clock_info.node_id));
+          changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value), clock_info.col_version,
+                                            clock_info.db_version, clock_info.node_id));
         }
       }
     }
