@@ -1,0 +1,19 @@
+int main() {
+    // Create a CRDT for a text file
+This is a new line.
+    ListCRDT<std::string> text_crdt(1);
+    // Initialize from a file
+    text_crdt.initialize_from_file("example.txt");
+
+    // Insert a new line at line number 2
+    uint64_t eid_new_line = text_crdt.generate_eid();
+    text_crdt.insert_line(eid_new_line, 2, "This is a new line.");
+
+    // Delete line number 4
+    text_crdt.delete_line(4);
+
+    // Save the updated text back to the file
+    text_crdt.save_to_file("example_updated.txt");
+
+    return 0;
+}

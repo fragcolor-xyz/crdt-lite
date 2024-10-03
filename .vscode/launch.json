@@ -11,6 +11,14 @@
       "program": "${workspaceFolder}/crdt",
       "args": [],
       "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug list-crdt",
+      "program": "${workspaceFolder}/list-crdt",
+      "args": [],
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

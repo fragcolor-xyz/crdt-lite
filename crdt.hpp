@@ -9,12 +9,14 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
 #include <set>
 #include <vector>
 
 template <typename T> using CrdtVector = std::vector<T>;
 using CrdtString = std::string;
 template <typename K, typename V> using CrdtMap = std::unordered_map<K, V>;
+template <typename K, typename V, typename Comparator> using CrdtSortedMap = std::map<K, V, Comparator>;
 template <typename K> using CrdtSet = std::unordered_set<K>;
 template <typename T, typename Comparator> using CrdtSortedSet = std::set<T, Comparator>;
 using CrdtNodeId = uint64_t;
