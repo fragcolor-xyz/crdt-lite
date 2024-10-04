@@ -62,49 +62,20 @@ struct ListElement {
 // Comparator for ListElements to establish a total order
 struct ListElementComparator {
   bool operator()(const ListElement &a, const ListElement &b) const {
-    // If a's origin_right is b's ID, then a comes before b
-    if (a.origin_right.has_value() && a.origin_right.value() == b.id) {
-      return true;
-    }
-    // If b's origin_right is a's ID, then b comes before a
-    if (b.origin_right.has_value() && b.origin_right.value() == a.id) {
-      return false;
+    // Compare based on the position in the list
+    if (a.origin_left != b.origin_left) {
+      if (!a.origin_left.has_value()) return true;
+      if (!b.origin_left.has_value()) return false;
+      return a.origin_left.value() < b.origin_left.value();
     }
 
-    // If both have the same origin_left and origin_right, use ElementID to break the tie
-    if (a.origin_left == b.origin_left && a.origin_right == b.origin_right) {
-      return a.id < b.id;
+    if (a.origin_right != b.origin_right) {
+      if (!a.origin_right.has_value()) return false;
+      if (!b.origin_right.has_value()) return true;
+      return a.origin_right.value() < b.origin_right.value();
     }
 
-    // Otherwise, compare origin_left
-    if (a.origin_left.has_value() && b.origin_left.has_value()) {
-      if (a.origin_left.value() < b.origin_left.value()) {
-        return true;
-      }
-      if (b.origin_left.value() < a.origin_left.value()) { // Changed from '>' to '<'
-        return false;
-      }
-    } else if (a.origin_left.has_value()) {
-      return true;
-    } else if (b.origin_left.has_value()) {
-      return false;
-    }
-
-    // Compare origin_right
-    if (a.origin_right.has_value() && b.origin_right.has_value()) {
-      if (a.origin_right.value() < b.origin_right.value()) {
-        return true;
-      }
-      if (b.origin_right.value() < a.origin_right.value()) { // Changed from '>' to '<'
-        return false;
-      }
-    } else if (a.origin_right.has_value()) {
-      return true;
-    } else if (b.origin_right.has_value()) {
-      return false;
-    }
-
-    // Finally, use ElementID to break any remaining ties
+    // If both have the same origins, use ElementID to break the tie
     return a.id < b.id;
   }
 };
@@ -127,12 +98,16 @@ public:
     std::optional<ElementID> right_origin;
 
     auto visible = get_visible_elements();
-    if (index > 0 && index <= visible.size()) {
-      // Get the ID of the element currently at (index - 1)
-      left_origin = visible[index - 1].id;
-    }
-    if (index < visible.size()) {
-      // Get the ID of the element currently at (index)
+    if (index >= visible.size()) {
+      // Inserting at the end
+      if (!visible.empty()) {
+        left_origin = visible.back().id;
+      }
+    } else {
+      // Inserting in the middle or at the beginning
+      if (index > 0) {
+        left_origin = visible[index - 1].id;
+      }
       right_origin = visible[index].id;
     }
 
@@ -313,17 +288,9 @@ private:
       return;
     }
 
-    // Determine the correct position based on origins
-    uint32_t pos = 0;
-    if (new_elem.origin_left.has_value()) {
-      pos = find_position(new_elem.origin_left.value()) + 1;
-    } else {
-      // If no left origin, position after root
-      pos = 1;
-    }
-
-    // Insert the new element at the determined position
-    elements_.insert(elements_.begin() + pos, new_elem);
+    // Find the correct position to insert the new element
+    auto insert_pos = std::lower_bound(elements_.begin(), elements_.end(), new_elem, ListElementComparator());
+    elements_.insert(insert_pos, new_elem);
   }
 
   // Finds the position of an ElementID in the elements vector
