@@ -650,6 +650,30 @@ public:
     return combined_data;
   }
 
+  /// Retrieves a pointer to a record if it exists, or nullptr if it doesn't.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `ignore_parent` - If true, only checks the current CRDT instance, ignoring the parent.
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the Record<V> if found, or nullptr if not found.
+  ///
+  /// Complexity: O(1) average case for hash table lookup
+  const Record<V>* get_record(const K& record_id, bool ignore_parent = false) const {
+    auto it = data_.find(record_id);
+    if (it != data_.end()) {
+      return &(it->second);
+    }
+    if (ignore_parent) {
+      return nullptr;
+    } else {
+      return parent_ ? parent_->get_record(record_id) : nullptr;
+    }
+  }
+
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
