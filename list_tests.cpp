@@ -1,6 +1,5 @@
 #include "list_crdt.hpp"
 
-// Usage Example
 int main() {
   // Create two replicas
   ListCRDT replicaA("A");
@@ -17,24 +16,24 @@ int main() {
   replicaB.insert(1, "Cruel");
 
   // Print initial states
-  std::cout << "Replica A: ";
-  replicaA.print(); // Expected: Hello World
+  std::cout << "Replica A (Visible): ";
+  replicaA.print_visible(); // Expected: Hello World
 
-  std::cout << "Replica B: ";
-  replicaB.print(); // Expected: Goodbye Cruel
+  std::cout << "Replica B (Visible): ";
+  replicaB.print_visible(); // Expected: Goodbye Cruel
 
   // Merge replicas
   replicaA.merge(replicaB);
   replicaB.merge(replicaA);
 
   // Print merged states
-  std::cout << "After merging:" << std::endl;
+  std::cout << "\nAfter merging:" << std::endl;
 
-  std::cout << "Replica A: ";
-  replicaA.print(); // Expected order based on origins and IDs
+  std::cout << "Replica A (Visible): ";
+  replicaA.print_visible(); // Expected order based on origins and IDs
 
-  std::cout << "Replica B: ";
-  replicaB.print(); // Should match Replica A
+  std::cout << "Replica B (Visible): ";
+  replicaB.print_visible(); // Should match Replica A
 
   // Perform concurrent insertions
   replicaA.insert(2, "!");
@@ -44,31 +43,44 @@ int main() {
   replicaA.merge(replicaB);
   replicaB.merge(replicaA);
 
-  // Print final states
-  std::cout << "After concurrent insertions and merging:" << std::endl;
+  // Print after concurrent insertions and merging
+  std::cout << "\nAfter concurrent insertions and merging:" << std::endl;
 
-  std::cout << "Replica A: ";
-  replicaA.print(); // Expected: Goodbye Cruel Hello World ! ?
+  std::cout << "Replica A (Visible): ";
+  replicaA.print_visible(); // Expected: Hello Goodbye World ! ? Cruel
 
-  std::cout << "Replica B: ";
-  replicaB.print(); // Should match Replica A
+  std::cout << "Replica B (Visible): ";
+  replicaB.print_visible(); // Should match Replica A
 
   // Demonstrate deletions
-  replicaA.delete_element(1); // Delete "Cruel"
-  replicaB.delete_element(0); // Delete "Goodbye"
+  replicaA.delete_element(1); // Delete "Goodbye"
+  replicaB.delete_element(0); // Delete "Hello"
 
   // Merge deletions
   replicaA.merge(replicaB);
   replicaB.merge(replicaA);
 
-  // Print states after deletions
-  std::cout << "After deletions and merging:" << std::endl;
+  // Print states after deletions and merging
+  std::cout << "\nAfter deletions and merging:" << std::endl;
 
-  std::cout << "Replica A: ";
-  replicaA.print(); // Expected: Hello World ! ?
+  std::cout << "Replica A (Visible): ";
+  replicaA.print_visible(); // Expected: World ! ? Cruel
 
-  std::cout << "Replica B: ";
-  replicaB.print(); // Should match Replica A
+  std::cout << "Replica B (Visible): ";
+  replicaB.print_visible(); // Should match Replica A
+
+  // Perform garbage collection
+  replicaA.garbage_collect();
+  replicaB.garbage_collect();
+
+  // Print all elements after garbage collection
+  std::cout << "\nAfter garbage collection:" << std::endl;
+
+  std::cout << "Replica A (All Elements):" << std::endl;
+  replicaA.print_all_elements();
+
+  std::cout << "Replica B (All Elements):" << std::endl;
+  replicaB.print_all_elements();
 
   // Demonstrate delta generation and application
   // Replica A inserts "New Line" at index 2
@@ -81,13 +93,13 @@ int main() {
   replicaB.apply_delta(delta.first, delta.second);
 
   // Print final states after delta synchronization
-  std::cout << "After delta synchronization:" << std::endl;
+  std::cout << "\nAfter delta synchronization:" << std::endl;
 
-  std::cout << "Replica A: ";
-  replicaA.print(); // Expected: Hello World New Line ! ?
+  std::cout << "Replica A (Visible): ";
+  replicaA.print_visible(); // Expected: World ! ? New Line Cruel
 
-  std::cout << "Replica B: ";
-  replicaB.print(); // Should match Replica A
+  std::cout << "Replica B (Visible): ";
+  replicaB.print_visible(); // Should match Replica A
 
   return 0;
 }
