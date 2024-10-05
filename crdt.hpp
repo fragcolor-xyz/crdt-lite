@@ -674,6 +674,23 @@ public:
     }
   }
 
+  // Add this public method to the CRDT class
+  /// Checks if a record is tombstoned.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `ignore_parent` - If true, only checks the current CRDT instance, ignoring the parent.
+  ///
+  /// # Returns
+  ///
+  /// True if the record is tombstoned, false otherwise.
+  ///
+  /// Complexity: O(1) average case for hash table lookup
+  bool is_tombstoned(const K &record_id, bool ignore_parent = false) const {
+    return is_record_tombstoned(record_id, ignore_parent);
+  }
+
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
