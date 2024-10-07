@@ -5,3 +5,6 @@ tests
 crdt.dSYM
 .DS_Store
 list-crdt*
+obj
+bin
+TestResult.xml

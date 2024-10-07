@@ -16,5 +16,19 @@ jobs:
     - name: Install g++
       run: sudo apt-get update && sudo apt-get install -y g++
 
-    - name: Compile and Run Tests
+    - name: Compile and Run C++ Tests
       run: g++ -std=c++20 -g -o crdt tests.cpp && ./crdt
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: '6.0.x'  # Specify the .NET version you're using
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build C# project
+      run: dotnet build --no-restore
+
+    - name: Run C# Tests
+      run: dotnet run --project crdt-lite.csproj
