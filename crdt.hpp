@@ -77,7 +77,7 @@ template <typename K, typename V> struct DefaultMergeRule {
 
 // Define a concept for a custom change comparator
 template <typename Comparator, typename K, typename V>
-concept ChangeComparatorConcept = requires(Comparator c, const Change<K, V> &a, const Change<K, V> &b) {
+concept ChangeComparator = requires(Comparator c, const Change<K, V> &a, const Change<K, V> &b) {
   { c(a, b) } -> std::convertible_to<bool>;
 };
 
@@ -174,8 +174,8 @@ template <typename V> constexpr bool operator==(const Record<V> &lhs, const Reco
 }
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V, typename MergeRuleType = DefaultMergeRule<K, V>,
-          typename ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
+template <typename K, typename V, MergeRule<K, V> MergeRuleType = DefaultMergeRule<K, V>,
+          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
 class CRDT : public std::enable_shared_from_this<CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType>> {
 public:
   // Create a new empty CRDT
@@ -825,8 +825,8 @@ private:
 ///
 /// Complexity: O(c + m), where c is the number of changes since last_db_version,
 /// and m is the complexity of merge_changes
-template <typename K, typename V, typename MergeRuleType = DefaultMergeRule<K, V>,
-          typename ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
+template <typename K, typename V, MergeRule<K, V> MergeRuleType = DefaultMergeRule<K, V>,
+          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
 constexpr void sync_nodes(CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &source,
                           CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &target, uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
