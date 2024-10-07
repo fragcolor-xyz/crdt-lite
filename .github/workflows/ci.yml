@@ -17,7 +17,9 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y g++
 
     - name: Compile and Run C++ Tests
-      run: g++ -std=c++20 -g -o crdt tests.cpp && ./crdt
+      run: |
+        g++ -std=c++20 -g -o crdt tests.cpp && ./crdt
+        g++ -std=c++20 -g -o list-crdt list_tests.cpp && ./list-crdt
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1

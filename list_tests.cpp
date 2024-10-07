@@ -1,9 +1,10 @@
 #include "list_crdt.hpp"
+#include <string>
 
 int main() {
   // Create two replicas
-  ListCRDT replicaA("A");
-  ListCRDT replicaB("B");
+  ListCRDT<std::string> replicaA(1); // Use CrdtNodeId 1 for replica A
+  ListCRDT<std::string> replicaB(2); // Use CrdtNodeId 2 for replica B
 
   // Replica A inserts "Hello" at index 0
   replicaA.insert(0, "Hello");
@@ -47,7 +48,7 @@ int main() {
   std::cout << "\nAfter concurrent insertions and merging:" << std::endl;
 
   std::cout << "Replica A (Visible): ";
-  replicaA.print_visible(); // Expected: Hello Goodbye World ! ? Cruel
+  replicaA.print_visible(); // Expected: Hello Goodbye World ! ?
 
   std::cout << "Replica B (Visible): ";
   replicaB.print_visible(); // Should match Replica A
@@ -64,7 +65,7 @@ int main() {
   std::cout << "\nAfter deletions and merging:" << std::endl;
 
   std::cout << "Replica A (Visible): ";
-  replicaA.print_visible(); // Expected: World ! ? Cruel
+  replicaA.print_visible(); // Expected: World ! ?
 
   std::cout << "Replica B (Visible): ";
   replicaB.print_visible(); // Should match Replica A
@@ -96,7 +97,7 @@ int main() {
   std::cout << "\nAfter delta synchronization:" << std::endl;
 
   std::cout << "Replica A (Visible): ";
-  replicaA.print_visible(); // Expected: World ! ? New Line Cruel
+  replicaA.print_visible(); // Expected: World ! New Line ?
 
   std::cout << "Replica B (Visible): ";
   replicaB.print_visible(); // Should match Replica A
