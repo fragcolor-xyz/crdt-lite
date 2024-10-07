@@ -241,7 +241,7 @@ public:
   /// # Returns
   ///
   /// A vector of inverse `Change` objects.
-  constexpr CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
+  CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -426,7 +426,7 @@ public:
   /// A vector of changes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
-  constexpr CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
+  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
     CrdtVector<Change<K, V>> changes;
 
     // Get changes from parent
@@ -690,9 +690,7 @@ public:
   /// A pointer to the Record<V> if found, or nullptr if not found.
   ///
   /// Complexity: O(1) average case for hash table lookup
-  constexpr const Record<V> *get_record(const K &record_id, bool ignore_parent = false) const {
-    return get_record_ptr(record_id, ignore_parent);
-  }
+  Record<V> *get_record(const K &record_id, bool ignore_parent = false) { return get_record_ptr(record_id, ignore_parent); }
 
   // Add this public method to the CRDT class
   /// Checks if a record is tombstoned.
