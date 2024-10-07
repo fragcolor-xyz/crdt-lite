@@ -20,10 +20,6 @@ template <typename T, typename Comparator> using CrdtSortedSet = std::set<T, Com
 using CrdtNodeId = uint64_t;
 #endif
 
-#ifndef CRDT_SORT_FUNC
-#define CRDT_SORT_FUNC std::sort
-#endif
-
 #include <algorithm>
 #include <iostream>
 #include <optional>
@@ -60,7 +56,7 @@ concept MergeRule = requires(Rule r, const Change<K, V> &local, const Change<K, 
 
 // Default merge rule (current behavior)
 template <typename K, typename V> struct DefaultMergeRule {
-  bool operator()(const Change<K, V> &local, const Change<K, V> &remote) const {
+  constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote) const {
     if (remote.col_version > local.col_version) {
       return true;
     } else if (remote.col_version < local.col_version) {
@@ -77,74 +73,15 @@ template <typename K, typename V> struct DefaultMergeRule {
   }
 };
 
-/// Represents a logical clock for maintaining causality.
-class LogicalClock {
-public:
-  LogicalClock() : time_(0) {}
-
-  /// Increments the clock for a local event.
-  uint64_t tick() { return ++time_; }
-
-  /// Updates the clock based on a received time.
-  uint64_t update(uint64_t received_time) {
-    time_ = std::max(time_, received_time);
-    return ++time_;
-  }
-
-  /// Sets the logical clock to a specific time.
-  void set_time(uint64_t t) { time_ = t; }
-
-  /// Retrieves the current time.
-  uint64_t current_time() const { return time_; }
-
-private:
-  uint64_t time_;
+// Define a concept for a custom change comparator
+template <typename Comparator, typename K, typename V>
+concept ChangeComparatorConcept = requires(Comparator c, const Change<K, V> &a, const Change<K, V> &b) {
+  { c(a, b) } -> std::convertible_to<bool>;
 };
 
-/// Represents the version information for a column.
-struct ColumnVersion {
-  uint64_t col_version;
-  uint64_t db_version;
-  CrdtNodeId node_id;
-
-  // this field is useful only locally when doing things like get_changes_since
-  // we record the local db_version when the change was created
-  uint64_t local_db_version;
-
-  ColumnVersion(uint64_t c, uint64_t d, CrdtNodeId n, uint64_t ldb_ver = 0)
-      : col_version(c), db_version(d), node_id(n), local_db_version(ldb_ver) {}
-};
-
-/// Represents a record in the CRDT.
-template <typename V> struct Record {
-  CrdtMap<CrdtString, V> fields;
-  CrdtMap<CrdtString, ColumnVersion> column_versions;
-
-  Record() = default;
-
-  Record(CrdtMap<CrdtString, V> &&f, CrdtMap<CrdtString, ColumnVersion> &&cv)
-      : fields(std::move(f)), column_versions(std::move(cv)) {}
-};
-
-// Free function to compare two Record<V> instances
-template <typename V> bool operator==(const Record<V> &lhs, const Record<V> &rhs) {
-  // Compare fields
-  if (lhs.fields.size() != rhs.fields.size())
-    return false;
-  for (const auto &[key, value] : lhs.fields) {
-    auto it = rhs.fields.find(key);
-    if (it == rhs.fields.end() || it->second != value)
-      return false;
-  }
-
-  // We don't care about column_versions, as those will be different for each node
-
-  return true;
-}
-
-/// Comparator for sorting Changes
-template <typename K, typename V> struct ChangeComparator {
-  bool operator()(const Change<K, V> &a, const Change<K, V> &b) const {
+// Default change comparator (current behavior)
+template <typename K, typename V> struct DefaultChangeComparator {
+  constexpr bool operator()(const Change<K, V> &a, const Change<K, V> &b) const {
     if (a.record_id != b.record_id)
       return a.record_id < b.record_id;
     if (a.col_name.has_value() != b.col_name.has_value())
@@ -161,15 +98,91 @@ template <typename K, typename V> struct ChangeComparator {
   }
 };
 
+/// Represents a default sort function.
+struct DefaultSort {
+  template <typename Iterator, typename Comparator>
+  constexpr void operator()(Iterator begin, Iterator end, Comparator comp) const {
+    std::sort(begin, end, comp);
+  }
+};
+
+/// Represents a logical clock for maintaining causality.
+class LogicalClock {
+public:
+  LogicalClock() : time_(0) {}
+
+  /// Increments the clock for a local event.
+  constexpr uint64_t tick() { return ++time_; }
+
+  /// Updates the clock based on a received time.
+  constexpr uint64_t update(uint64_t received_time) {
+    time_ = std::max(time_, received_time);
+    return ++time_;
+  }
+
+  /// Sets the logical clock to a specific time.
+  constexpr void set_time(uint64_t t) { time_ = t; }
+
+  /// Retrieves the current time.
+  constexpr uint64_t current_time() const { return time_; }
+
+private:
+  uint64_t time_;
+};
+
+/// Represents the version information for a column.
+struct ColumnVersion {
+  uint64_t col_version;
+  uint64_t db_version;
+  CrdtNodeId node_id;
+
+  // this field is useful only locally when doing things like get_changes_since
+  // we record the local db_version when the change was created
+  uint64_t local_db_version;
+
+  constexpr ColumnVersion(uint64_t c, uint64_t d, CrdtNodeId n, uint64_t ldb_ver = 0)
+      : col_version(c), db_version(d), node_id(n), local_db_version(ldb_ver) {}
+};
+
+/// Represents a record in the CRDT.
+template <typename V> struct Record {
+  CrdtMap<CrdtString, V> fields;
+  CrdtMap<CrdtString, ColumnVersion> column_versions;
+
+  Record() = default;
+
+  constexpr Record(CrdtMap<CrdtString, V> &&f, CrdtMap<CrdtString, ColumnVersion> &&cv)
+      : fields(std::move(f)), column_versions(std::move(cv)) {}
+};
+
+// Free function to compare two Record<V> instances
+template <typename V> constexpr bool operator==(const Record<V> &lhs, const Record<V> &rhs) {
+  // Compare fields
+  if (lhs.fields.size() != rhs.fields.size())
+    return false;
+  for (const auto &[key, value] : lhs.fields) {
+    auto it = rhs.fields.find(key);
+    if (it == rhs.fields.end() || it->second != value)
+      return false;
+  }
+
+  // We don't care about column_versions, as those will be different for each node
+
+  return true;
+}
+
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V, typename MergeRuleType = DefaultMergeRule<K, V>>
-class CRDT : public std::enable_shared_from_this<CRDT<K, V, MergeRuleType>> {
+template <typename K, typename V, typename MergeRuleType = DefaultMergeRule<K, V>,
+          typename ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
+class CRDT : public std::enable_shared_from_this<CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType>> {
 public:
   // Create a new empty CRDT
   // Complexity: O(1)
-  CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT<K, V, MergeRuleType>> parent = nullptr,
-       MergeRuleType merge_rule = MergeRuleType())
-      : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent), merge_rule_(std::move(merge_rule)) {
+  CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType>> parent = nullptr,
+       MergeRuleType merge_rule = MergeRuleType(), ChangeComparatorType change_comparator = ChangeComparatorType(),
+       SortFunctionType sort_func = SortFunctionType())
+      : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent), merge_rule_(std::move(merge_rule)),
+        change_comparator_(std::move(change_comparator)), sort_func_(std::move(sort_func)) {
     if (parent_) {
       // Set clock to parent's clock
       clock_ = parent_->clock_;
@@ -188,7 +201,7 @@ public:
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
   ///
   /// Complexity: O(n), where n is the number of changes
-  CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
+  constexpr CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
     apply_changes(std::move(changes));
   }
 
@@ -199,7 +212,7 @@ public:
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
   ///
   /// Complexity: O(n), where n is the number of changes
-  void reset(CrdtVector<Change<K, V>> &&changes) {
+  constexpr void reset(CrdtVector<Change<K, V>> &&changes) {
     // Clear existing data
     data_.clear();
     tombstones_.clear();
@@ -228,7 +241,7 @@ public:
   /// # Returns
   ///
   /// A vector of inverse `Change` objects.
-  template <bool UseParent = false> CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
+  constexpr CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -239,13 +252,14 @@ public:
       if (!col_name.has_value()) {
         // The change was a record deletion (tombstone)
         // To revert, restore the record's state from the specified source
-        auto record_ptr = UseParent ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        auto record_ptr = parent_ ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
         if (record_ptr) {
           // Restore all fields from the record
           for (const auto &[parent_col, parent_val] : record_ptr->fields) {
             inverse_changes.emplace_back(Change<K, V>(record_id, parent_col, parent_val,
                                                       record_ptr->column_versions.at(parent_col).col_version,
-                                                      record_ptr->column_versions.at(parent_col).db_version, node_id_));
+                                                      record_ptr->column_versions.at(parent_col).db_version, node_id_,
+                                                      record_ptr->column_versions.at(parent_col).local_db_version));
           }
           // Remove the tombstone
           inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
@@ -255,18 +269,19 @@ public:
       } else {
         // The change was an insertion or update of a column
         CrdtString col = *col_name;
-        auto record_ptr = UseParent ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        auto record_ptr = parent_ ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
         if (record_ptr) {
           auto field_it = record_ptr->fields.find(col);
           if (field_it != record_ptr->fields.end()) {
             // The record has a value for this column; set it back to the record's value
-            inverse_changes.emplace_back(Change<K, V>(record_id, col, field_it->second,
-                                                      record_ptr->column_versions.at(col).col_version,
-                                                      record_ptr->column_versions.at(col).db_version, node_id_));
+            inverse_changes.emplace_back(Change<K, V>(
+                record_id, col, field_it->second, record_ptr->column_versions.at(col).col_version,
+                record_ptr->column_versions.at(col).db_version, node_id_, record_ptr->column_versions.at(col).local_db_version));
           } else {
             // The record does not have this column; delete it to revert
-            inverse_changes.emplace_back(Change<K, V>(record_id, col, std::nullopt, // Indicates deletion
-                                                      0,                            // Column version 0 signifies deletion
+            inverse_changes.emplace_back(Change<K, V>(record_id, col,
+                                                      std::nullopt, // Indicates deletion
+                                                      0,            // Column version 0 signifies deletion
                                                       clock_.current_time(), node_id_));
           }
         } else {
@@ -290,7 +305,7 @@ public:
   /// # Complexity
   ///
   /// O(c), where c is the number of changes since `base_version_`
-  CrdtVector<Change<K, V>> revert() {
+  constexpr CrdtVector<Change<K, V>> revert() {
     if (!parent_) {
       throw std::runtime_error("Cannot revert without a parent CRDT.");
     }
@@ -299,7 +314,7 @@ public:
     CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
 
     // Step 2: Generate inverse changes using the generalized function
-    CrdtVector<Change<K, V>> inverse_changes = invert_changes<true>(child_changes);
+    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes);
 
     return inverse_changes;
   }
@@ -317,8 +332,8 @@ public:
   ///
   /// Complexity: O(m), where m is the number of fields in the input
   template <bool ReturnChanges = true>
-  std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> insert_or_update(const K &record_id,
-                                                                                     CrdtMap<CrdtString, V> &&fields) {
+  constexpr std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> insert_or_update(const K &record_id,
+                                                                                               CrdtMap<CrdtString, V> &&fields) {
     CrdtVector<Change<K, V>> changes;
     uint64_t db_version = clock_.tick();
 
@@ -333,7 +348,7 @@ public:
 
     Record<V> &record = get_or_create_record_unchecked(record_id);
 
-    for (const auto &[col_name, value] : fields) {
+    for (auto &[col_name, value] : fields) {
       uint64_t col_version;
       auto col_it = record.column_versions.find(col_name);
       if (col_it != record.column_versions.end()) {
@@ -411,10 +426,10 @@ public:
   /// A vector of changes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
-  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
+  constexpr CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
     CrdtVector<Change<K, V>> changes;
 
-    // get changes from parent
+    // Get changes from parent
     if (parent_) {
       auto parent_changes = parent_->get_changes_since(last_db_version);
       changes.insert(changes.end(), parent_changes.begin(), parent_changes.end());
@@ -439,7 +454,7 @@ public:
     }
 
     if (parent_) {
-      // since we merge from the parent, we need to also run a compression pass
+      // Since we merge from the parent, we need to also run a compression pass
       // to remove changes that have been overwritten by top level changes
       // since we compare at first by col_version, it's fine even if our db_version is lower
       // since we merge from the parent, we know that the changes are applied in order and col_version should always be increasing
@@ -486,11 +501,11 @@ public:
       // prevent clock drift, and ensure accurate conflict resolution.
       // This reflects the node's knowledge of global progress, even for
       // non-accepted changes.
-      auto new_local_db_version = clock_.update(remote_db_version);
+      uint64_t new_local_db_version = clock_.update(remote_db_version);
 
       // Retrieve local column version information
-      auto record_ptr = get_record_ptr(record_id, ignore_parent);
-      ColumnVersion *local_col_info = nullptr;
+      const Record<V> *record_ptr = get_record_ptr(record_id, ignore_parent);
+      const ColumnVersion *local_col_info = nullptr;
       if (record_ptr != nullptr) {
         auto col_it = record_ptr->column_versions.find(col_name ? *col_name : "__deleted__");
         if (col_it != record_ptr->column_versions.end()) {
@@ -505,9 +520,8 @@ public:
         // No local version exists; accept the remote change
         should_accept = true;
       } else {
-        const ColumnVersion &local = *local_col_info;
-        Change<K, V> local_change(record_id, col_name ? *col_name : "__deleted__", std::nullopt, local.col_version,
-                                  local.db_version, local.node_id);
+        Change<K, V> local_change(record_id, col_name ? *col_name : "__deleted__", std::nullopt, local_col_info->col_version,
+                                  local_col_info->db_version, local_col_info->node_id);
         should_accept = merge_rule_(local_change, change);
       }
 
@@ -597,8 +611,8 @@ public:
       return end;
 
     if constexpr (!Sorted) {
-      // Sort changes using the ChangeComparator
-      CRDT_SORT_FUNC(begin, end, ChangeComparator<K, V>());
+      // Sort changes using the custom ChangeComparator
+      SortFunctionType()(begin, end, ChangeComparatorType());
     }
 
     // Use two-pointer technique to compress in-place
@@ -629,7 +643,7 @@ public:
   /// Prints the current data and tombstones for debugging purposes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of fields per record
-  void print_data() const {
+  constexpr void print_data() const {
     std::cout << "Node " << node_id_ << " Data:" << std::endl;
     for (const auto &[record_id, record] : data_) {
       if (tombstones_.find(record_id) != tombstones_.end()) {
@@ -649,10 +663,10 @@ public:
 
   // Accessors for testing
   // Complexity: O(1)
-  const LogicalClock &get_clock() const { return clock_; }
+  constexpr const LogicalClock &get_clock() const { return clock_; }
 
   // Updated get_data() method
-  CrdtMap<K, Record<V>> get_data() const {
+  constexpr CrdtMap<K, Record<V>> get_data() const {
     if (!parent_) {
       return data_;
     }
@@ -676,16 +690,8 @@ public:
   /// A pointer to the Record<V> if found, or nullptr if not found.
   ///
   /// Complexity: O(1) average case for hash table lookup
-  const Record<V> *get_record(const K &record_id, bool ignore_parent = false) const {
-    auto it = data_.find(record_id);
-    if (it != data_.end()) {
-      return &(it->second);
-    }
-    if (ignore_parent) {
-      return nullptr;
-    } else {
-      return parent_ ? parent_->get_record(record_id) : nullptr;
-    }
+  constexpr const Record<V> *get_record(const K &record_id, bool ignore_parent = false) const {
+    return get_record_ptr(record_id, ignore_parent);
   }
 
   // Add this public method to the CRDT class
@@ -701,7 +707,7 @@ public:
   /// True if the record is tombstoned, false otherwise.
   ///
   /// Complexity: O(1) average case for hash table lookup
-  bool is_tombstoned(const K &record_id, bool ignore_parent = false) const {
+  constexpr bool is_tombstoned(const K &record_id, bool ignore_parent = false) const {
     return is_record_tombstoned(record_id, ignore_parent);
   }
 
@@ -713,9 +719,11 @@ private:
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
-  std::shared_ptr<CRDT<K, V, MergeRuleType>> parent_;
+  std::shared_ptr<CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType>> parent_;
   uint64_t base_version_; // Tracks the parent’s db_version at the time of child creation
   MergeRuleType merge_rule_;
+  ChangeComparatorType change_comparator_;
+  SortFunctionType sort_func_;
 
   /// Applies a list of changes to reconstruct the CRDT state.
   ///
@@ -776,7 +784,7 @@ private:
     }
   }
 
-  bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
+  constexpr bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
     if (tombstones_.find(record_id) != tombstones_.end()) {
       return true;
     }
@@ -787,7 +795,7 @@ private:
   }
 
   // Notice that this will not check if the record is tombstoned! Such check should be done by the caller
-  Record<V> &get_or_create_record_unchecked(const K &record_id, bool ignore_parent = false) {
+  constexpr Record<V> &get_or_create_record_unchecked(const K &record_id, bool ignore_parent = false) {
     auto [it, inserted] = data_.try_emplace(record_id);
     if (inserted && parent_ && !ignore_parent) {
       if (auto parent_record = parent_->get_record_ptr(record_id)) {
@@ -797,7 +805,7 @@ private:
     return it->second;
   }
 
-  Record<V> *get_record_ptr(const K &record_id, bool ignore_parent = false) {
+  constexpr Record<V> *get_record_ptr(const K &record_id, bool ignore_parent = false) {
     auto it = data_.find(record_id);
     if (it != data_.end()) {
       return &(it->second);
@@ -817,11 +825,14 @@ private:
 ///
 /// Complexity: O(c + m), where c is the number of changes since last_db_version,
 /// and m is the complexity of merge_changes
-template <typename K, typename V> void sync_nodes(CRDT<K, V> &source, CRDT<K, V> &target, uint64_t &last_db_version) {
+template <typename K, typename V, typename MergeRuleType = DefaultMergeRule<K, V>,
+          typename ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
+constexpr void sync_nodes(CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &source,
+                          CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &target, uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
 
   // Update last_db_version to the current max db_version in source
-  uint64_t max_version = 0;
+  uint64_t max_version = last_db_version;
   for (const auto &change : changes) {
     if (change.db_version > max_version) {
       max_version = change.db_version;
