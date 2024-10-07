@@ -22,7 +22,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
       with:
-        dotnet-version: '6.0.x'  # Specify the .NET version you're using
+        dotnet-version: '8.0.x'  # Updated to .NET 8.0
 
     - name: Restore dependencies
       run: dotnet restore
@@ -31,4 +31,4 @@ jobs:
       run: dotnet build --no-restore
 
     - name: Run C# Tests
-      run: dotnet run --project crdt-lite.csproj
+      run: dotnet test --no-restore --verbosity normal
