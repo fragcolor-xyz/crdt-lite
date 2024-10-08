@@ -642,9 +642,10 @@ public:
     return std::next(write);
   }
 
-  /// Prints the current data and tombstones for debugging purposes.
-  ///
-  /// Complexity: O(n * m), where n is the number of records and m is the average number of fields per record
+/// Prints the current data and tombstones for debugging purposes.
+///
+/// Complexity: O(n * m), where n is the number of records and m is the average number of fields per record
+#ifndef NDEBUG
   constexpr void print_data() const {
     std::cout << "Node " << node_id_ << " Data:" << std::endl;
     for (const auto &[record_id, record] : data_) {
@@ -662,6 +663,9 @@ public:
     }
     std::cout << std::endl << std::endl;
   }
+#else
+  constexpr void print_data() const {}
+#endif
 
   // Accessors for testing
   // Complexity: O(1)
