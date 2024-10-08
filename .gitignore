@@ -8,3 +8,4 @@ list-crdt*
 obj
 bin
 TestResult.xml
+.vscode
