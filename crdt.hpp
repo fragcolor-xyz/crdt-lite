@@ -711,6 +711,29 @@ public:
     return is_record_tombstoned(record_id, ignore_parent);
   }
 
+  // Add this constructor to the CRDT class
+  CRDT(const CRDT &other)
+      : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), tombstones_(other.tombstones_),
+        parent_(other.parent_), base_version_(other.base_version_), merge_rule_(other.merge_rule_),
+        change_comparator_(other.change_comparator_), sort_func_(other.sort_func_) {
+    // Note: This creates a shallow copy of the parent pointer
+  }
+
+  CRDT &operator=(const CRDT &other) {
+    if (this != &other) {
+      node_id_ = other.node_id_;
+      clock_ = other.clock_;
+      data_ = other.data_;
+      tombstones_ = other.tombstones_;
+      parent_ = other.parent_;
+      base_version_ = other.base_version_;
+      merge_rule_ = other.merge_rule_;
+      change_comparator_ = other.change_comparator_;
+      sort_func_ = other.sort_func_;
+    }
+    return *this;
+  }
+
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
