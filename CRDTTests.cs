@@ -342,5 +342,109 @@ public class CRDTTests
                     "Inserting After Deletion: Node2 should have '__deleted__' column version");
     }
 
+    [Test]
+    public void ListCRDTTest()
+    {
+        // Create two replicas
+        ListCRDT<string> replicaA = new ListCRDT<string>(replicaId: 1); // Use replicaId 1 for replica A
+        ListCRDT<string> replicaB = new ListCRDT<string>(replicaId: 2); // Use replicaId 2 for replica B
+
+        // Replica A inserts "Hello" at index 0
+        replicaA.Insert(0, "Hello");
+        // Replica A inserts "World" at index 1
+        replicaA.Insert(1, "World");
+
+        // Replica B inserts "Goodbye" at index 0
+        replicaB.Insert(0, "Goodbye");
+        // Replica B inserts "Cruel" at index 1
+        replicaB.Insert(1, "Cruel");
+
+        // Print initial states
+        Console.Write("Replica A (Visible): ");
+        replicaA.PrintVisible(); // Expected: Hello World
+
+        Console.Write("Replica B (Visible): ");
+        replicaB.PrintVisible(); // Expected: Goodbye Cruel
+
+        // Merge replicas
+        replicaA.Merge(replicaB);
+        replicaB.Merge(replicaA);
+
+        // Print merged states
+        Console.WriteLine("\nAfter merging:");
+
+        Console.Write("Replica A (Visible): ");
+        replicaA.PrintVisible(); // Expected order based on origins and IDs
+
+        Console.Write("Replica B (Visible): ");
+        replicaB.PrintVisible(); // Should match Replica A
+
+        // Perform concurrent insertions
+        replicaA.Insert(2, "!");
+        replicaB.Insert(2, "?");
+
+        // Merge again
+        replicaA.Merge(replicaB);
+        replicaB.Merge(replicaA);
+
+        // Print after concurrent insertions and merging
+        Console.WriteLine("\nAfter concurrent insertions and merging:");
+
+        Console.Write("Replica A (Visible): ");
+        replicaA.PrintVisible(); // Expected: Hello Goodbye World ! ?
+
+        Console.Write("Replica B (Visible): ");
+        replicaB.PrintVisible(); // Should match Replica A
+
+        // Demonstrate deletions
+        replicaA.DeleteElement(1); // Delete "Goodbye"
+        replicaB.DeleteElement(0); // Delete "Hello"
+
+        // Merge deletions
+        replicaA.Merge(replicaB);
+        replicaB.Merge(replicaA);
+
+        // Print states after deletions and merging
+        Console.WriteLine("\nAfter deletions and merging:");
+
+        Console.Write("Replica A (Visible): ");
+        replicaA.PrintVisible(); // Expected: World ! ?
+
+        Console.Write("Replica B (Visible): ");
+        replicaB.PrintVisible(); // Should match Replica A
+
+        // Perform garbage collection
+        replicaA.GarbageCollect();
+        replicaB.GarbageCollect();
+
+        // Print all elements after garbage collection
+        Console.WriteLine("\nAfter garbage collection:");
+
+        Console.WriteLine("Replica A (All Elements):");
+        replicaA.PrintAllElements();
+
+        Console.WriteLine("Replica B (All Elements):");
+        replicaB.PrintAllElements();
+
+        // Demonstrate delta generation and application
+        // Replica A inserts "New Line" at index 2
+        replicaA.Insert(2, "New Line");
+
+        // Generate delta from Replica A to Replica B
+        var delta = replicaA.GenerateDelta(replicaB);
+
+        // Apply delta to Replica B
+        replicaB.ApplyDelta(delta.NewElements, delta.Tombstones);
+
+        // Print final states after delta synchronization
+        Console.WriteLine("\nAfter delta synchronization:");
+
+        Console.Write("Replica A (Visible): ");
+        replicaA.PrintVisible(); // Expected: World ! New Line ?
+
+        Console.Write("Replica B (Visible): ");
+        replicaB.PrintVisible(); // Should match Replica A
+    }
+
     // Add more tests here as needed...
 }
