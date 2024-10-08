@@ -69,21 +69,59 @@ namespace ForSync.CRDT
         }
     }
 
+    // Add this new struct definition
+    public struct ColName<K>
+    {
+        public string Name { get; }
+        public K? AssociatedId { get; }
+
+        public ColName(string name, K? associatedId = default)
+        {
+            Name = name;
+            AssociatedId = associatedId;
+        }
+
+        public override string ToString() => AssociatedId != null ? $"{Name}:{AssociatedId}" : Name;
+
+        // Implement equality members
+        public override bool Equals(object? obj)
+        {
+            return obj is ColName<K> other &&
+                   Name == other.Name &&
+                   EqualityComparer<K?>.Default.Equals(AssociatedId, other.AssociatedId);
+        }
+
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Name, AssociatedId);
+        }
+
+        public static bool operator ==(ColName<K> left, ColName<K> right)
+        {
+            return left.Equals(right);
+        }
+
+        public static bool operator !=(ColName<K> left, ColName<K> right)
+        {
+            return !(left == right);
+        }
+    }
+
     /// <summary>
     /// Represents a record in the CRDT.
     /// </summary>
-    public class Record<V>
+    public class Record<K, V>
     {
-        public Dictionary<string, V> Fields { get; set; }
-        public Dictionary<string, ColumnVersion> ColumnVersions { get; set; }
+        public Dictionary<ColName<K>, V> Fields { get; set; }
+        public Dictionary<ColName<K>, ColumnVersion> ColumnVersions { get; set; }
 
         public Record()
         {
-            Fields = new Dictionary<string, V>();
-            ColumnVersions = new Dictionary<string, ColumnVersion>();
+            Fields = new Dictionary<ColName<K>, V>();
+            ColumnVersions = new Dictionary<ColName<K>, ColumnVersion>();
         }
 
-        public Record(Dictionary<string, V> fields, Dictionary<string, ColumnVersion> columnVersions)
+        public Record(Dictionary<ColName<K>, V> fields, Dictionary<ColName<K>, ColumnVersion> columnVersions)
         {
             Fields = fields;
             ColumnVersions = columnVersions;
@@ -94,7 +132,7 @@ namespace ForSync.CRDT
         /// </summary>
         public override bool Equals(object obj)
         {
-            if (obj is not Record<V> other)
+            if (obj is not Record<K, V> other)
                 return false;
 
             if (Fields.Count != other.Fields.Count)
@@ -129,7 +167,7 @@ namespace ForSync.CRDT
     public class Change<K, V>
     {
         public K RecordId { get; set; }
-        public string? ColName { get; set; } // null represents tombstone of the record
+        public ColName<K>? ColName { get; set; } // null represents tombstone of the record
         public V? Value { get; set; }       // null represents deletion of the column, not the record
         public ulong ColVersion { get; set; }
         public ulong DbVersion { get; set; }
@@ -140,7 +178,7 @@ namespace ForSync.CRDT
         {
         }
 
-        public Change(K recordId, string? colName, V? value, ulong colVersion, ulong dbVersion, ulong nodeId, ulong localDbVersion = 0)
+        public Change(K recordId, ColName<K>? colName, V? value, ulong colVersion, ulong dbVersion, ulong nodeId, ulong localDbVersion = 0)
         {
             RecordId = recordId;
             ColName = colName;
@@ -173,7 +211,11 @@ namespace ForSync.CRDT
                 return bHasCol ? -1 : 1; // Deletions (null) come last
 
             if (a.ColName != b.ColName)
-                return string.Compare(a.ColName, b.ColName, StringComparison.Ordinal);
+            {
+                if (a.ColName == null) return -1;
+                if (b.ColName == null) return 1;
+                return string.Compare(a.ColName.Value.ToString(), b.ColName.Value.ToString(), StringComparison.Ordinal);
+            }
 
             if (a.ColVersion != b.ColVersion)
                 return a.ColVersion > b.ColVersion ? -1 : 1;
@@ -195,7 +237,7 @@ namespace ForSync.CRDT
     {
         private ulong _nodeId;
         private LogicalClock _clock;
-        private Dictionary<K, Record<V>> _data;
+        private Dictionary<K, Record<K, V>> _data;
         private HashSet<K> _tombstones;
 
         private CRDT<K, V>? _parent;
@@ -205,7 +247,7 @@ namespace ForSync.CRDT
         {
             _nodeId = nodeId;
             _clock = new LogicalClock();
-            _data = new Dictionary<K, Record<V>>();
+            _data = new Dictionary<K, Record<K, V>>();
             _tombstones = new HashSet<K>();
             _parent = parent;
             _baseVersion = parent != null ? parent._clock.CurrentTime : 0;
@@ -231,7 +273,7 @@ namespace ForSync.CRDT
         {
             _nodeId = nodeId;
             _clock = new LogicalClock();
-            _data = new Dictionary<K, Record<V>>();
+            _data = new Dictionary<K, Record<K, V>>();
             _tombstones = new HashSet<K>();
 
             ApplyChanges(changes);
@@ -259,13 +301,13 @@ namespace ForSync.CRDT
             foreach (var change in changes)
             {
                 K recordId = change.RecordId;
-                string? colName = change.ColName;
+                ColName<K>? colName = change.ColName;
                 V? value = change.Value;
 
                 if (colName == null)
                 {
                     // The change was a record deletion (tombstone)
-                    Record<V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
+                    Record<K, V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
 
                     if (recordPtr != null)
                     {
@@ -294,8 +336,8 @@ namespace ForSync.CRDT
                 else
                 {
                     // The change was an insertion or update of a column
-                    string col = colName;
-                    Record<V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
+                    ColName<K> col = colName.Value;
+                    Record<K, V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
 
                     if (recordPtr != null)
                     {
@@ -359,7 +401,7 @@ namespace ForSync.CRDT
         /// <summary>
         /// Inserts a new record or updates an existing record in the CRDT.
         /// </summary>
-        public List<Change<K, V>> InsertOrUpdate(K recordId, Dictionary<string, V> fields)
+        public List<Change<K, V>> InsertOrUpdate(K recordId, Dictionary<ColName<K>, V> fields)
         {
             List<Change<K, V>> changes = new List<Change<K, V>>();
             ulong dbVersion = _clock.Tick();
@@ -370,11 +412,11 @@ namespace ForSync.CRDT
                 return changes;
             }
 
-            Record<V> record = GetOrCreateRecordUnchecked(recordId);
+            Record<K, V> record = GetOrCreateRecordUnchecked(recordId);
 
             foreach (var kvp in fields)
             {
-                string colName = kvp.Key;
+                ColName<K> colName = kvp.Key;
                 V value = kvp.Value;
 
                 ulong colVersion;
@@ -425,13 +467,13 @@ namespace ForSync.CRDT
             _data.Remove(recordId);
 
             // Insert deletion clock info
-            Dictionary<string, ColumnVersion> deletionClock = new Dictionary<string, ColumnVersion>
+            Dictionary<ColName<K>, ColumnVersion> deletionClock = new Dictionary<ColName<K>, ColumnVersion>
             {
-                { "__deleted__", new ColumnVersion(1, dbVersion, _nodeId, dbVersion) }
+                { new ColName<K>("__deleted__"), new ColumnVersion(1, dbVersion, _nodeId, dbVersion) }
             };
 
             // Store deletion info in the data map
-            _data[recordId] = new Record<V>(new Dictionary<string, V>(), deletionClock);
+            _data[recordId] = new Record<K, V>(new Dictionary<ColName<K>, V>(), deletionClock);
 
             changes.Add(new Change<K, V>(
                 recordId,
@@ -462,17 +504,17 @@ namespace ForSync.CRDT
             foreach (var recordKvp in _data)
             {
                 K recordId = recordKvp.Key;
-                Record<V> record = recordKvp.Value;
+                Record<K, V> record = recordKvp.Value;
 
                 foreach (var colKvp in record.ColumnVersions)
                 {
-                    string colName = colKvp.Key;
+                    ColName<K> colName = colKvp.Key;
                     ColumnVersion colVersion = colKvp.Value;
 
                     if (colVersion.LocalDbVersion > lastDbVersion)
                     {
-                        string? name = colName != "__deleted__" ? colName : null;
-                        V? value = colName != "__deleted__" && record.Fields.TryGetValue(colName, out V tempVal) ? tempVal : default;
+                        ColName<K>? name = colName.Name != "__deleted__" ? colName : null;
+                        V? value = colName.Name != "__deleted__" && record.Fields.TryGetValue(colName, out V tempVal) ? tempVal : default;
 
                         changes.Add(new Change<K, V>(
                             recordId,
@@ -508,7 +550,7 @@ namespace ForSync.CRDT
             foreach (var change in changes)
             {
                 K recordId = change.RecordId;
-                string? colName = change.ColName;
+                ColName<K>? colName = change.ColName;
                 ulong remoteColVersion = change.ColVersion;
                 ulong remoteDbVersion = change.DbVersion;
                 ulong remoteNodeId = change.NodeId;
@@ -518,12 +560,12 @@ namespace ForSync.CRDT
                 ulong newLocalDbVersion = _clock.Update(remoteDbVersion);
 
                 // Retrieve local column version information
-                Record<V>? recordPtr = GetRecordPtr(recordId, ignoreParent);
+                Record<K, V>? recordPtr = GetRecordPtr(recordId, ignoreParent);
                 ColumnVersion? localColInfo = null;
 
                 if (recordPtr != null)
                 {
-                    string key = colName ?? "__deleted__";
+                    ColName<K> key = colName ?? new ColName<K>("__deleted__");
                     if (recordPtr.ColumnVersions.TryGetValue(key, out ColumnVersion tempColInfo))
                     {
                         localColInfo = tempColInfo;
@@ -578,13 +620,13 @@ namespace ForSync.CRDT
                         _data.Remove(recordId);
 
                         // Update deletion clock info
-                        Dictionary<string, ColumnVersion> deletionClock = new Dictionary<string, ColumnVersion>
+                        Dictionary<ColName<K>, ColumnVersion> deletionClock = new Dictionary<ColName<K>, ColumnVersion>
                         {
-                            { "__deleted__", new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, newLocalDbVersion) }
+                            { new ColName<K>("__deleted__"), new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, newLocalDbVersion) }
                         };
 
                         // Store deletion info in the data map
-                        _data[recordId] = new Record<V>(new Dictionary<string, V>(), deletionClock);
+                        _data[recordId] = new Record<K, V>(new Dictionary<ColName<K>, V>(), deletionClock);
 
                         acceptedChanges.Add(new Change<K, V>(
                             recordId,
@@ -598,20 +640,20 @@ namespace ForSync.CRDT
                     else if (!IsRecordTombstoned(recordId, ignoreParent))
                     {
                         // Handle insertion or update
-                        Record<V> record = GetOrCreateRecordUnchecked(recordId, ignoreParent);
+                        Record<K, V> record = GetOrCreateRecordUnchecked(recordId, ignoreParent);
 
                         if (remoteValue != null)
                         {
-                            record.Fields[colName] = remoteValue;
+                            record.Fields[colName.Value] = remoteValue;
                         }
                         else
                         {
                             // If remoteValue is null, remove the field
-                            record.Fields.Remove(colName);
+                            record.Fields.Remove(colName.Value);
                         }
 
                         // Update the column version info
-                        record.ColumnVersions[colName] = new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, newLocalDbVersion);
+                        record.ColumnVersions[colName.Value] = new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, newLocalDbVersion);
 
                         acceptedChanges.Add(new Change<K, V>(
                             recordId,
@@ -681,7 +723,7 @@ namespace ForSync.CRDT
             foreach (var recordKvp in _data)
             {
                 K recordId = recordKvp.Key;
-                Record<V> record = recordKvp.Value;
+                Record<K, V> record = recordKvp.Value;
 
                 if (_tombstones.Contains(recordId))
                     continue; // Skip tombstoned records
@@ -705,12 +747,12 @@ namespace ForSync.CRDT
         /// <summary>
         /// Retrieves all data, optionally combining with parent data.
         /// </summary>
-        public Dictionary<K, Record<V>> GetData()
+        public Dictionary<K, Record<K, V>> GetData()
         {
             if (_parent == null)
-                return new Dictionary<K, Record<V>>(_data);
+                return new Dictionary<K, Record<K, V>>(_data);
 
-            Dictionary<K, Record<V>> combinedData = new Dictionary<K, Record<V>>(_parent.GetData());
+            Dictionary<K, Record<K, V>> combinedData = new Dictionary<K, Record<K, V>>(_parent.GetData());
             foreach (var kvp in _data)
             {
                 combinedData[kvp.Key] = kvp.Value;
@@ -753,7 +795,7 @@ namespace ForSync.CRDT
             foreach (var change in changes)
             {
                 K recordId = change.RecordId;
-                string? colName = change.ColName;
+                ColName<K>? colName = change.ColName;
                 ulong remoteColVersion = change.ColVersion;
                 ulong remoteDbVersion = change.DbVersion;
                 ulong remoteNodeId = change.NodeId;
@@ -767,28 +809,28 @@ namespace ForSync.CRDT
                     _data.Remove(recordId);
 
                     // Insert deletion clock info
-                    Dictionary<string, ColumnVersion> deletionClock = new Dictionary<string, ColumnVersion>
+                    Dictionary<ColName<K>, ColumnVersion> deletionClock = new Dictionary<ColName<K>, ColumnVersion>
                     {
-                        { "__deleted__", new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, remoteLocalDbVersion) }
+                        { new ColName<K>("__deleted__"), new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, remoteLocalDbVersion) }
                     };
 
                     // Store deletion info in the data map
-                    _data[recordId] = new Record<V>(new Dictionary<string, V>(), deletionClock);
+                    _data[recordId] = new Record<K, V>(new Dictionary<ColName<K>, V>(), deletionClock);
                 }
                 else
                 {
                     if (!IsRecordTombstoned(recordId))
                     {
                         // Handle insertion or update
-                        Record<V> record = GetOrCreateRecordUnchecked(recordId);
+                        Record<K, V> record = GetOrCreateRecordUnchecked(recordId);
 
                         if (remoteValue != null)
                         {
-                            record.Fields[colName] = remoteValue;
+                            record.Fields[colName.Value] = remoteValue;
                         }
 
                         // Update the column version info
-                        record.ColumnVersions[colName] = new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, remoteLocalDbVersion);
+                        record.ColumnVersions[colName.Value] = new ColumnVersion(remoteColVersion, remoteDbVersion, remoteNodeId, remoteLocalDbVersion);
                     }
                 }
             }
@@ -802,6 +844,10 @@ namespace ForSync.CRDT
             if (_tombstones.Contains(recordId))
                 return true;
 
+            if (_data.TryGetValue(recordId, out var record) && 
+                record.ColumnVersions.ContainsKey(new ColName<K>("__deleted__")))
+                return true;
+
             if (_parent != null && !ignoreParent)
                 return _parent.IsRecordTombstoned(recordId);
 
@@ -811,9 +857,9 @@ namespace ForSync.CRDT
         /// <summary>
         /// Retrieves a record pointer.
         /// </summary>
-        private Record<V>? GetRecordPtr(K recordId, bool ignoreParent = false)
+        private Record<K, V>? GetRecordPtr(K recordId, bool ignoreParent = false)
         {
-            if (_data.TryGetValue(recordId, out Record<V>? record))
+            if (_data.TryGetValue(recordId, out Record<K, V>? record))
                 return record;
 
             if (_parent != null && !ignoreParent)
@@ -825,18 +871,18 @@ namespace ForSync.CRDT
         /// <summary>
         /// Retrieves or creates a record without checking tombstones.
         /// </summary>
-        private Record<V> GetOrCreateRecordUnchecked(K recordId, bool ignoreParent = false)
+        private Record<K, V> GetOrCreateRecordUnchecked(K recordId, bool ignoreParent = false)
         {
-            if (!_data.TryGetValue(recordId, out Record<V>? record))
+            if (!_data.TryGetValue(recordId, out Record<K, V>? record))
             {
-                _data[recordId] = new Record<V>();
+                _data[recordId] = new Record<K, V>();
 
                 if (_parent != null && !ignoreParent)
                 {
-                    Record<V>? parentRecord = _parent.GetRecordPtr(recordId);
+                    Record<K, V>? parentRecord = _parent.GetRecordPtr(recordId);
                     if (parentRecord != null)
-                        _data[recordId] = new Record<V>(new Dictionary<string, V>(parentRecord.Fields),
-                                                       new Dictionary<string, ColumnVersion>(parentRecord.ColumnVersions));
+                        _data[recordId] = new Record<K, V>(new Dictionary<ColName<K>, V>(parentRecord.Fields),
+                                                       new Dictionary<ColName<K>, ColumnVersion>(parentRecord.ColumnVersions));
                 }
             }
 

@@ -13,6 +13,12 @@ public class CRDTTests
         return Guid.NewGuid().ToString();
     }
 
+    // Helper function to create a dictionary with ColName<string> keys
+    private static Dictionary<ColName<string>, string> CreateFieldsDictionary(Dictionary<string, string> fields)
+    {
+        return fields.ToDictionary(kvp => new ColName<string>(kvp.Key), kvp => kvp.Value);
+    }
+
     [Test]
     public void BasicInsertAndMerge()
     {
@@ -22,25 +28,25 @@ public class CRDTTests
         // Node1 inserts a record
         string recordId = GenerateUuid();
         string formId = GenerateUuid();
-        var fields1 = new Dictionary<string, string>
+        var fields1 = CreateFieldsDictionary(new Dictionary<string, string>
         {
             {"id", recordId},
             {"form_id", formId},
             {"tag", "Node1Tag"},
             {"created_at", "2023-10-01T12:00:00Z"},
             {"created_by", "User1"}
-        };
+        });
         var changes1 = node1.InsertOrUpdate(recordId, fields1);
 
         // Node2 inserts the same record with different data
-        var fields2 = new Dictionary<string, string>
+        var fields2 = CreateFieldsDictionary(new Dictionary<string, string>
         {
             {"id", recordId},
             {"form_id", formId},
             {"tag", "Node2Tag"},
             {"created_at", "2023-10-01T12:05:00Z"},
             {"created_by", "User2"}
-        };
+        });
         var changes2 = node2.InsertOrUpdate(recordId, fields2);
 
         // Merge node2's changes into node1
@@ -51,8 +57,8 @@ public class CRDTTests
 
         // Both nodes should resolve the conflict and have the same data
         Assert.That(node1.GetData(), Is.EqualTo(node2.GetData()), "Basic Insert and Merge: Data mismatch");
-        Assert.That(node1.GetData()[recordId].Fields["tag"], Is.EqualTo("Node2Tag"), "Basic Insert and Merge: Tag should be 'Node2Tag'");
-        Assert.That(node1.GetData()[recordId].Fields["created_by"], Is.EqualTo("User2"), "Basic Insert and Merge: created_by should be 'User2'");
+        Assert.That(node1.GetData()[recordId].Fields[new ColName<string>("tag")], Is.EqualTo("Node2Tag"), "Basic Insert and Merge: Tag should be 'Node2Tag'");
+        Assert.That(node1.GetData()[recordId].Fields[new ColName<string>("created_by")], Is.EqualTo("User2"), "Basic Insert and Merge: created_by should be 'User2'");
     }
 
     [Test]
@@ -63,7 +69,7 @@ public class CRDTTests
 
         // Insert a shared record
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"tag", "InitialTag"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "InitialTag"} });
         var changesInit1 = node1.InsertOrUpdate(recordId, fields);
         var changesInit2 = node2.InsertOrUpdate(recordId, fields);
 
@@ -72,11 +78,11 @@ public class CRDTTests
         node2.MergeChanges(changesInit1);
 
         // Node1 updates 'tag'
-        var updates1 = new Dictionary<string, string> { {"tag", "Node1UpdatedTag"} };
+        var updates1 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node1UpdatedTag"} });
         var changeUpdate1 = node1.InsertOrUpdate(recordId, updates1);
 
         // Node2 updates 'tag'
-        var updates2 = new Dictionary<string, string> { {"tag", "Node2UpdatedTag"} };
+        var updates2 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node2UpdatedTag"} });
         var changeUpdate2 = node2.InsertOrUpdate(recordId, updates2);
 
         // Merge changes
@@ -84,7 +90,7 @@ public class CRDTTests
         node2.MergeChanges(changeUpdate1);
 
         // Conflict resolved based on site_id (Node2 has higher site_id)
-        Assert.That(node1.GetData()[recordId].Fields["tag"], Is.EqualTo("Node2UpdatedTag"), "Updates with Conflicts: Tag resolution mismatch");
+        Assert.That(node1.GetData()[recordId].Fields[new ColName<string>("tag")], Is.EqualTo("Node2UpdatedTag"), "Updates with Conflicts: Tag resolution mismatch");
         Assert.That(node1.GetData(), Is.EqualTo(node2.GetData()), "Updates with Conflicts: Data mismatch");
     }
 
@@ -96,7 +102,7 @@ public class CRDTTests
 
         // Insert and sync a record
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"tag", "ToBeDeleted"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "ToBeDeleted"} });
         var changesInit = node1.InsertOrUpdate(recordId, fields);
 
         // Merge to node2
@@ -111,8 +117,8 @@ public class CRDTTests
         // Both nodes should reflect the deletion
         Assert.That(node1.GetData()[recordId].Fields, Is.Empty, "Delete and Merge: Node1 should have empty fields");
         Assert.That(node2.GetData()[recordId].Fields, Is.Empty, "Delete and Merge: Node2 should have empty fields");
-        Assert.That(node1.GetData()[recordId].ColumnVersions.ContainsKey("__deleted__"), Is.True, "Delete and Merge: Node1 should have '__deleted__' column version");
-        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey("__deleted__"), Is.True, "Delete and Merge: Node2 should have '__deleted__' column version");
+        Assert.That(node1.GetData()[recordId].ColumnVersions.ContainsKey(new ColName<string>("__deleted__")), Is.True, "Delete and Merge: Node1 should have '__deleted__' column version");
+        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey(new ColName<string>("__deleted__")), Is.True, "Delete and Merge: Node2 should have '__deleted__' column version");
     }
 
     // Add more tests here...
@@ -130,14 +136,14 @@ public class CRDTTests
     {
         var changes = new List<Change<string, string>>
         {
-            new Change<string, string>("record1", "col1", "value1", 1, 1, 1)
+            new Change<string, string>("record1", new ColName<string>("col1"), "value1", 1, 1, 1)
         };
 
         CRDT<string, string>.CompressChanges(changes);
 
         Assert.That(changes.Count, Is.EqualTo(1), "Compress Changes: Single change should remain unchanged.");
         Assert.That(changes[0].RecordId, Is.EqualTo("record1"), "Compress Changes: Record ID mismatch.");
-        Assert.That(changes[0].ColName, Is.EqualTo("col1"), "Compress Changes: Column name mismatch.");
+        Assert.That(changes[0].ColName?.Name, Is.EqualTo("col1"), "Compress Changes: Column name mismatch.");
         Assert.That(changes[0].Value, Is.EqualTo("value1"), "Compress Changes: Value mismatch.");
     }
 
@@ -146,8 +152,8 @@ public class CRDTTests
     {
         var changes = new List<Change<string, string>>
         {
-            new Change<string, string>("record1", "col1", "old_value", 1, 1, 1),
-            new Change<string, string>("record1", "col1", "new_value", 2, 2, 1)
+            new Change<string, string>("record1", new ColName<string>("col1"), "old_value", 1, 1, 1),
+            new Change<string, string>("record1", new ColName<string>("col1"), "new_value", 2, 2, 1)
         };
 
         CRDT<string, string>.CompressChanges(changes);
@@ -168,7 +174,7 @@ public class CRDTTests
 
         // Insert a record and delete it on node1
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"tag", "Temporary"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "Temporary"} });
         var changesInsert = node1.InsertOrUpdate(recordId, fields);
         var changesDelete = node1.DeleteRecord(recordId);
 
@@ -184,7 +190,7 @@ public class CRDTTests
 
         // Node2 should respect the tombstone
         Assert.That(node2.GetData()[recordId].Fields, Is.Empty, "Tombstone Handling: Node2 should have empty fields");
-        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey("__deleted__"), Is.True, "Tombstone Handling: Node2 should have '__deleted__' column version");
+        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey(new ColName<string>("__deleted__")), Is.True, "Tombstone Handling: Node2 should have '__deleted__' column version");
     }
 
     [Test]
@@ -195,8 +201,8 @@ public class CRDTTests
 
         // Both nodes insert a record with the same id
         string recordId = GenerateUuid();
-        var fields1 = new Dictionary<string, string> { {"id", recordId}, {"tag", "Node1Tag"} };
-        var fields2 = new Dictionary<string, string> { {"id", recordId}, {"tag", "Node2Tag"} };
+        var fields1 = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "Node1Tag"} });
+        var fields2 = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "Node2Tag"} });
         var changes1 = node1.InsertOrUpdate(recordId, fields1);
         var changes2 = node2.InsertOrUpdate(recordId, fields2);
 
@@ -205,16 +211,16 @@ public class CRDTTests
         node2.MergeChanges(changes1);
 
         // Both nodes update the 'tag' field multiple times
-        var updates1 = new Dictionary<string, string> { {"tag", "Node1Tag1"} };
+        var updates1 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node1Tag1"} });
         var changesUpdate1 = node1.InsertOrUpdate(recordId, updates1);
 
-        updates1 = new Dictionary<string, string> { {"tag", "Node1Tag2"} };
+        updates1 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node1Tag2"} });
         var changesUpdate2 = node1.InsertOrUpdate(recordId, updates1);
 
-        var updates2 = new Dictionary<string, string> { {"tag", "Node2Tag1"} };
+        var updates2 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node2Tag1"} });
         var changesUpdate3 = node2.InsertOrUpdate(recordId, updates2);
 
-        updates2 = new Dictionary<string, string> { {"tag", "Node2Tag2"} };
+        updates2 = CreateFieldsDictionary(new Dictionary<string, string> { {"tag", "Node2Tag2"} });
         var changesUpdate4 = node2.InsertOrUpdate(recordId, updates2);
 
         // Merge changes
@@ -226,7 +232,7 @@ public class CRDTTests
         // Since node2 has a higher site_id, its latest update should prevail
         string expectedTag = "Node2Tag2";
 
-        Assert.That(node1.GetData()[recordId].Fields["tag"], Is.EqualTo(expectedTag), "Conflict Resolution: Tag resolution mismatch");
+        Assert.That(node1.GetData()[recordId].Fields[new ColName<string>("tag")], Is.EqualTo(expectedTag), "Conflict Resolution: Tag resolution mismatch");
         Assert.That(node1.GetData(), Is.EqualTo(node2.GetData()), "Conflict Resolution: Data mismatch");
     }
 
@@ -238,7 +244,7 @@ public class CRDTTests
 
         // Node1 inserts a record
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"tag", "Node1Tag"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "Node1Tag"} });
         var changesInsert = node1.InsertOrUpdate(recordId, fields);
 
         // Node2 receives the change
@@ -258,12 +264,12 @@ public class CRDTTests
 
         // Node1 inserts a record
         string recordId1 = GenerateUuid();
-        var fields1 = new Dictionary<string, string> { {"id", recordId1}, {"tag", "Node1Record"} };
+        var fields1 = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId1}, {"tag", "Node1Record"} });
         var changes1 = node1.InsertOrUpdate(recordId1, fields1);
 
         // Node2 inserts a different record
         string recordId2 = GenerateUuid();
-        var fields2 = new Dictionary<string, string> { {"id", recordId2}, {"tag", "Node2Record"} };
+        var fields2 = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId2}, {"tag", "Node2Record"} });
         var changes2 = node2.InsertOrUpdate(recordId2, fields2);
 
         // Merge changes
@@ -286,18 +292,18 @@ public class CRDTTests
 
         // Node1 inserts a record
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"field1", "value1"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"field1", "value1"} });
         var changesInit = node1.InsertOrUpdate(recordId, fields);
 
         // Merge to node2
         node2.MergeChanges(changesInit);
 
         // Node2 updates the record
-        var updates2 = new Dictionary<string, string> { {"field1", "UpdatedByNode2"} };
+        var updates2 = CreateFieldsDictionary(new Dictionary<string, string> { {"field1", "UpdatedByNode2"} });
         var changesUpdate2 = node2.InsertOrUpdate(recordId, updates2);
 
         // Node1 updates the record
-        var updates1 = new Dictionary<string, string> { {"field1", "UpdatedByNode1"} };
+        var updates1 = CreateFieldsDictionary(new Dictionary<string, string> { {"field1", "UpdatedByNode1"} });
         var changesUpdate1 = node1.InsertOrUpdate(recordId, updates1);
 
         // Merge changes
@@ -307,7 +313,7 @@ public class CRDTTests
         // Since node2 has a higher site_id, its latest update should prevail
         string expectedTag = "UpdatedByNode2";
 
-        Assert.That(node1.GetData()[recordId].Fields["field1"], Is.EqualTo(expectedTag), "Multiple Merges: Tag resolution mismatch");
+        Assert.That(node1.GetData()[recordId].Fields[new ColName<string>("field1")], Is.EqualTo(expectedTag), "Multiple Merges: Tag resolution mismatch");
         Assert.That(node1.GetData(), Is.EqualTo(node2.GetData()), "Multiple Merges: Data mismatch between Node1 and Node2");
     }
 
@@ -319,7 +325,7 @@ public class CRDTTests
 
         // Node1 inserts and deletes a record
         string recordId = GenerateUuid();
-        var fields = new Dictionary<string, string> { {"id", recordId}, {"tag", "Temporary"} };
+        var fields = CreateFieldsDictionary(new Dictionary<string, string> { {"id", recordId}, {"tag", "Temporary"} });
         var changesInsert = node1.InsertOrUpdate(recordId, fields);
         var changesDelete = node1.DeleteRecord(recordId);
 
@@ -336,9 +342,9 @@ public class CRDTTests
         // The deletion should prevail
         Assert.That(node1.GetData()[recordId].Fields, Is.Empty, "Inserting After Deletion: Node1 should have empty fields");
         Assert.That(node2.GetData()[recordId].Fields, Is.Empty, "Inserting After Deletion: Node2 should have empty fields");
-        Assert.That(node1.GetData()[recordId].ColumnVersions.ContainsKey("__deleted__"), Is.True,
+        Assert.That(node1.GetData()[recordId].ColumnVersions.ContainsKey(new ColName<string>("__deleted__")), Is.True,
                     "Inserting After Deletion: Node1 should have '__deleted__' column version");
-        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey("__deleted__"), Is.True,
+        Assert.That(node2.GetData()[recordId].ColumnVersions.ContainsKey(new ColName<string>("__deleted__")), Is.True,
                     "Inserting After Deletion: Node2 should have '__deleted__' column version");
     }
 
