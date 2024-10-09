@@ -652,20 +652,24 @@ public:
       if (tombstones_.find(record_id) != tombstones_.end()) {
         continue; // Skip tombstoned records
       }
-      std::cout << "ID: " << record_id << std::endl;
+      std::cout << "ID: ";
+      print_value(record_id);
+      std::cout << std::endl;
       for (const auto &[key, value] : record.fields) {
-        std::cout << "  " << key << ": " << value << std::endl;
+        std::cout << "  ";
+        print_value(key);
+        std::cout << ": ";
+        print_value(value);
+        std::cout << std::endl;
       }
     }
     std::cout << "Tombstones: ";
     for (const auto &tid : tombstones_) {
-      std::cout << tid << " ";
+      print_value(tid);
+      std::cout << " ";
     }
     std::cout << std::endl << std::endl;
   }
-#else
-  constexpr void print_data() const {}
-#endif
 
   // Accessors for testing
   // Complexity: O(1)
@@ -751,6 +755,18 @@ private:
   MergeRuleType merge_rule_;
   ChangeComparatorType change_comparator_;
   SortFunctionType sort_func_;
+
+  // Helper function to print values
+  template <typename T> static void print_value(const T &value) {
+    if constexpr (std::is_same_v<T, std::string> || std::is_arithmetic_v<T>) {
+      std::cout << value;
+    } else {
+      std::cout << "[non-printable]";
+    }
+  }
+#else
+  constexpr void print_data() const {}
+#endif
 
   /// Applies a list of changes to reconstruct the CRDT state.
   ///
