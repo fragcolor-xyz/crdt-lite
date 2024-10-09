@@ -41,8 +41,11 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - name: Setup MSVC
+    - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v1.0.2
+
+    - name: Setup Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
 
     - name: Compile and Run C++ Tests
       run: |
