@@ -7,7 +7,7 @@ on:
     branches: [ master ]
 
 jobs:
-  build-and-test:
+  build-and-test-ubuntu:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +24,36 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
       with:
-        dotnet-version: '8.0.x'  # Updated to .NET 8.0
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build C# project
+      run: dotnet build --no-restore
+
+    - name: Run C# Tests
+      run: dotnet run --project crdt-lite.csproj
+
+  build-and-test-windows:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v1.0.2
+
+    - name: Compile and Run C++ Tests
+      run: |
+        cl.exe /std:c++20 /EHsc /Fe:crdt.exe tests.cpp && .\crdt.exe
+        cl.exe /std:c++20 /EHsc /Fe:list-crdt.exe list_tests.cpp && .\list-crdt.exe
+      shell: cmd
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: '8.0.x'
 
     - name: Restore dependencies
       run: dotnet restore
