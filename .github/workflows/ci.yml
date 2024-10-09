@@ -47,10 +47,21 @@ jobs:
     - name: Setup Developer Command Prompt
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Compile and Run C++ Tests
+    - name: Install LLVM and Clang
+      uses: crazy-max/ghaction-chocolatey@v2
+      with:
+        args: install llvm
+
+    - name: Compile and Run C++ Tests with MSVC
       run: |
         cl.exe /std:c++20 /EHsc /Fe:crdt.exe tests.cpp && .\crdt.exe
         cl.exe /std:c++20 /EHsc /Fe:list-crdt.exe list_tests.cpp && .\list-crdt.exe
+      shell: cmd
+
+    - name: Compile and Run C++ Tests with Clang
+      run: |
+        clang++ -std=c++20 -g -o crdt_clang.exe tests.cpp && .\crdt_clang.exe
+        clang++ -std=c++20 -g -o list-crdt_clang.exe list_tests.cpp && .\list-crdt_clang.exe
       shell: cmd
 
     - name: Setup .NET
