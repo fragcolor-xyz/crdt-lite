@@ -670,6 +670,9 @@ public:
     }
     std::cout << std::endl << std::endl;
   }
+#else
+constexpr void print_data() const {}
+#endif
 
   // Accessors for testing
   // Complexity: O(1)
@@ -764,9 +767,6 @@ private:
       std::cout << "[non-printable]";
     }
   }
-#else
-  constexpr void print_data() const {}
-#endif
 
   /// Applies a list of changes to reconstruct the CRDT state.
   ///
