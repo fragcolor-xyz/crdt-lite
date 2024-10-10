@@ -715,6 +715,29 @@ public:
     return *this;
   }
 
+  // Move constructor
+  CRDT(CRDT &&other) noexcept
+      : node_id_(other.node_id_), clock_(std::move(other.clock_)), data_(std::move(other.data_)),
+        tombstones_(std::move(other.tombstones_)), parent_(std::move(other.parent_)), base_version_(other.base_version_),
+        merge_rule_(std::move(other.merge_rule_)), change_comparator_(std::move(other.change_comparator_)),
+        sort_func_(std::move(other.sort_func_)) {}
+
+  // Move assignment operator
+  CRDT &operator=(CRDT &&other) noexcept {
+    if (this != &other) {
+      node_id_ = other.node_id_;
+      clock_ = std::move(other.clock_);
+      data_ = std::move(other.data_);
+      tombstones_ = std::move(other.tombstones_);
+      parent_ = std::move(other.parent_);
+      base_version_ = other.base_version_;
+      merge_rule_ = std::move(other.merge_rule_);
+      change_comparator_ = std::move(other.change_comparator_);
+      sort_func_ = std::move(other.sort_func_);
+    }
+    return *this;
+  }
+
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
