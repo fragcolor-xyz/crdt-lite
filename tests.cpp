@@ -1130,14 +1130,14 @@ int main() {
     assert_true(child_crdt.get_data().at(record_id_parent).fields.at("child_field2") == "child_value2",
                 "Revert Test 1: Child should have 'child_field2' with 'child_value2'");
 
-    // Step 4: Revert Child CRDT
-    CrdtVector<Change<CrdtString, CrdtString>> inverse_changes = child_crdt.revert();
+    // // Step 4: Revert Child CRDT
+    // CrdtVector<Change<CrdtString, CrdtString>> inverse_changes = child_crdt.revert();
 
     //! Cannot work because inverse_changes is in a special format that cannot be simply merged back into the CRDT
     //! it is meant to be used by the application layer to revert changes, not by the CRDT itself for now
 
-    // Apply inverse changes to child CRDT to undo modifications
-    child_crdt.merge_changes(std::move(inverse_changes), true);
+    // // Apply inverse changes to child CRDT to undo modifications
+    // child_crdt.merge_changes(std::move(inverse_changes), true);
 
     // // Step 5: Validate States
     // // Child should now match the parent

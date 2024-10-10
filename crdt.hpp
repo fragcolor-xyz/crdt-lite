@@ -301,43 +301,22 @@ public:
   /// # Complexity
   ///
   /// O(c), where c is the number of changes since `base_version_`
-  constexpr CrdtVector<Change<K, V>> revert() {
-    if (!parent_) {
-      throw std::runtime_error("Cannot revert without a parent CRDT.");
+  constexpr CrdtVector<Change<K, V>>
+  revert(const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> *override_parent = nullptr) {
+    const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> *reference_crdt =
+        override_parent ? override_parent : parent_;
+
+    if (!reference_crdt) {
+      throw std::runtime_error("Cannot revert without a parent CRDT or override parent.");
     }
 
     // Step 1: Retrieve all changes made by the child since base_version_
     CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
 
-    // Step 2: Generate inverse changes using the parent as the reference CRDT
-    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes, *parent_);
+    // Step 2: Generate inverse changes using the reference CRDT
+    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes, *reference_crdt);
 
     return inverse_changes;
-  }
-
-  /// Resets the CRDT to a state based on a reference CRDT and a set of changes.
-  ///
-  /// # Arguments
-  ///
-  /// * `reference_crdt` - A reference CRDT to use as the base state.
-  /// * `changes` - A vector of changes to apply after resetting to the reference state.
-  ///
-  /// Complexity: O(n + m), where n is the number of records in the reference CRDT and m is the number of changes
-  constexpr void reset_to(const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt,
-                          CrdtVector<Change<K, V>> &&changes = {}) {
-    // Clear existing data
-    data_.clear();
-    tombstones_.clear();
-
-    // Copy the state from the reference CRDT
-    data_ = reference_crdt.data_;
-    tombstones_ = reference_crdt.tombstones_;
-    clock_ = reference_crdt.clock_;
-
-    // Apply the provided changes
-    if (!changes.empty()) {
-      apply_changes(std::move(changes));
-    }
   }
 
   /// Inserts a new record or updates an existing record in the CRDT.
