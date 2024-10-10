@@ -225,25 +225,19 @@ public:
     apply_changes(std::move(changes));
   }
 
-  /// Generates inverse changes for a given set of changes based on the parent state.
+  /// Generates inverse changes for a given set of changes based on a reference CRDT state.
   ///
   /// # Arguments
   ///
   /// * `changes` - A vector of changes to invert.
+  /// * `reference_crdt` - A reference CRDT to use as the base state for inversion.
   ///
   /// # Returns
   ///
   /// A vector of inverse `Change` objects.
-  /// Generates inverse changes for a given set of changes based on the specified source (parent or top-level CRDT).
-  ///
-  /// # Arguments
-  ///
-  /// * `changes` - A vector of changes to invert.
-  ///
-  /// # Returns
-  ///
-  /// A vector of inverse `Change` objects.
-  CrdtVector<Change<K, V>> invert_changes(const CrdtVector<Change<K, V>> &changes) {
+  CrdtVector<Change<K, V>>
+  invert_changes(const CrdtVector<Change<K, V>> &changes,
+                 const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt) {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -253,15 +247,15 @@ public:
 
       if (!col_name.has_value()) {
         // The change was a record deletion (tombstone)
-        // To revert, restore the record's state from the specified source
-        auto record_ptr = parent_ ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        // To revert, restore the record's state from the reference CRDT
+        auto record_ptr = reference_crdt.get_record(record_id);
         if (record_ptr) {
           // Restore all fields from the record
-          for (const auto &[parent_col, parent_val] : record_ptr->fields) {
-            inverse_changes.emplace_back(Change<K, V>(record_id, parent_col, parent_val,
-                                                      record_ptr->column_versions.at(parent_col).col_version,
-                                                      record_ptr->column_versions.at(parent_col).db_version, node_id_,
-                                                      record_ptr->column_versions.at(parent_col).local_db_version));
+          for (const auto &[ref_col, ref_val] : record_ptr->fields) {
+            inverse_changes.emplace_back(Change<K, V>(record_id, ref_col, ref_val,
+                                                      record_ptr->column_versions.at(ref_col).col_version,
+                                                      record_ptr->column_versions.at(ref_col).db_version, node_id_,
+                                                      record_ptr->column_versions.at(ref_col).local_db_version));
           }
           // Remove the tombstone
           inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
@@ -271,23 +265,23 @@ public:
       } else {
         // The change was an insertion or update of a column
         CrdtString col = *col_name;
-        auto record_ptr = parent_ ? parent_->get_record_ptr(record_id) : get_record_ptr(record_id);
+        auto record_ptr = reference_crdt.get_record(record_id);
         if (record_ptr) {
           auto field_it = record_ptr->fields.find(col);
           if (field_it != record_ptr->fields.end()) {
-            // The record has a value for this column; set it back to the record's value
+            // The record has a value for this column in the reference; set it back to the reference's value
             inverse_changes.emplace_back(Change<K, V>(
                 record_id, col, field_it->second, record_ptr->column_versions.at(col).col_version,
                 record_ptr->column_versions.at(col).db_version, node_id_, record_ptr->column_versions.at(col).local_db_version));
           } else {
-            // The record does not have this column; delete it to revert
+            // The record does not have this column in the reference; delete it to revert
             inverse_changes.emplace_back(Change<K, V>(record_id, col,
                                                       std::nullopt, // Indicates deletion
                                                       0,            // Column version 0 signifies deletion
                                                       clock_.current_time(), node_id_));
           }
         } else {
-          // The record does not have the record; remove the entire record to revert
+          // The record does not exist in the reference; remove the entire record to revert
           inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
                                                     0, // Column version 0 signifies a tombstone
                                                     clock_.current_time(), node_id_));
@@ -302,7 +296,7 @@ public:
   ///
   /// # Returns
   ///
-  /// A vector of `Change` objects representing the inverse changes needed to undo the child’s changes.
+  /// A vector of `Change` objects representing the inverse changes needed to undo the child's changes.
   ///
   /// # Complexity
   ///
@@ -315,10 +309,35 @@ public:
     // Step 1: Retrieve all changes made by the child since base_version_
     CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
 
-    // Step 2: Generate inverse changes using the generalized function
-    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes);
+    // Step 2: Generate inverse changes using the parent as the reference CRDT
+    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes, *parent_);
 
     return inverse_changes;
+  }
+
+  /// Resets the CRDT to a state based on a reference CRDT and a set of changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `reference_crdt` - A reference CRDT to use as the base state.
+  /// * `changes` - A vector of changes to apply after resetting to the reference state.
+  ///
+  /// Complexity: O(n + m), where n is the number of records in the reference CRDT and m is the number of changes
+  constexpr void reset_to(const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt,
+                          CrdtVector<Change<K, V>> &&changes = {}) {
+    // Clear existing data
+    data_.clear();
+    tombstones_.clear();
+
+    // Copy the state from the reference CRDT
+    data_ = reference_crdt.data_;
+    tombstones_ = reference_crdt.tombstones_;
+    clock_ = reference_crdt.clock_;
+
+    // Apply the provided changes
+    if (!changes.empty()) {
+      apply_changes(std::move(changes));
+    }
   }
 
   /// Inserts a new record or updates an existing record in the CRDT.
@@ -703,7 +722,13 @@ public:
   /// A pointer to the Record<V> if found, or nullptr if not found.
   ///
   /// Complexity: O(1) average case for hash table lookup
-  Record<V> *get_record(const K &record_id, bool ignore_parent = false) { return get_record_ptr(record_id, ignore_parent); }
+  constexpr Record<V> *get_record(const K &record_id, bool ignore_parent = false) {
+    return get_record_ptr(record_id, ignore_parent);
+  }
+
+  constexpr const Record<V> *get_record(const K &record_id, bool ignore_parent = false) const {
+    return get_record_ptr(record_id, ignore_parent);
+  }
 
   // Add this public method to the CRDT class
   /// Checks if a record is tombstoned.
@@ -754,7 +779,7 @@ private:
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
   std::shared_ptr<CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType>> parent_;
-  uint64_t base_version_; // Tracks the parent’s db_version at the time of child creation
+  uint64_t base_version_; // Tracks the parent's db_version at the time of child creation
   MergeRuleType merge_rule_;
   ChangeComparatorType change_comparator_;
   SortFunctionType sort_func_;
@@ -849,6 +874,18 @@ private:
   }
 
   constexpr Record<V> *get_record_ptr(const K &record_id, bool ignore_parent = false) {
+    auto it = data_.find(record_id);
+    if (it != data_.end()) {
+      return &(it->second);
+    }
+    if (ignore_parent) {
+      return nullptr;
+    } else {
+      return parent_ ? parent_->get_record_ptr(record_id) : nullptr;
+    }
+  }
+
+  constexpr const Record<V> *get_record_ptr(const K &record_id, bool ignore_parent = false) const {
     auto it = data_.find(record_id);
     if (it != data_.end()) {
       return &(it->second);
