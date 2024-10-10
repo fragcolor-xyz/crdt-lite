@@ -428,7 +428,7 @@ public:
   /// A vector of changes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
-  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
+  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version, CrdtSet<CrdtNodeId> excluding = {}) const {
     CrdtVector<Change<K, V>> changes;
 
     // Get changes from parent
@@ -439,7 +439,7 @@ public:
 
     for (const auto &[record_id, record] : data_) {
       for (const auto &[col_name, clock_info] : record.column_versions) {
-        if (clock_info.local_db_version > last_db_version) {
+        if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
           std::optional<CrdtString> name = std::nullopt;
           if (col_name != "__deleted__") {
@@ -671,7 +671,7 @@ public:
     std::cout << std::endl << std::endl;
   }
 #else
-constexpr void print_data() const {}
+  constexpr void print_data() const {}
 #endif
 
   // Accessors for testing
