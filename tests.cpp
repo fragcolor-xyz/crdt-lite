@@ -1108,49 +1108,6 @@ int main() {
     std::cout << "Test 'Parent Deletion Prevents Child Insertions' passed." << std::endl;
   }
 
-  // Test Case 1: Reverting a Child CRDT Restores Parent's State
-  {
-    // Step 1: Initialize Parent CRDT
-    CRDT<CrdtString, CrdtString> parent_crdt(1);
-    CrdtString record_id_parent = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id_parent}, {"parent_field", "parent_value"}};
-    parent_crdt.insert_or_update(record_id_parent, std::move(parent_fields));
-
-    // Step 2: Initialize Child CRDT with Parent
-    auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
-    CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
-
-    // Step 3: Modify Child CRDT
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"child_field1", "child_value1"}, {"child_field2", "child_value2"}};
-    child_crdt.insert_or_update(record_id_parent, std::move(child_fields));
-
-    // Verify Child has additional fields
-    assert_true(child_crdt.get_data().at(record_id_parent).fields.at("child_field1") == "child_value1",
-                "Revert Test 1: Child should have 'child_field1' with 'child_value1'");
-    assert_true(child_crdt.get_data().at(record_id_parent).fields.at("child_field2") == "child_value2",
-                "Revert Test 1: Child should have 'child_field2' with 'child_value2'");
-
-    // // Step 4: Revert Child CRDT
-    // CrdtVector<Change<CrdtString, CrdtString>> inverse_changes = child_crdt.revert();
-
-    //! Cannot work because inverse_changes is in a special format that cannot be simply merged back into the CRDT
-    //! it is meant to be used by the application layer to revert changes, not by the CRDT itself for now
-
-    // // Apply inverse changes to child CRDT to undo modifications
-    // child_crdt.merge_changes(std::move(inverse_changes), true);
-
-    // // Step 5: Validate States
-    // // Child should now match the parent
-    // assert_true(child_crdt.get_data().at(record_id_parent).fields == parent_crdt.get_data().at(record_id_parent).fields,
-    //             "Revert Test 1: Child's fields should match parent's fields after revert");
-
-    // // Parent remains unchanged
-    // assert_true(parent_crdt.get_data().at(record_id_parent).fields.at("parent_field") == "parent_value",
-    //             "Revert Test 1: Parent's 'parent_field' should remain 'parent_value'");
-
-    // std::cout << "Test 'Reverting a Child CRDT Restores Parent's State' passed." << std::endl;
-  }
-
   // Test Case 1: Compress with No Changes
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
@@ -1335,6 +1292,58 @@ int main() {
       }
     }
     std::cout << "Test 'Mixed Inserts, Updates, and Deletions Across Multiple Records' passed." << std::endl;
+  }
+
+  // Test Case: Diffing between CRDTs using revert
+  {
+    // Step 1: Initialize Parent CRDT
+    CRDT<CrdtString, CrdtString> parent_crdt(1);
+    CrdtString record_id = generate_uuid();
+    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
+    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+
+    // Step 2: Initialize Child CRDT with Parent
+    CRDT<CrdtString, CrdtString> child_crdt(parent_crdt);
+
+    // Step 3: Modify Child CRDT
+    CrdtMap<CrdtString, CrdtString> child_fields = {
+        {"child_field1", "child_value1"},
+        {"child_field2", "child_value2"},
+        {"parent_field", "updated_parent_value"}
+    };
+    child_crdt.insert_or_update(record_id, std::move(child_fields));
+
+    // Step 4: Generate diff using revert
+    auto diff = child_crdt.diff(parent_crdt);
+
+    // Step 5: Assert on the contents of the diff
+    assert_true(diff.size() == 3, "Diff should contain 3 changes");
+
+    // Helper function to find a change in the diff
+    auto find_change = [&diff](const CrdtString& field_name) -> const Change<CrdtString, CrdtString>* {
+        auto it = std::find_if(diff.begin(), diff.end(), [&field_name](const auto& change) {
+            return change.col_name && *change.col_name == field_name;
+        });
+        return it != diff.end() ? &(*it) : nullptr;
+    };
+
+    // Check for child_field1
+    auto child_field1_change = find_change("child_field1");
+    assert_true(child_field1_change != nullptr, "Diff should contain change for child_field1");
+    assert_true(!child_field1_change->value.has_value(), "child_field1 should be marked for deletion");
+
+    // Check for child_field2
+    auto child_field2_change = find_change("child_field2");
+    assert_true(child_field2_change != nullptr, "Diff should contain change for child_field2");
+    assert_true(!child_field2_change->value.has_value(), "child_field2 should be marked for deletion");
+
+    // Check for parent_field
+    auto parent_field_change = find_change("parent_field");
+    assert_true(parent_field_change != nullptr, "Diff should contain change for parent_field");
+    assert_true(parent_field_change->value.has_value() && *parent_field_change->value == "parent_value",
+                "parent_field should be reverted to 'parent_value'");
+
+    std::cout << "Test 'Diffing between CRDTs using revert' passed." << std::endl;
   }
 
   // Test Case 10: Compression Order Verification

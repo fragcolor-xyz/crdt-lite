@@ -225,73 +225,6 @@ public:
     apply_changes(std::move(changes));
   }
 
-  /// Generates inverse changes for a given set of changes based on a reference CRDT state.
-  ///
-  /// # Arguments
-  ///
-  /// * `changes` - A vector of changes to invert.
-  /// * `reference_crdt` - A reference CRDT to use as the base state for inversion.
-  ///
-  /// # Returns
-  ///
-  /// A vector of inverse `Change` objects.
-  CrdtVector<Change<K, V>>
-  invert_changes(const CrdtVector<Change<K, V>> &changes,
-                 const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt) {
-    CrdtVector<Change<K, V>> inverse_changes;
-
-    for (const auto &change : changes) {
-      const K &record_id = change.record_id;
-      const std::optional<CrdtString> &col_name = change.col_name;
-      const std::optional<V> &value = change.value;
-
-      if (!col_name.has_value()) {
-        // The change was a record deletion (tombstone)
-        // To revert, restore the record's state from the reference CRDT
-        auto record_ptr = reference_crdt.get_record(record_id);
-        if (record_ptr) {
-          // Restore all fields from the record
-          for (const auto &[ref_col, ref_val] : record_ptr->fields) {
-            inverse_changes.emplace_back(Change<K, V>(record_id, ref_col, ref_val,
-                                                      record_ptr->column_versions.at(ref_col).col_version,
-                                                      record_ptr->column_versions.at(ref_col).db_version, node_id_,
-                                                      record_ptr->column_versions.at(ref_col).local_db_version));
-          }
-          // Remove the tombstone
-          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
-                                                    0, // Column version 0 signifies removal of tombstone
-                                                    clock_.current_time(), node_id_));
-        }
-      } else {
-        // The change was an insertion or update of a column
-        CrdtString col = *col_name;
-        auto record_ptr = reference_crdt.get_record(record_id);
-        if (record_ptr) {
-          auto field_it = record_ptr->fields.find(col);
-          if (field_it != record_ptr->fields.end()) {
-            // The record has a value for this column in the reference; set it back to the reference's value
-            inverse_changes.emplace_back(Change<K, V>(
-                record_id, col, field_it->second, record_ptr->column_versions.at(col).col_version,
-                record_ptr->column_versions.at(col).db_version, node_id_, record_ptr->column_versions.at(col).local_db_version));
-          } else {
-            // The record does not have this column in the reference; delete it to revert
-            inverse_changes.emplace_back(Change<K, V>(record_id, col,
-                                                      std::nullopt, // Indicates deletion
-                                                      0,            // Column version 0 signifies deletion
-                                                      clock_.current_time(), node_id_));
-          }
-        } else {
-          // The record does not exist in the reference; remove the entire record to revert
-          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
-                                                    0, // Column version 0 signifies a tombstone
-                                                    clock_.current_time(), node_id_));
-        }
-      }
-    }
-
-    return inverse_changes;
-  }
-
   /// Reverts all changes made by this CRDT since it was created from the parent.
   ///
   /// # Returns
@@ -301,22 +234,54 @@ public:
   /// # Complexity
   ///
   /// O(c), where c is the number of changes since `base_version_`
-  constexpr CrdtVector<Change<K, V>>
-  revert(const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> *override_parent = nullptr) {
-    const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> *reference_crdt =
-        override_parent ? override_parent : parent_;
-
-    if (!reference_crdt) {
-      throw std::runtime_error("Cannot revert without a parent CRDT or override parent.");
+  constexpr CrdtVector<Change<K, V>> revert() {
+    if (!parent_) {
+      throw std::runtime_error("Cannot revert without a parent CRDT.");
     }
 
     // Step 1: Retrieve all changes made by the child since base_version_
     CrdtVector<Change<K, V>> child_changes = this->get_changes_since(base_version_);
 
-    // Step 2: Generate inverse changes using the reference CRDT
-    CrdtVector<Change<K, V>> inverse_changes = invert_changes(child_changes, *reference_crdt);
+    // Step 2: Generate inverse changes using the parent CRDT
+    return invert_changes(child_changes, *parent_);
+  }
 
-    return inverse_changes;
+  /// Computes the difference between this CRDT and another CRDT.
+  ///
+  /// # Arguments
+  ///
+  /// * `other` - The CRDT to compare against.
+  ///
+  /// # Returns
+  ///
+  /// A vector of `Change` objects representing the changes needed to transform this CRDT into the other CRDT.
+  ///
+  /// # Complexity
+  ///
+  /// O(c), where c is the number of changes since the common ancestor
+  constexpr CrdtVector<Change<K, V>> diff(const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &other) const {
+    // Find the common ancestor (lowest common db_version)
+    uint64_t common_version = std::min(clock_.current_time(), other.clock_.current_time());
+
+    // Get changes from this CRDT since the common ancestor
+    CrdtVector<Change<K, V>> this_changes = this->get_changes_since(common_version);
+
+    // Get changes from the other CRDT since the common ancestor
+    CrdtVector<Change<K, V>> other_changes = other.get_changes_since(common_version);
+
+    // Invert the changes from this CRDT
+    CrdtVector<Change<K, V>> inverted_this_changes = invert_changes(this_changes, other);
+
+    // Combine the inverted changes from this CRDT with the changes from the other CRDT
+    CrdtVector<Change<K, V>> diff_changes;
+    diff_changes.reserve(inverted_this_changes.size() + other_changes.size());
+    diff_changes.insert(diff_changes.end(), inverted_this_changes.begin(), inverted_this_changes.end());
+    diff_changes.insert(diff_changes.end(), other_changes.begin(), other_changes.end());
+
+    // Compress the changes to remove redundant operations
+    compress_changes(diff_changes);
+
+    return diff_changes;
   }
 
   /// Inserts a new record or updates an existing record in the CRDT.
@@ -355,6 +320,7 @@ public:
         col_version = ++col_it->second.col_version;
         col_it->second.db_version = db_version;
         col_it->second.node_id = node_id_;
+        col_it->second.local_db_version = db_version;
       } else {
         col_version = 1;
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
@@ -874,6 +840,77 @@ private:
     } else {
       return parent_ ? parent_->get_record_ptr(record_id) : nullptr;
     }
+  }
+
+  /// Generates inverse changes for a given set of changes based on a reference CRDT state.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A vector of changes to invert.
+  /// * `reference_crdt` - A reference CRDT to use as the base state for inversion.
+  ///
+  /// # Returns
+  ///
+  /// A vector of inverse `Change` objects.
+  CrdtVector<Change<K, V>>
+  invert_changes(const CrdtVector<Change<K, V>> &changes,
+                 const CRDT<K, V, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt) const {
+    CrdtVector<Change<K, V>> inverse_changes;
+
+    for (const auto &change : changes) {
+      const K &record_id = change.record_id;
+      const std::optional<CrdtString> &col_name = change.col_name;
+      const std::optional<V> &value = change.value;
+
+      if (!col_name.has_value()) {
+        // The change was a record deletion (tombstone)
+        // To revert, restore the record's state from the reference CRDT
+        auto record_ptr = reference_crdt.get_record(record_id);
+        if (record_ptr) {
+          // Restore all fields from the record, sorted by db_version
+          std::vector<std::pair<CrdtString, V>> sorted_fields(record_ptr->fields.begin(), record_ptr->fields.end());
+          std::sort(sorted_fields.begin(), sorted_fields.end(), [&](const auto &a, const auto &b) {
+            return record_ptr->column_versions.at(a.first).db_version < record_ptr->column_versions.at(b.first).db_version;
+          });
+          for (const auto &[ref_col, ref_val] : sorted_fields) {
+            inverse_changes.emplace_back(Change<K, V>(record_id, ref_col, ref_val,
+                                                      record_ptr->column_versions.at(ref_col).col_version,
+                                                      record_ptr->column_versions.at(ref_col).db_version, node_id_,
+                                                      record_ptr->column_versions.at(ref_col).local_db_version));
+          }
+          // Remove the tombstone
+          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
+                                                    0, // Column version 0 signifies removal of tombstone
+                                                    clock_.current_time(), node_id_));
+        }
+      } else {
+        // The change was an insertion or update of a column
+        CrdtString col = *col_name;
+        auto record_ptr = reference_crdt.get_record(record_id);
+        if (record_ptr) {
+          auto field_it = record_ptr->fields.find(col);
+          if (field_it != record_ptr->fields.end()) {
+            // The record has a value for this column in the reference; set it back to the reference's value
+            inverse_changes.emplace_back(Change<K, V>(
+                record_id, col, field_it->second, record_ptr->column_versions.at(col).col_version,
+                record_ptr->column_versions.at(col).db_version, node_id_, record_ptr->column_versions.at(col).local_db_version));
+          } else {
+            // The record does not have this column in the reference; delete it to revert
+            inverse_changes.emplace_back(Change<K, V>(record_id, col,
+                                                      std::nullopt, // Indicates deletion
+                                                      0,            // Column version 0 signifies deletion
+                                                      clock_.current_time(), node_id_));
+          }
+        } else {
+          // The record does not exist in the reference; remove the entire record to revert
+          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
+                                                    0, // Column version 0 signifies a tombstone
+                                                    clock_.current_time(), node_id_));
+        }
+      }
+    }
+
+    return inverse_changes;
   }
 };
 
