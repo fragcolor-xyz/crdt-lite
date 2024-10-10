@@ -860,7 +860,6 @@ private:
     for (const auto &change : changes) {
       const K &record_id = change.record_id;
       const std::optional<CrdtString> &col_name = change.col_name;
-      const std::optional<V> &value = change.value;
 
       if (!col_name.has_value()) {
         // The change was a record deletion (tombstone)
@@ -878,10 +877,6 @@ private:
                                                       record_ptr->column_versions.at(ref_col).db_version, node_id_,
                                                       record_ptr->column_versions.at(ref_col).local_db_version));
           }
-          // Remove the tombstone
-          inverse_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt,
-                                                    0, // Column version 0 signifies removal of tombstone
-                                                    clock_.current_time(), node_id_));
         }
       } else {
         // The change was an insertion or update of a column
