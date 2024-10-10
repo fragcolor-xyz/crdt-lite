@@ -29,20 +29,16 @@ int main() {
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
     CrdtString form_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id},
-                                               {"form_id", form_id},
-                                               {"tag", "Node1Tag"},
-                                               {"created_at", "2023-10-01T12:00:00Z"},
-                                               {"created_by", "User1"}};
-    auto changes1 = node1.insert_or_update(record_id, std::move(fields1));
+    CrdtVector<Change<CrdtString, CrdtString>> changes1;
+    node1.insert_or_update(record_id, changes1, std::make_pair("id", record_id), std::make_pair("form_id", form_id),
+                           std::make_pair("tag", "Node1Tag"), std::make_pair("created_at", "2023-10-01T12:00:00Z"),
+                           std::make_pair("created_by", "User1"));
 
     // Node2 inserts the same record with different data
-    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id},
-                                               {"form_id", form_id},
-                                               {"tag", "Node2Tag"},
-                                               {"created_at", "2023-10-01T12:05:00Z"},
-                                               {"created_by", "User2"}};
-    auto changes2 = node2.insert_or_update(record_id, std::move(fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes2;
+    node2.insert_or_update(record_id, changes2, std::make_pair("id", record_id), std::make_pair("form_id", form_id),
+                           std::make_pair("tag", "Node2Tag"), std::make_pair("created_at", "2023-10-01T12:05:00Z"),
+                           std::make_pair("created_by", "User2"));
 
     // Merge node2's changes into node1
     node1.merge_changes(std::move(changes2));
@@ -66,21 +62,21 @@ int main() {
 
     // Insert a shared record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init1 = node1.insert_or_update(record_id, std::move(fields));
-    auto changes_init2 = node2.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_init1, changes_init2;
+    node1.insert_or_update(record_id, changes_init1, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
+    node2.insert_or_update(record_id, changes_init2, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
 
     // Merge initial inserts
     node1.merge_changes(std::move(changes_init2));
     node2.merge_changes(std::move(changes_init1));
 
     // Node1 updates 'tag'
-    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1UpdatedTag"}};
-    auto change_update1 = node1.insert_or_update(record_id, std::move(updates1));
+    CrdtVector<Change<CrdtString, CrdtString>> change_update1;
+    node1.insert_or_update(record_id, change_update1, std::make_pair("tag", "Node1UpdatedTag"));
 
     // Node2 updates 'tag'
-    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2UpdatedTag"}};
-    auto change_update2 = node2.insert_or_update(record_id, std::move(updates2));
+    CrdtVector<Change<CrdtString, CrdtString>> change_update2;
+    node2.insert_or_update(record_id, change_update2, std::make_pair("tag", "Node2UpdatedTag"));
 
     // Merge changes
     node1.merge_changes(std::move(change_update2));
@@ -100,14 +96,15 @@ int main() {
 
     // Insert and sync a record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "ToBeDeleted"}};
-    auto changes_init = node1.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_init;
+    node1.insert_or_update(record_id, changes_init, std::make_pair("id", record_id), std::make_pair("tag", "ToBeDeleted"));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_init));
 
     // Node1 deletes the record
-    auto changes_delete = node1.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> changes_delete;
+    node1.delete_record(record_id, changes_delete);
 
     // Merge the deletion to node2
     node2.merge_changes(std::move(changes_delete));
@@ -131,16 +128,17 @@ int main() {
 
     // Insert a record and delete it on node1
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
-    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
-    auto changes_delete = node1.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> changes_insert, changes_delete;
+    node1.insert_or_update(record_id, changes_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
+    node1.delete_record(record_id, changes_delete);
 
     // Merge changes to node2
     node2.merge_changes(std::move(changes_insert));
     node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
-    auto changes_attempt_insert = node2.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_attempt_insert;
+    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -160,27 +158,20 @@ int main() {
 
     // Both nodes insert a record with the same id
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "Node1Tag"}};
-    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "Node2Tag"}};
-    auto changes1 = node1.insert_or_update(record_id, std::move(fields1));
-    auto changes2 = node2.insert_or_update(record_id, std::move(fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes1, changes2;
+    node1.insert_or_update(record_id, changes1, std::make_pair("id", record_id), std::make_pair("tag", "Node1Tag"));
+    node2.insert_or_update(record_id, changes2, std::make_pair("id", record_id), std::make_pair("tag", "Node2Tag"));
 
     // Merge changes
     node1.merge_changes(std::move(changes2));
     node2.merge_changes(std::move(changes1));
 
     // Both nodes update the 'tag' field multiple times
-    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "Node1Tag1"}};
-    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates1));
-
-    updates1 = {{"tag", "Node1Tag2"}};
-    auto changes_update2 = node1.insert_or_update(record_id, std::move(updates1));
-
-    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "Node2Tag1"}};
-    auto changes_update3 = node2.insert_or_update(record_id, std::move(updates2));
-
-    updates2 = {{"tag", "Node2Tag2"}};
-    auto changes_update4 = node2.insert_or_update(record_id, std::move(updates2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_update1, changes_update2, changes_update3, changes_update4;
+    node1.insert_or_update(record_id, changes_update1, std::make_pair("tag", "Node1Tag1"));
+    node1.insert_or_update(record_id, changes_update2, std::make_pair("tag", "Node1Tag2"));
+    node2.insert_or_update(record_id, changes_update3, std::make_pair("tag", "Node2Tag1"));
+    node2.insert_or_update(record_id, changes_update4, std::make_pair("tag", "Node2Tag2"));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update4));
@@ -203,8 +194,8 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Node1Tag"}};
-    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_insert;
+    node1.insert_or_update(record_id, changes_insert, std::make_pair("id", record_id), std::make_pair("tag", "Node1Tag"));
 
     // Node2 receives the change
     node2.merge_changes(std::move(changes_insert));
@@ -223,13 +214,13 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id1 = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Record"}};
-    auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
+    CrdtVector<Change<CrdtString, CrdtString>> changes1;
+    node1.insert_or_update(record_id1, changes1, std::make_pair("id", record_id1), std::make_pair("tag", "Node1Record"));
 
     // Node2 inserts a different record
     CrdtString record_id2 = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Record"}};
-    auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes2;
+    node2.insert_or_update(record_id2, changes2, std::make_pair("id", record_id2), std::make_pair("tag", "Node2Record"));
 
     // Merge changes
     node1.merge_changes(std::move(changes2));
@@ -255,19 +246,19 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init = node1.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_init;
+    node1.insert_or_update(record_id, changes_init, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_init));
 
     // Node2 updates the record
-    CrdtMap<CrdtString, CrdtString> updates2 = {{"tag", "UpdatedByNode2"}};
-    auto changes_update2 = node2.insert_or_update(record_id, std::move(updates2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_update2;
+    node2.insert_or_update(record_id, changes_update2, std::make_pair("tag", "UpdatedByNode2"));
 
     // Node1 updates the record
-    CrdtMap<CrdtString, CrdtString> updates1 = {{"tag", "UpdatedByNode1"}};
-    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates1));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_update1;
+    node1.insert_or_update(record_id, changes_update1, std::make_pair("tag", "UpdatedByNode1"));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update2));
@@ -288,16 +279,17 @@ int main() {
 
     // Node1 inserts and deletes a record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "Temporary"}};
-    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
-    auto changes_delete = node1.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> changes_insert, changes_delete;
+    node1.insert_or_update(record_id, changes_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
+    node1.delete_record(record_id, changes_delete);
 
     // Merge deletion to node2
     node2.merge_changes(std::move(changes_insert));
     node2.merge_changes(std::move(changes_delete));
 
     // Node2 tries to insert the same record
-    auto changes_attempt_insert = node2.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_attempt_insert;
+    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -323,13 +315,13 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id1 = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
-    auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
+    CrdtVector<Change<CrdtString, CrdtString>> changes1;
+    node1.insert_or_update(record_id1, changes1, std::make_pair("id", record_id1), std::make_pair("tag", "Node1Tag"));
 
     // Node2 is offline and inserts a different record
     CrdtString record_id2 = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
-    auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes2;
+    node2.insert_or_update(record_id2, changes2, std::make_pair("id", record_id2), std::make_pair("tag", "Node2Tag"));
 
     // Now, node2 comes online and merges changes from node1
     uint64_t last_db_version_node2 = 0;
@@ -359,25 +351,22 @@ int main() {
 
     // Both nodes insert the same record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id}, {"tag", "InitialTag"}};
-    CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_init1 = node1.insert_or_update(record_id, std::move(fields1));
-    auto changes_init2 = node2.insert_or_update(record_id, std::move(fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_init1, changes_init2;
+    node1.insert_or_update(record_id, changes_init1, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
+    node2.insert_or_update(record_id, changes_init2, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
 
     // Merge initial inserts
     node1.merge_changes(std::move(changes_init2));
     node2.merge_changes(std::move(changes_init1));
 
     // Node1 updates 'tag' twice
-    CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1Tag1"}};
-    auto changes_node1_update1 = node1.insert_or_update(record_id, std::move(updates_node1));
-
-    updates_node1 = {{"tag", "Node1Tag2"}};
-    auto changes_node1_update2 = node1.insert_or_update(record_id, std::move(updates_node1));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_node1_update1, changes_node1_update2;
+    node1.insert_or_update(record_id, changes_node1_update1, std::make_pair("tag", "Node1Tag1"));
+    node1.insert_or_update(record_id, changes_node1_update2, std::make_pair("tag", "Node1Tag2"));
 
     // Node2 updates 'tag' once
-    CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2Tag1"}};
-    auto changes_node2_update1 = node2.insert_or_update(record_id, std::move(updates_node2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_node2_update1;
+    node2.insert_or_update(record_id, changes_node2_update1, std::make_pair("tag", "Node2Tag1"));
 
     // Merge node1's changes into node2
     node2.merge_changes(std::move(changes_node1_update1));
@@ -398,75 +387,6 @@ int main() {
     std::cout << "Test 'Conflicting Updates with Different Last DB Versions' passed." << std::endl;
   }
 
-  // // Test Case: Clock Synchronization After Merges using insert_or_update
-  // {
-  //   CRDT<CrdtString, CrdtString> node1(1);
-  //   CRDT<CrdtString, CrdtString> node2(2);
-  //   CRDT<CrdtString, CrdtString> node3(3);
-
-  //   // Merge trackers
-  //   uint64_t last_db_version_node1 = 0;
-  //   uint64_t last_db_version_node2 = 0;
-  //   uint64_t last_db_version_node3 = 0;
-
-  //   // Node1 inserts a record
-  //   CrdtString record_id1 = generate_uuid();
-  //   CrdtMap<CrdtString, CrdtString> fields1 = {{"id", record_id1}, {"tag", "Node1Tag"}};
-  //   auto changes1 = node1.insert_or_update(record_id1, std::move(fields1));
-
-  //   // Node2 inserts another record
-  //   CrdtString record_id2 = generate_uuid();
-  //   CrdtMap<CrdtString, CrdtString> fields2 = {{"id", record_id2}, {"tag", "Node2Tag"}};
-  //   auto changes2 = node2.insert_or_update(record_id2, std::move(fields2));
-
-  //   // Node3 inserts a third record
-  //   CrdtString record_id3 = generate_uuid();
-  //   CrdtMap<CrdtString, CrdtString> fields3 = {{"id", record_id3}, {"tag", "Node3Tag"}};
-  //   auto changes3 = node3.insert_or_update(record_id3, std::move(fields3));
-
-  //   // First round of merges
-  //   // Merge node1's changes into node2 and node3
-  //   sync_nodes(node1, node2, last_db_version_node2);
-  //   sync_nodes(node1, node3, last_db_version_node3);
-
-  //   // Merge node2's changes into node1 and node3
-  //   sync_nodes(node2, node1, last_db_version_node1);
-  //   sync_nodes(node2, node3, last_db_version_node3);
-
-  //   // Merge node3's changes into node1 and node2
-  //   sync_nodes(node3, node1, last_db_version_node1);
-  //   sync_nodes(node3, node2, last_db_version_node2);
-
-  //   // All nodes should have all three records
-  //   assert_true(node1.get_data() == node2.get_data(), "Clock Synchronization: Node1 and Node2 data mismatch");
-  //   assert_true(node2.get_data() == node3.get_data(), "Clock Synchronization: Node2 and Node3 data mismatch");
-  //   assert_true(node1.get_data() == node3.get_data(), "Clock Synchronization: Node1 and Node3 data mismatch");
-
-  //   // Check that logical clocks are properly updated
-  //   uint64_t min_expected_clock_value = 3; // At least 3 inserts happened
-  //   assert_true(node1.get_clock().current_time() >= min_expected_clock_value, "Clock Synchronization: Node1 clock too low");
-  //   assert_true(node2.get_clock().current_time() >= min_expected_clock_value, "Clock Synchronization: Node2 clock too low");
-  //   assert_true(node3.get_clock().current_time() >= min_expected_clock_value, "Clock Synchronization: Node3 clock too low");
-
-  //   // Capture max clock before another round of merges
-  //   uint64_t max_clock_before_merge =
-  //       std::max({node1.get_clock().current_time(), node2.get_clock().current_time(), node3.get_clock().current_time()});
-
-  //   // Perform another round of merges
-  //   sync_nodes(node1, node2, last_db_version_node2);
-  //   sync_nodes(node2, node3, last_db_version_node3);
-  //   sync_nodes(node3, node1, last_db_version_node1);
-
-  //   // Check that clocks have been updated after merges
-  //   assert_true(node1.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node1 clock did not
-  //   update"); assert_true(node2.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node2 clock did
-  //   not update"); assert_true(node3.get_clock().current_time() > max_clock_before_merge, "Clock Synchronization: Node3 clock
-  //   did not update");
-
-  //   // Since clocks don't need to be identical, we don't assert equality
-  //   std::cout << "Test 'Clock Synchronization After Merges' passed." << std::endl;
-  // }
-
   // Test Case: Atomic Sync Per Transaction using insert_or_update
   {
     CRDT<CrdtString, CrdtString> node1(1);
@@ -474,8 +394,8 @@ int main() {
 
     // Node1 inserts a record
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_node1 = node1.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_node1;
+    node1.insert_or_update(record_id, changes_node1, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
 
     // Sync immediately after the transaction
     node2.merge_changes(std::move(changes_node1));
@@ -494,18 +414,16 @@ int main() {
 
     // Insert a record on node1
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"tag", "InitialTag"}};
-    auto changes_insert = node1.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_insert;
+    node1.insert_or_update(record_id, changes_insert, std::make_pair("id", record_id), std::make_pair("tag", "InitialTag"));
 
     // Merge to node2
     node2.merge_changes(std::move(changes_insert));
 
     // Concurrently update 'tag' on both nodes
-    CrdtMap<CrdtString, CrdtString> updates_node1 = {{"tag", "Node1TagUpdate"}};
-    auto changes_update1 = node1.insert_or_update(record_id, std::move(updates_node1));
-
-    CrdtMap<CrdtString, CrdtString> updates_node2 = {{"tag", "Node2TagUpdate"}};
-    auto changes_update2 = node2.insert_or_update(record_id, std::move(updates_node2));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_update1, changes_update2;
+    node1.insert_or_update(record_id, changes_update1, std::make_pair("tag", "Node1TagUpdate"));
+    node2.insert_or_update(record_id, changes_update2, std::make_pair("tag", "Node2TagUpdate"));
 
     // Merge changes
     node1.merge_changes(std::move(changes_update2));
@@ -532,8 +450,8 @@ int main() {
     CRDT<CrdtString, CrdtString> crdt_loaded(node_id, std::move(changes));
 
     // Make additional changes after loading
-    CrdtMap<CrdtString, CrdtString> new_fields = {{"field2", "value2"}};
-    auto changes_new = crdt_loaded.insert_or_update(record_id, std::move(new_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_new;
+    crdt_loaded.insert_or_update(record_id, changes_new, std::make_pair("field2", "value2"));
 
     // Retrieve changes since db_version 1
     CrdtVector<Change<CrdtString, CrdtString>> retrieved_changes = crdt_loaded.get_changes_since(1);
@@ -602,15 +520,15 @@ int main() {
     // Initialize CRDT and perform initial changes
     CRDT<CrdtString, CrdtString> crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"field1", "value1"}};
-    auto changes_init = crdt.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_init;
+    crdt.insert_or_update(record_id, changes_init, std::make_pair("field1", "value1"));
 
     // Apply changes and set merge_db_version via constructor
     CRDT<CrdtString, CrdtString> crdt_loaded(2, std::move(changes_init));
 
     // Make new changes after loading
-    CrdtMap<CrdtString, CrdtString> new_fields = {{"field2", "value2"}};
-    auto changes_new = crdt_loaded.insert_or_update(record_id, std::move(new_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_new;
+    crdt_loaded.insert_or_update(record_id, changes_new, std::make_pair("field2", "value2"));
 
     // Get changes since db_version 1
     CrdtVector<Change<CrdtString, CrdtString>> retrieved_changes = crdt_loaded.get_changes_since(1);
@@ -643,8 +561,8 @@ int main() {
     crdt1.merge_changes({Change<CrdtString, CrdtString>(record_id2, "field2", "value2", 2, 2, node_id)});
 
     // Make additional changes
-    CrdtMap<CrdtString, CrdtString> new_fields = {{"field3", "value3"}};
-    auto changes_new = crdt1.insert_or_update(record_id1, std::move(new_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> changes_new;
+    crdt1.insert_or_update(record_id1, changes_new, std::make_pair("field3", "value3"));
 
     // Get changes since db_version 3
     CrdtVector<Change<CrdtString, CrdtString>> retrieved_changes = crdt1.get_changes_since(3);
@@ -663,8 +581,9 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id_parent = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id_parent}, {"parent_field", "parent_value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id_parent, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id_parent, parent_changes, std::make_pair("id", record_id_parent),
+                                                       std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -677,8 +596,8 @@ int main() {
                 "Parent-Child Overlay: Inherited field value mismatch");
 
     // Child updates the inherited record
-    CrdtMap<CrdtString, CrdtString> child_updates = {{"child_field", "child_value"}};
-    auto child_changes = child_crdt.insert_or_update(record_id_parent, std::move(child_updates));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id_parent, child_changes, std::make_pair("child_field", "child_value"));
 
     // Merge child's changes back to parent
     parent_crdt.merge_changes(std::move(child_changes));
@@ -697,20 +616,20 @@ int main() {
     // Create grandparent CRDT
     CRDT<CrdtString, CrdtString> grandparent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> grandparent_fields = {{"id", record_id}, {"level", "grandparent"}};
-    grandparent_crdt.insert_or_update(record_id, std::move(grandparent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> grandparent_changes;
+    grandparent_crdt.insert_or_update(record_id, grandparent_changes, std::make_pair("id", record_id), std::make_pair("level", "grandparent"));
 
     // Create parent CRDT with grandparent
     auto grandparent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(grandparent_crdt);
     CRDT<CrdtString, CrdtString> parent_crdt(2, grandparent_ptr);
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"level", "parent"}};
-    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("level", "parent"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(3, parent_ptr);
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"level", "child"}};
-    child_crdt.insert_or_update(record_id, std::move(child_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id, child_changes, std::make_pair("level", "child"));
 
     // Check that child has the most recent value
     assert_true(child_crdt.get_data().at(record_id).fields.at("level") == "child",
@@ -733,10 +652,9 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id1 = generate_uuid();
     CrdtString record_id2 = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields1 = {{"id", record_id1}, {"data", "parent_data1"}};
-    CrdtMap<CrdtString, CrdtString> parent_fields2 = {{"id", record_id2}, {"data", "parent_data2"}};
-    parent_crdt.insert_or_update(record_id1, std::move(parent_fields1));
-    parent_crdt.insert_or_update(record_id2, std::move(parent_fields2));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes1, parent_changes2;
+    parent_crdt.insert_or_update(record_id1, parent_changes1, std::make_pair("id", record_id1), std::make_pair("data", "parent_data1"));
+    parent_crdt.insert_or_update(record_id2, parent_changes2, std::make_pair("id", record_id2), std::make_pair("data", "parent_data2"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -756,16 +674,16 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"data", "parent_data"}};
-    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("data", "parent_data"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Override parent's record in child
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"data", "child_data"}};
-    child_crdt.insert_or_update(record_id, std::move(child_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id, child_changes, std::make_pair("data", "child_data"));
 
     // Check that child has its own value
     assert_true(child_crdt.get_data().at(record_id).fields.at("data") == "child_data",
@@ -783,16 +701,16 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
-    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Child adds a new field
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"child_field", "child_value"}};
-    auto child_changes = child_crdt.insert_or_update(record_id, std::move(child_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id, child_changes, std::make_pair("child_field", "child_value"));
 
     // Merge child's changes to parent
     parent_crdt.merge_changes(std::move(child_changes));
@@ -813,16 +731,16 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
-    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Child adds a new field
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"child_field", "child_value"}};
-    child_crdt.insert_or_update(record_id, std::move(child_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id, child_changes, std::make_pair("child_field", "child_value"));
 
     // Get changes since the beginning
     auto changes = child_crdt.get_changes_since(0);
@@ -850,8 +768,8 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field", "value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -862,10 +780,11 @@ int main() {
                 "Tombstone Propagation: Child should inherit the record from parent");
 
     // Parent deletes the record
-    auto parent_delete_changes = parent_crdt.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> parent_delete_changes;
+    parent_crdt.delete_record(record_id, parent_delete_changes);
 
     // Merge deletion into child
-    child_crdt.merge_changes(std::move(parent_delete_changes), true);
+    child_crdt.merge_changes(std::move(parent_delete_changes));
 
     // Child should now have the record tombstoned
     assert_true(child_crdt.get_data().at(record_id).fields.empty(),
@@ -882,25 +801,23 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Both parent and child update the same field concurrently
-    CrdtMap<CrdtString, CrdtString> parent_update = {{"field", "parent_updated"}};
-    auto parent_change_update = parent_crdt.insert_or_update(record_id, std::move(parent_update));
-
-    CrdtMap<CrdtString, CrdtString> child_update = {{"field", "child_updated"}};
-    auto child_change_update = child_crdt.insert_or_update(record_id, std::move(child_update));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_change_update, child_change_update;
+    parent_crdt.insert_or_update(record_id, parent_change_update, std::make_pair("field", "parent_updated"));
+    child_crdt.insert_or_update(record_id, child_change_update, std::make_pair("field", "child_updated"));
 
     // Merge child's changes into parent
-    parent_crdt.merge_changes(std::move(child_change_update), true);
+    parent_crdt.merge_changes(std::move(child_change_update));
 
     // Merge parent's changes into child
-    child_crdt.merge_changes(std::move(parent_change_update), true);
+    child_crdt.merge_changes(std::move(parent_change_update));
 
     // Conflict resolution should prefer the change with the higher db_version or higher node_id
     // Assuming parent and child have different db_versions, the resolution will follow the rules
@@ -930,8 +847,9 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id_parent = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id_parent}, {"parent_field", "parent_value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id_parent, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id_parent, parent_changes, std::make_pair("id", record_id_parent),
+                                 std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -939,8 +857,9 @@ int main() {
 
     // Child adds its own record
     CrdtString record_id_child = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> child_fields = {{"id", record_id_child}, {"child_field", "child_value"}};
-    auto child_changes = child_crdt.insert_or_update(record_id_child, std::move(child_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> child_changes;
+    child_crdt.insert_or_update(record_id_child, child_changes, std::make_pair("id", record_id_child),
+                                std::make_pair("child_field", "child_value"));
 
     // Retrieve changes since db_version 0 from child
     CrdtVector<Change<CrdtString, CrdtString>> retrieved_changes = child_crdt.get_changes_since(0);
@@ -972,16 +891,16 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Parent inserts a new field
-    CrdtMap<CrdtString, CrdtString> parent_new_field = {{"new_field", "new_parent_value"}};
-    auto parent_change_new_field = parent_crdt.insert_or_update(record_id, std::move(parent_new_field));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_change_new_field;
+    parent_crdt.insert_or_update(record_id, parent_change_new_field, std::make_pair("new_field", "new_parent_value"));
 
     // Merge parent's new field into child
     child_crdt.merge_changes(std::move(parent_change_new_field));
@@ -1001,15 +920,16 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"field", "parent_value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Child deletes the record
-    auto child_delete_changes = child_crdt.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> child_delete_changes;
+    child_crdt.delete_record(record_id, child_delete_changes);
 
     // Merge child's deletion into parent
     parent_crdt.merge_changes(std::move(child_delete_changes));
@@ -1033,20 +953,20 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field1", "value1"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field1", "value1"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Parent updates field1
-    CrdtMap<CrdtString, CrdtString> parent_update = {{"field1", "parent_updated"}};
-    auto parent_change_update = parent_crdt.insert_or_update(record_id, std::move(parent_update));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_change_update;
+    parent_crdt.insert_or_update(record_id, parent_change_update, std::make_pair("field1", "parent_updated"));
 
     // Child updates field2
-    CrdtMap<CrdtString, CrdtString> child_update = {{"field2", "child_value2"}};
-    auto child_change_update = child_crdt.insert_or_update(record_id, std::move(child_update));
+    CrdtVector<Change<CrdtString, CrdtString>> child_change_update;
+    child_crdt.insert_or_update(record_id, child_change_update, std::make_pair("field2", "child_value2"));
 
     // Merge changes
     parent_crdt.merge_changes(std::move(child_change_update));
@@ -1071,22 +991,23 @@ int main() {
     // Create parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> fields = {{"id", record_id}, {"field", "value"}};
-    auto parent_changes = parent_crdt.insert_or_update(record_id, std::move(fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Parent deletes the record
-    auto parent_delete_changes = parent_crdt.delete_record(record_id);
+    CrdtVector<Change<CrdtString, CrdtString>> parent_delete_changes;
+    parent_crdt.delete_record(record_id, parent_delete_changes);
 
     // Merge deletion into child
     child_crdt.merge_changes(std::move(parent_delete_changes));
 
     // Child attempts to insert a new field into the tombstoned record
-    CrdtMap<CrdtString, CrdtString> child_insert = {{"field2", "new_value"}};
-    auto child_change_insert = child_crdt.insert_or_update(record_id, std::move(child_insert));
+    CrdtVector<Change<CrdtString, CrdtString>> child_change_insert;
+    child_crdt.insert_or_update(record_id, child_change_insert, std::make_pair("field2", "new_value"));
 
     // Merge child's insertion back into parent
     parent_crdt.merge_changes(std::move(child_change_insert));
@@ -1142,7 +1063,7 @@ int main() {
     std::cout << "Test 'Multiple Distinct Changes' passed." << std::endl;
   }
 
-  // Test Case 4: Multiple Changes on the Same Record and Same Column
+  // Test Case: Multiple Changes on the Same Record and Same Column
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     // Older change
@@ -1157,7 +1078,7 @@ int main() {
     std::cout << "Test 'Multiple Changes Same Record and Column' passed." << std::endl;
   }
 
-  // Test Case 5: Multiple Changes on the Same Record but Different Columns
+  // Test Case: Multiple Changes on the Same Record but Different Columns
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     changes.emplace_back(Change<CrdtString, CrdtString>("record1", "col1", "value1", 1, 1, 1));
@@ -1170,7 +1091,7 @@ int main() {
     std::cout << "Test 'Multiple Changes Same Record Different Columns' passed." << std::endl;
   }
 
-  // Test Case 6: Interleaved Changes on Multiple Records and Columns
+  // Test Case: Interleaved Changes on Multiple Records and Columns
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     // Record1, Column1
@@ -1184,10 +1105,6 @@ int main() {
 
     CRDT<CrdtString, CrdtString>::compress_changes(changes);
 
-    // Expected compressed changes:
-    // - record1, col1: "v2"
-    // - record2, col2: "v4"
-    // - record1, col3: "v5"
     assert_true(changes.size() == 3, "Compress Changes: Should compress to latest changes per column.");
     for (const auto &change : changes) {
       if (change.record_id == "record1" && change.col_name == "col1") {
@@ -1203,7 +1120,7 @@ int main() {
     std::cout << "Test 'Interleaved Changes on Multiple Records and Columns' passed." << std::endl;
   }
 
-  // Test Case 7: Changes Including Deletions
+  // Test Case: Changes Including Deletions
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     // Insertions
@@ -1218,10 +1135,6 @@ int main() {
 
     CRDT<CrdtString, CrdtString>::compress_changes(changes);
 
-    // Expected compressed changes:
-    // - record1, col1: "value3"
-    // - record1, col2: deletion (std::nullopt)
-    // - record1, col3: "value4"
     assert_true(changes.size() == 3, "Compress Changes: Should compress updates and deletions correctly.");
     for (const auto &change : changes) {
       if (change.record_id == "record1" && change.col_name == "col1") {
@@ -1237,7 +1150,7 @@ int main() {
     std::cout << "Test 'Changes Including Deletions' passed." << std::endl;
   }
 
-  // Test Case 8: Multiple Deletions on the Same Record
+  // Test Case: Multiple Deletions on the Same Record
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     // First deletion
@@ -1247,8 +1160,6 @@ int main() {
 
     CRDT<CrdtString, CrdtString>::compress_changes(changes);
 
-    // Expected compressed changes:
-    // - record1, __deleted__: latest deletion
     assert_true(changes.size() == 1, "Compress Changes: Multiple deletions should compress to latest.");
     assert_true(!changes[0].col_name.has_value(), "Compress Changes: Deletion should have no column name.");
     assert_true(!changes[0].value.has_value(), "Compress Changes: Deletion should have no value.");
@@ -1256,7 +1167,7 @@ int main() {
     std::cout << "Test 'Multiple Deletions on the Same Record' passed." << std::endl;
   }
 
-  // Test Case 9: Mixed Inserts, Updates, and Deletions Across Multiple Records
+  // Test Case: Mixed Inserts, Updates, and Deletions Across Multiple Records
   {
     CrdtVector<Change<CrdtString, CrdtString>> changes;
     // Record1
@@ -1272,11 +1183,6 @@ int main() {
 
     CRDT<CrdtString, CrdtString>::compress_changes(changes);
 
-    // Expected compressed changes:
-    // - record1, col1: "r1c1_v2"
-    // - record1, col2: deletion
-    // - record2, col1: "r2c1_v2"
-    // - record3, col1: "r3c1_v1"
     assert_true(changes.size() == 4, "Compress Changes: Mixed operations should compress correctly.");
     for (const auto &change : changes) {
       if (change.record_id == "record1" && change.col_name == "col1") {
@@ -1299,19 +1205,16 @@ int main() {
     // Step 1: Initialize Parent CRDT
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
-    CrdtMap<CrdtString, CrdtString> parent_fields = {{"id", record_id}, {"parent_field", "parent_value"}};
-    parent_crdt.insert_or_update(record_id, std::move(parent_fields));
+    CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
 
     // Step 2: Initialize Child CRDT with Parent
     CRDT<CrdtString, CrdtString> child_crdt(parent_crdt);
 
     // Step 3: Modify Child CRDT
-    CrdtMap<CrdtString, CrdtString> child_fields = {
-        {"child_field1", "child_value1"},
-        {"child_field2", "child_value2"},
-        {"parent_field", "updated_parent_value"}
-    };
-    child_crdt.insert_or_update(record_id, std::move(child_fields));
+    child_crdt.insert_or_update(record_id, std::make_pair("child_field1", "child_value1"),
+                                std::make_pair("child_field2", "child_value2"),
+                                std::make_pair("parent_field", "updated_parent_value"));
 
     // Step 4: Generate diff using revert
     auto diff = child_crdt.diff(parent_crdt);
@@ -1320,11 +1223,10 @@ int main() {
     assert_true(diff.size() == 3, "Diff should contain 3 changes");
 
     // Helper function to find a change in the diff
-    auto find_change = [&diff](const CrdtString& field_name) -> const Change<CrdtString, CrdtString>* {
-        auto it = std::find_if(diff.begin(), diff.end(), [&field_name](const auto& change) {
-            return change.col_name && *change.col_name == field_name;
-        });
-        return it != diff.end() ? &(*it) : nullptr;
+    auto find_change = [&diff](const CrdtString &field_name) -> const Change<CrdtString, CrdtString> * {
+      auto it = std::find_if(diff.begin(), diff.end(),
+                             [&field_name](const auto &change) { return change.col_name && *change.col_name == field_name; });
+      return it != diff.end() ? &(*it) : nullptr;
     };
 
     // Check for child_field1

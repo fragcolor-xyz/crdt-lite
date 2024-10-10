@@ -9,15 +9,22 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
 #include <set>
 #include <vector>
 
 template <typename T> using CrdtVector = std::vector<T>;
+
 using CrdtString = std::string;
+
 template <typename K, typename V, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
 using CrdtMap = std::unordered_map<K, V, Hash, KeyEqual>;
+
+template <typename K, typename V, typename Comparator = std::less<K>> using CrdtSortedMap = std::map<K, V, Comparator>;
+
 template <typename K, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
 using CrdtSet = std::unordered_set<K, Hash, KeyEqual>;
+
 template <typename T, typename Comparator> using CrdtSortedSet = std::set<T, Comparator>;
 using CrdtNodeId = uint64_t;
 #endif
@@ -27,7 +34,6 @@ using CrdtNodeId = uint64_t;
 #include <optional>
 #include <memory>
 #include <type_traits>
-#include <concepts>
 
 /// Represents a single change in the CRDT.
 template <typename K, typename V> struct Change {
@@ -289,55 +295,26 @@ public:
   /// # Arguments
   ///
   /// * `record_id` - The unique identifier for the record.
-  /// * `fields` - A hashmap of field names to their values.
+  /// * `fields` - A variadic list of field name-value pairs.
   ///
-  /// # Returns
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename... Pairs>
+  constexpr void insert_or_update(const K &record_id, Pairs &&...pairs) {
+    insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, nullptr, std::forward<Pairs>(pairs)...);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT, and stores changes.
   ///
-  /// A vector of `Change` objects representing the changes made, or void if ReturnChanges is false.
+  /// # Arguments
   ///
-  /// Complexity: O(m), where m is the number of fields in the input
-  template <bool ReturnChanges = true>
-  constexpr std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> insert_or_update(const K &record_id,
-                                                                                               CrdtMap<CrdtString, V> &&fields) {
-    CrdtVector<Change<K, V>> changes;
-    uint64_t db_version = clock_.tick();
-
-    // Check if the record is tombstoned
-    if (is_record_tombstoned(record_id)) {
-      if constexpr (ReturnChanges) {
-        return changes;
-      } else {
-        return;
-      }
-    }
-
-    Record<V> &record = get_or_create_record_unchecked(record_id);
-
-    for (auto &[col_name, value] : fields) {
-      uint64_t col_version;
-      auto col_it = record.column_versions.find(col_name);
-      if (col_it != record.column_versions.end()) {
-        col_version = ++col_it->second.col_version;
-        col_it->second.db_version = db_version;
-        col_it->second.node_id = node_id_;
-        col_it->second.local_db_version = db_version;
-      } else {
-        col_version = 1;
-        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
-      }
-
-      if constexpr (ReturnChanges) {
-        record.fields[col_name] = value;
-        changes.emplace_back(
-            Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version, node_id_, db_version));
-      } else {
-        record.fields[std::move(col_name)] = std::move(value);
-      }
-    }
-
-    if constexpr (ReturnChanges) {
-      return changes;
-    }
+  /// * `record_id` - The unique identifier for the record.
+  /// * `changes` - A reference to a container to store the changes.
+  /// * `fields` - A variadic list of field name-value pairs.
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename ChangeContainer, typename... Pairs>
+  constexpr void insert_or_update(const K &record_id, ChangeContainer &changes, Pairs &&...pairs) {
+    insert_or_update_impl(record_id, &changes, std::forward<Pairs>(pairs)...);
   }
 
   /// Deletes a record by marking it as tombstoned.
@@ -346,39 +323,22 @@ public:
   ///
   /// * `record_id` - The unique identifier for the record.
   ///
-  /// # Returns
+  /// Complexity: O(1)
+  void delete_record(const K &record_id) {
+    delete_record_impl<CrdtVector<Change<K, V>>>(record_id, nullptr);
+  }
+
+  /// Deletes a record by marking it as tombstoned, and stores the change.
   ///
-  /// A vector of `Change` objects representing the deletion, or void if ReturnChanges is false.
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `changes` - A reference to a container to store the change.
   ///
   /// Complexity: O(1)
-  template <bool ReturnChanges = true>
-  std::conditional_t<ReturnChanges, CrdtVector<Change<K, V>>, void> delete_record(const K &record_id) {
-    CrdtVector<Change<K, V>> changes;
-    if (is_record_tombstoned(record_id)) {
-      if constexpr (ReturnChanges) {
-        return changes;
-      } else {
-        return;
-      }
-    }
-
-    uint64_t db_version = clock_.tick();
-
-    // Mark as tombstone and remove data
-    tombstones_.emplace(record_id);
-    data_.erase(record_id);
-
-    // Insert deletion clock info
-    CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_, db_version));
-
-    // Store deletion info in the data map
-    data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
-
-    if constexpr (ReturnChanges) {
-      changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version));
-      return changes;
-    }
+  template <typename ChangeContainer>
+  void delete_record(const K &record_id, ChangeContainer &changes) {
+    delete_record_impl(record_id, &changes);
   }
 
   /// Retrieves all changes since a given `last_db_version`.
@@ -929,6 +889,71 @@ private:
     }
 
     return inverse_changes;
+  }
+
+  /// Implementation of insert_or_update
+  template <typename ChangeContainer, typename... Pairs>
+  constexpr void insert_or_update_impl(const K &record_id, ChangeContainer *changes, Pairs &&...pairs) {
+    uint64_t db_version = clock_.tick();
+
+    // Check if the record is tombstoned
+    if (is_record_tombstoned(record_id)) {
+      return;
+    }
+
+    Record<V> &record = get_or_create_record_unchecked(record_id);
+
+    // Helper function to process each pair
+    auto process_pair = [&](const auto &pair) {
+      const auto &col_name = pair.first;
+      const auto &value = pair.second;
+
+      uint64_t col_version;
+      auto col_it = record.column_versions.find(col_name);
+      if (col_it != record.column_versions.end()) {
+        col_version = ++col_it->second.col_version;
+        col_it->second.db_version = db_version;
+        col_it->second.node_id = node_id_;
+        col_it->second.local_db_version = db_version;
+      } else {
+        col_version = 1;
+        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
+      }
+
+      record.fields[col_name] = value;
+
+      if (changes) {
+        changes->insert(changes->end(), Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, db_version));
+      }
+    };
+
+    // Process all pairs
+    (process_pair(std::forward<Pairs>(pairs)), ...);
+  }
+
+  /// Implementation of delete_record
+  template <typename ChangeContainer>
+  void delete_record_impl(const K &record_id, ChangeContainer *changes) {
+    if (is_record_tombstoned(record_id)) {
+      return;
+    }
+
+    uint64_t db_version = clock_.tick();
+
+    // Mark as tombstone and remove data
+    tombstones_.emplace(record_id);
+    data_.erase(record_id);
+
+    // Insert deletion clock info
+    CrdtMap<CrdtString, ColumnVersion> deletion_clock;
+    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_, db_version));
+
+    // Store deletion info in the data map
+    data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+
+    if (changes) {
+      changes->insert(changes->end(), Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version));
+    }
   }
 };
 

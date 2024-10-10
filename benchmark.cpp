@@ -58,11 +58,8 @@ private:
       RecordId rid = "record_" + std::to_string(i) + "_" + generate_random_string(8);
       record_ids.push_back(rid);
 
-      CrdtMap<CrdtString, FieldValue> fields;
-      fields.emplace("field1", "value1_" + std::to_string(i));
-      fields.emplace("field2", "value2_" + std::to_string(i));
-
-      node1.insert_or_update(rid, std::move(fields));
+      node1.insert_or_update(rid, std::make_pair("field1", "value1_" + std::to_string(i)),
+                             std::make_pair("field2", "value2_" + std::to_string(i)));
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -83,11 +80,8 @@ private:
       size_t index = dist(rng);
       RecordId rid = record_ids[index];
 
-      CrdtMap<CrdtString, FieldValue> fields;
       int field_num = field_dist(rng);
-      fields.emplace("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates));
-
-      node1.insert_or_update(rid, std::move(fields));
+      node1.insert_or_update(rid, std::make_pair("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates)));
       updates++;
     }
 
