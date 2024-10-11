@@ -35,6 +35,24 @@ using CrdtNodeId = uint64_t;
 #include <memory>
 #include <type_traits>
 
+// Add this helper struct at the beginning of the file, outside of the CRDT class
+
+// Helper struct to check if a container has emplace_back method
+template <typename T, typename = void> struct has_emplace_back : std::false_type {};
+
+template <typename T>
+struct has_emplace_back<T, std::void_t<decltype(std::declval<T>().emplace_back(std::declval<typename T::value_type>()))>>
+    : std::true_type {};
+
+// Helper function to add an element to a container
+template <typename Container, typename Element> void add_to_container(Container &container, Element &&element) {
+  if constexpr (has_emplace_back<Container>::value) {
+    container.emplace_back(std::forward<Element>(element));
+  } else {
+    container.emplace(std::forward<Element>(element));
+  }
+}
+
 /// Represents a single change in the CRDT.
 template <typename K, typename V> struct Change {
   K record_id;
@@ -298,8 +316,7 @@ public:
   /// * `fields` - A variadic list of field name-value pairs.
   ///
   /// Complexity: O(n), where n is the number of fields in the input
-  template <typename... Pairs>
-  constexpr void insert_or_update(const K &record_id, Pairs &&...pairs) {
+  template <typename... Pairs> constexpr void insert_or_update(const K &record_id, Pairs &&...pairs) {
     insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, nullptr, std::forward<Pairs>(pairs)...);
   }
 
@@ -324,9 +341,7 @@ public:
   /// * `record_id` - The unique identifier for the record.
   ///
   /// Complexity: O(1)
-  void delete_record(const K &record_id) {
-    delete_record_impl<CrdtVector<Change<K, V>>>(record_id, nullptr);
-  }
+  void delete_record(const K &record_id) { delete_record_impl<CrdtVector<Change<K, V>>>(record_id, nullptr); }
 
   /// Deletes a record by marking it as tombstoned, and stores the change.
   ///
@@ -336,8 +351,7 @@ public:
   /// * `changes` - A reference to a container to store the change.
   ///
   /// Complexity: O(1)
-  template <typename ChangeContainer>
-  void delete_record(const K &record_id, ChangeContainer &changes) {
+  template <typename ChangeContainer> void delete_record(const K &record_id, ChangeContainer &changes) {
     delete_record_impl(record_id, &changes);
   }
 
@@ -923,7 +937,7 @@ private:
       record.fields[col_name] = value;
 
       if (changes) {
-        changes->insert(changes->end(), Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, db_version));
+        add_to_container(*changes, Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, db_version));
       }
     };
 
@@ -932,8 +946,7 @@ private:
   }
 
   /// Implementation of delete_record
-  template <typename ChangeContainer>
-  void delete_record_impl(const K &record_id, ChangeContainer *changes) {
+  template <typename ChangeContainer> void delete_record_impl(const K &record_id, ChangeContainer *changes) {
     if (is_record_tombstoned(record_id)) {
       return;
     }
@@ -952,7 +965,7 @@ private:
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     if (changes) {
-      changes->insert(changes->end(), Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version));
+      add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version));
     }
   }
 };
