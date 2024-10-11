@@ -334,6 +334,33 @@ public:
     insert_or_update_impl(record_id, &changes, std::forward<Pairs>(pairs)...);
   }
 
+  /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `fields` - An iterable container of field name-value pairs (will be consumed).
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename Container> constexpr void insert_or_update_from_container(const K &record_id, Container &&fields) {
+    insert_or_update_from_container_impl<CrdtVector<Change<K, V>>>(record_id, std::forward<Container>(fields), nullptr);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs,
+  /// and stores changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `fields` - An iterable container of field name-value pairs (will be consumed).
+  /// * `changes` - A reference to a container to store the changes.
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename Container, typename ChangeContainer>
+  constexpr void insert_or_update_from_container(const K &record_id, Container &&fields, ChangeContainer &changes) {
+    insert_or_update_from_container_impl(record_id, std::forward<Container>(fields), &changes);
+  }
+
   /// Deletes a record by marking it as tombstoned.
   ///
   /// # Arguments
@@ -934,15 +961,53 @@ private:
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
       }
 
-      record.fields[col_name] = value;
-
       if (changes) {
-        add_to_container(*changes, Change<K, V>(record_id, col_name, value, col_version, db_version, node_id_, db_version));
+        record.fields[col_name] = value;
+        add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
+                                                node_id_, db_version));
+      } else {
+        record.fields[std::move(col_name)] = std::move(value);
       }
     };
 
     // Process all pairs
     (process_pair(std::forward<Pairs>(pairs)), ...);
+  }
+
+  /// Implementation of insert_or_update_from_container
+  template <typename ChangeContainer, typename Container>
+  constexpr void insert_or_update_from_container_impl(const K &record_id, Container &&fields, ChangeContainer *changes) {
+    uint64_t db_version = clock_.tick();
+
+    // Check if the record is tombstoned
+    if (is_record_tombstoned(record_id)) {
+      return;
+    }
+
+    Record<V> &record = get_or_create_record_unchecked(record_id);
+
+    // Process each field-value pair in the container
+    for (auto &&[col_name, value] : std::forward<Container>(fields)) {
+      uint64_t col_version;
+      auto col_it = record.column_versions.find(col_name);
+      if (col_it != record.column_versions.end()) {
+        col_version = ++col_it->second.col_version;
+        col_it->second.db_version = db_version;
+        col_it->second.node_id = node_id_;
+        col_it->second.local_db_version = db_version;
+      } else {
+        col_version = 1;
+        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
+      }
+
+      if (changes) {
+        record.fields[col_name] = value;
+        add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
+                                                node_id_, db_version));
+      } else {
+        record.fields[std::move(col_name)] = std::move(value);
+      }
+    }
   }
 
   /// Implementation of delete_record
