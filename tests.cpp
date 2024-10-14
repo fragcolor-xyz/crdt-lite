@@ -138,7 +138,8 @@ int main() {
 
     // Node2 tries to insert the same record
     CrdtVector<Change<CrdtString, CrdtString>> changes_attempt_insert;
-    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
+    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id),
+                           std::make_pair("tag", "Temporary"));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -289,7 +290,8 @@ int main() {
 
     // Node2 tries to insert the same record
     CrdtVector<Change<CrdtString, CrdtString>> changes_attempt_insert;
-    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id), std::make_pair("tag", "Temporary"));
+    node2.insert_or_update(record_id, changes_attempt_insert, std::make_pair("id", record_id),
+                           std::make_pair("tag", "Temporary"));
 
     // Merge changes back to node1
     node1.merge_changes(std::move(changes_attempt_insert));
@@ -583,16 +585,16 @@ int main() {
     CrdtString record_id_parent = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
     parent_crdt.insert_or_update(record_id_parent, parent_changes, std::make_pair("id", record_id_parent),
-                                                       std::make_pair("parent_field", "parent_value"));
+                                 std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Child should inherit parent's record
-    assert_true(child_crdt.get_data().find(record_id_parent) != child_crdt.get_data().end(),
+    assert_true(child_crdt.get_data_combined().find(record_id_parent) != child_crdt.get_data_combined().end(),
                 "Parent-Child Overlay: Child should inherit parent's record");
-    assert_true(child_crdt.get_data().at(record_id_parent).fields.at("parent_field") == "parent_value",
+    assert_true(child_crdt.get_data_combined().at(record_id_parent).fields.at("parent_field") == "parent_value",
                 "Parent-Child Overlay: Inherited field value mismatch");
 
     // Child updates the inherited record
@@ -603,7 +605,7 @@ int main() {
     parent_crdt.merge_changes(std::move(child_changes));
 
     // Parent should now have the child's field
-    assert_true(parent_crdt.get_data().at(record_id_parent).fields.at("child_field") == "child_value",
+    assert_true(parent_crdt.get_data_combined().at(record_id_parent).fields.at("child_field") == "child_value",
                 "Parent-Child Overlay: Parent should reflect child's update");
 
     std::cout << "Test 'Parent-Child Overlay Functionality' passed." << std::endl;
@@ -617,7 +619,8 @@ int main() {
     CRDT<CrdtString, CrdtString> grandparent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> grandparent_changes;
-    grandparent_crdt.insert_or_update(record_id, grandparent_changes, std::make_pair("id", record_id), std::make_pair("level", "grandparent"));
+    grandparent_crdt.insert_or_update(record_id, grandparent_changes, std::make_pair("id", record_id),
+                                      std::make_pair("level", "grandparent"));
 
     // Create parent CRDT with grandparent
     auto grandparent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(grandparent_crdt);
@@ -632,15 +635,15 @@ int main() {
     child_crdt.insert_or_update(record_id, child_changes, std::make_pair("level", "child"));
 
     // Check that child has the most recent value
-    assert_true(child_crdt.get_data().at(record_id).fields.at("level") == "child",
+    assert_true(child_crdt.get_data_combined().at(record_id).fields.at("level") == "child",
                 "Multi-level Overlay: Child should have its own value");
 
     // Check that parent has its own value
-    assert_true(parent_crdt.get_data().at(record_id).fields.at("level") == "parent",
+    assert_true(parent_crdt.get_data_combined().at(record_id).fields.at("level") == "parent",
                 "Multi-level Overlay: Parent should have its own value");
 
     // Check that grandparent has its original value
-    assert_true(grandparent_crdt.get_data().at(record_id).fields.at("level") == "grandparent",
+    assert_true(grandparent_crdt.get_data_combined().at(record_id).fields.at("level") == "grandparent",
                 "Multi-level Overlay: Grandparent should have its original value");
 
     std::cout << "Test 'Parent-Child Overlay with Multiple Levels' passed." << std::endl;
@@ -653,17 +656,19 @@ int main() {
     CrdtString record_id1 = generate_uuid();
     CrdtString record_id2 = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes1, parent_changes2;
-    parent_crdt.insert_or_update(record_id1, parent_changes1, std::make_pair("id", record_id1), std::make_pair("data", "parent_data1"));
-    parent_crdt.insert_or_update(record_id2, parent_changes2, std::make_pair("id", record_id2), std::make_pair("data", "parent_data2"));
+    parent_crdt.insert_or_update(record_id1, parent_changes1, std::make_pair("id", record_id1),
+                                 std::make_pair("data", "parent_data1"));
+    parent_crdt.insert_or_update(record_id2, parent_changes2, std::make_pair("id", record_id2),
+                                 std::make_pair("data", "parent_data2"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Check that child inherits both records from parent
-    assert_true(child_crdt.get_data().at(record_id1).fields.at("data") == "parent_data1",
+    assert_true(child_crdt.get_data_combined().at(record_id1).fields.at("data") == "parent_data1",
                 "Record Inheritance: Child should inherit record1 from parent");
-    assert_true(child_crdt.get_data().at(record_id2).fields.at("data") == "parent_data2",
+    assert_true(child_crdt.get_data_combined().at(record_id2).fields.at("data") == "parent_data2",
                 "Record Inheritance: Child should inherit record2 from parent");
 
     std::cout << "Test 'Inheritance of Records from Parent' passed." << std::endl;
@@ -675,7 +680,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("data", "parent_data"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("data", "parent_data"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -686,11 +692,11 @@ int main() {
     child_crdt.insert_or_update(record_id, child_changes, std::make_pair("data", "child_data"));
 
     // Check that child has its own value
-    assert_true(child_crdt.get_data().at(record_id).fields.at("data") == "child_data",
+    assert_true(child_crdt.get_data_combined().at(record_id).fields.at("data") == "child_data",
                 "Record Override: Child should have its own value");
 
     // Check that parent still has its original value
-    assert_true(parent_crdt.get_data().at(record_id).fields.at("data") == "parent_data",
+    assert_true(parent_crdt.get_data_combined().at(record_id).fields.at("data") == "parent_data",
                 "Record Override: Parent should retain its original value");
 
     std::cout << "Test 'Overriding Parent Records in Child' passed." << std::endl;
@@ -702,7 +708,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -716,11 +723,11 @@ int main() {
     parent_crdt.merge_changes(std::move(child_changes));
 
     // Check that parent now has the child's field
-    assert_true(parent_crdt.get_data().at(record_id).fields.at("child_field") == "child_value",
+    assert_true(parent_crdt.get_data_combined().at(record_id).fields.at("child_field") == "child_value",
                 "Child to Parent Merge: Parent should have child's new field");
 
     // Check that parent retains its original field
-    assert_true(parent_crdt.get_data().at(record_id).fields.at("parent_field") == "parent_value",
+    assert_true(parent_crdt.get_data_combined().at(record_id).fields.at("parent_field") == "parent_value",
                 "Child to Parent Merge: Parent should retain its original field");
 
     std::cout << "Test 'Merging Changes from Child to Parent' passed." << std::endl;
@@ -732,7 +739,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("parent_field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -776,7 +784,7 @@ int main() {
     CRDT<CrdtString, CrdtString> child_crdt(2, parent_ptr);
 
     // Child should inherit the record
-    assert_true(child_crdt.get_data().find(record_id) != child_crdt.get_data().end(),
+    assert_true(child_crdt.get_data_combined().find(record_id) != child_crdt.get_data_combined().end(),
                 "Tombstone Propagation: Child should inherit the record from parent");
 
     // Parent deletes the record
@@ -787,9 +795,9 @@ int main() {
     child_crdt.merge_changes(std::move(parent_delete_changes));
 
     // Child should now have the record tombstoned
-    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
+    assert_true(child_crdt.get_data_combined().at(record_id).fields.empty(),
                 "Tombstone Propagation: Child should have empty fields after deletion");
-    assert_true(child_crdt.get_data().at(record_id).column_versions.find("__deleted__") !=
+    assert_true(child_crdt.get_data_combined().at(record_id).column_versions.find("__deleted__") !=
                     child_crdt.get_data().at(record_id).column_versions.end(),
                 "Tombstone Propagation: Child should have '__deleted__' column version");
 
@@ -802,7 +810,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -892,7 +901,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -921,7 +931,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("field", "parent_value"));
 
     // Create child CRDT with parent
     auto parent_ptr = std::make_shared<CRDT<CrdtString, CrdtString>>(parent_crdt);
@@ -1206,7 +1217,8 @@ int main() {
     CRDT<CrdtString, CrdtString> parent_crdt(1);
     CrdtString record_id = generate_uuid();
     CrdtVector<Change<CrdtString, CrdtString>> parent_changes;
-    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id), std::make_pair("parent_field", "parent_value"));
+    parent_crdt.insert_or_update(record_id, parent_changes, std::make_pair("id", record_id),
+                                 std::make_pair("parent_field", "parent_value"));
 
     // Step 2: Initialize Child CRDT with Parent
     CRDT<CrdtString, CrdtString> child_crdt(parent_crdt);

@@ -639,12 +639,10 @@ public:
   constexpr void print_data() const {}
 #endif
 
-  // Accessors for testing
   // Complexity: O(1)
   constexpr const LogicalClock &get_clock() const { return clock_; }
 
-  // Updated get_data() method
-  constexpr CrdtMap<K, Record<V>> get_data() const {
+  constexpr CrdtMap<K, Record<V>> get_data_combined() const {
     if (!parent_) {
       return data_;
     }
@@ -655,6 +653,8 @@ public:
     }
     return combined_data;
   }
+
+  constexpr CrdtMap<K, Record<V>> &get_data() { return data_; }
 
   /// Retrieves a pointer to a record if it exists, or nullptr if it doesn't.
   ///
