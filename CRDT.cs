@@ -4,6 +4,8 @@ using System.Linq;
 
 #nullable enable
 
+using CrdtNodeId = ulong;
+
 // Namespace for CRDT implementation
 namespace ForSync.CRDT {
   /// <summary>
@@ -52,10 +54,10 @@ namespace ForSync.CRDT {
   public struct ColumnVersion {
     public ulong ColVersion { get; set; }
     public ulong DbVersion { get; set; }
-    public ulong NodeId { get; set; }
+    public CrdtNodeId NodeId { get; set; }
     public ulong LocalDbVersion { get; set; }
 
-    public ColumnVersion(ulong c, ulong d, ulong n, ulong ldbVer = 0) {
+    public ColumnVersion(ulong c, ulong d, CrdtNodeId n, ulong ldbVer = 0) {
       ColVersion = c;
       DbVersion = d;
       NodeId = n;
@@ -151,14 +153,15 @@ namespace ForSync.CRDT {
     public V? Value { get; set; }       // null represents deletion of the column, not the record
     public ulong ColVersion { get; set; }
     public ulong DbVersion { get; set; }
-    public ulong NodeId { get; set; }
+    public CrdtNodeId NodeId { get; set; }
     public ulong LocalDbVersion { get; set; }
 
     public Change() {
       RecordId = default!;
+      Value = default!;
     }
 
-    public Change(K recordId, ColName<K>? colName, V? value, ulong colVersion, ulong dbVersion, ulong nodeId, ulong localDbVersion = 0) {
+    public Change(K recordId, ColName<K>? colName, V? value, ulong colVersion, ulong dbVersion, CrdtNodeId nodeId, ulong localDbVersion = 0) {
       RecordId = recordId;
       ColName = colName;
       Value = value;
@@ -200,7 +203,7 @@ namespace ForSync.CRDT {
         return a.DbVersion > b.DbVersion ? -1 : 1;
 
       if (a.NodeId != b.NodeId)
-        return a.NodeId > b.NodeId ? -1 : 1;
+        return a.NodeId.CompareTo(b.NodeId);
 
       return 0; // Consider equal if all fields match
     }
@@ -210,7 +213,7 @@ namespace ForSync.CRDT {
   /// Represents the CRDT structure, generic over key (K) and value (V) types.
   /// </summary>
   public class CRDT<K, V> {
-    private ulong _nodeId;
+    private CrdtNodeId _nodeId;
     private LogicalClock _clock;
     private Dictionary<K, Record<K, V>> _data;
     private HashSet<K> _tombstones;
@@ -218,11 +221,11 @@ namespace ForSync.CRDT {
     private CRDT<K, V>? _parent;
     private ulong _baseVersion;
 
-    public ulong NodeId => _nodeId;
+    public CrdtNodeId NodeId => _nodeId;
     public ulong Clock => _clock.CurrentTime;
     public ulong BaseVersion => _baseVersion;
 
-    public CRDT(ulong nodeId, CRDT<K, V>? parent = null) {
+    public CRDT(CrdtNodeId nodeId, CRDT<K, V>? parent = null) {
       _nodeId = nodeId;
       _clock = new LogicalClock();
       _data = new Dictionary<K, Record<K, V>>();
@@ -245,7 +248,7 @@ namespace ForSync.CRDT {
     /// <summary>
     /// Creates a CRDT from a list of changes (e.g., loaded from disk).
     /// </summary>
-    public CRDT(ulong nodeId, List<Change<K, V>> changes) {
+    public CRDT(CrdtNodeId nodeId, List<Change<K, V>> changes) {
       _nodeId = nodeId;
       _clock = new LogicalClock();
       _data = new Dictionary<K, Record<K, V>>();
@@ -278,7 +281,7 @@ namespace ForSync.CRDT {
 
         if (colName == null) {
           // The change was a record deletion (tombstone)
-          Record<K, V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
+          Record<K, V>? recordPtr = useParent ? GetRecord(recordId, true) : GetRecord(recordId);
 
           if (recordPtr != null) {
             // Restore all fields from the record
@@ -304,7 +307,7 @@ namespace ForSync.CRDT {
         } else {
           // The change was an insertion or update of a column
           ColName<K> col = colName.Value;
-          Record<K, V>? recordPtr = useParent ? GetRecordPtr(recordId, true) : GetRecordPtr(recordId);
+          Record<K, V>? recordPtr = useParent ? GetRecord(recordId, true) : GetRecord(recordId);
 
           if (recordPtr != null) {
             if (recordPtr.Fields.TryGetValue(col, out V existingValue)) {
@@ -497,14 +500,14 @@ namespace ForSync.CRDT {
         ColName<K>? colName = change.ColName;
         ulong remoteColVersion = change.ColVersion;
         ulong remoteDbVersion = change.DbVersion;
-        ulong remoteNodeId = change.NodeId;
+        CrdtNodeId remoteNodeId = change.NodeId;
         V? remoteValue = change.Value;
 
         // Update the logical clock
         ulong newLocalDbVersion = _clock.Update(remoteDbVersion);
 
         // Retrieve local column version information
-        Record<K, V>? recordPtr = GetRecordPtr(recordId, ignoreParent);
+        Record<K, V>? recordPtr = GetRecord(recordId, ignoreParent);
         ColumnVersion? localColInfo = null;
 
         if (recordPtr != null) {
@@ -535,7 +538,7 @@ namespace ForSync.CRDT {
               shouldAccept = false;
             } else {
               // db_version is equal; use node_id for final tiebreaking
-              shouldAccept = remoteNodeId > localColInfo.Value.NodeId;
+              shouldAccept = remoteNodeId.CompareTo(localColInfo.Value.NodeId) > 0;
             }
           }
         }
@@ -704,7 +707,7 @@ namespace ForSync.CRDT {
         ColName<K>? colName = change.ColName;
         ulong remoteColVersion = change.ColVersion;
         ulong remoteDbVersion = change.DbVersion;
-        ulong remoteNodeId = change.NodeId;
+        CrdtNodeId remoteNodeId = change.NodeId;
         ulong remoteLocalDbVersion = change.LocalDbVersion;
         V? remoteValue = change.Value;
 
@@ -757,12 +760,12 @@ namespace ForSync.CRDT {
     /// <summary>
     /// Retrieves a record pointer.
     /// </summary>
-    private Record<K, V>? GetRecordPtr(K recordId, bool ignoreParent = false) {
+    public Record<K, V>? GetRecord(K recordId, bool ignoreParent = false) {
       if (_data.TryGetValue(recordId, out Record<K, V>? record))
         return record;
 
       if (_parent != null && !ignoreParent)
-        return _parent.GetRecordPtr(recordId);
+        return _parent.GetRecord(recordId);
 
       return null;
     }
@@ -775,7 +778,7 @@ namespace ForSync.CRDT {
         _data[recordId] = new Record<K, V>();
 
         if (_parent != null && !ignoreParent) {
-          Record<K, V>? parentRecord = _parent.GetRecordPtr(recordId);
+          Record<K, V>? parentRecord = _parent.GetRecord(recordId);
           if (parentRecord != null)
             _data[recordId] = new Record<K, V>(new Dictionary<ColName<K>, V>(parentRecord.Fields),
                                            new Dictionary<ColName<K>, ColumnVersion>(parentRecord.ColumnVersions));
