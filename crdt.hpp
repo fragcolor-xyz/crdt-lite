@@ -66,12 +66,16 @@ template <typename K, typename V> struct Change {
   // we record the local db_version when the change was created
   uint64_t local_db_version;
 
+  // those optional flags are used to indicate the type of change, they are not stored in the records, users should manage them.
+  // they are very ephemeral and set only during insert_or_update, delete_record and merge_changes
+  uint32_t flags;
+
   Change() = default;
 
   Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid,
-         uint64_t ldb_ver = 0)
+         uint64_t ldb_ver = 0, uint32_t f = 0)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
-        node_id(nid), local_db_version(ldb_ver) {}
+        node_id(nid), local_db_version(ldb_ver), flags(f) {}
 };
 
 // Define a concept for a custom merge rule
@@ -317,7 +321,7 @@ public:
   ///
   /// Complexity: O(n), where n is the number of fields in the input
   template <typename... Pairs> constexpr void insert_or_update(const K &record_id, Pairs &&...pairs) {
-    insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, nullptr, std::forward<Pairs>(pairs)...);
+    insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, 0, nullptr, std::forward<Pairs>(pairs)...);
   }
 
   /// Inserts a new record or updates an existing record in the CRDT, and stores changes.
@@ -331,7 +335,35 @@ public:
   /// Complexity: O(n), where n is the number of fields in the input
   template <typename ChangeContainer, typename... Pairs>
   constexpr void insert_or_update(const K &record_id, ChangeContainer &changes, Pairs &&...pairs) {
-    insert_or_update_impl(record_id, &changes, std::forward<Pairs>(pairs)...);
+    insert_or_update_impl(record_id, 0, &changes, std::forward<Pairs>(pairs)...);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `flags` - A set of flags to indicate the type of change.
+  /// * `fields` - A variadic list of field name-value pairs.
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename... Pairs> constexpr void insert_or_update(const K &record_id, uint32_t flags, Pairs &&...pairs) {
+    insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, flags, nullptr, std::forward<Pairs>(pairs)...);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT, and stores changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `flags` - A set of flags to indicate the type of change.
+  /// * `changes` - A reference to a container to store the changes.
+  /// * `fields` - A variadic list of field name-value pairs.
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename ChangeContainer, typename... Pairs>
+  constexpr void insert_or_update(const K &record_id, uint32_t flags, ChangeContainer &changes, Pairs &&...pairs) {
+    insert_or_update_impl(record_id, flags, &changes, std::forward<Pairs>(pairs)...);
   }
 
   /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs.
@@ -343,7 +375,21 @@ public:
   ///
   /// Complexity: O(n), where n is the number of fields in the input
   template <typename Container> constexpr void insert_or_update_from_container(const K &record_id, Container &&fields) {
-    insert_or_update_from_container_impl<CrdtVector<Change<K, V>>>(record_id, std::forward<Container>(fields), nullptr);
+    insert_or_update_from_container_impl<CrdtVector<Change<K, V>>>(record_id, 0, std::forward<Container>(fields), nullptr);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `flags` - A set of flags to indicate the type of change.
+  /// * `fields` - An iterable container of field name-value pairs (will be consumed).
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename Container>
+  constexpr void insert_or_update_from_container(const K &record_id, uint32_t flags, Container &&fields) {
+    insert_or_update_from_container_impl<CrdtVector<Change<K, V>>>(record_id, flags, std::forward<Container>(fields), nullptr);
   }
 
   /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs,
@@ -358,7 +404,24 @@ public:
   /// Complexity: O(n), where n is the number of fields in the input
   template <typename Container, typename ChangeContainer>
   constexpr void insert_or_update_from_container(const K &record_id, Container &&fields, ChangeContainer &changes) {
-    insert_or_update_from_container_impl(record_id, std::forward<Container>(fields), &changes);
+    insert_or_update_from_container_impl(record_id, 0, std::forward<Container>(fields), &changes);
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT using an iterable container of field-value pairs,
+  /// and stores changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `flags` - A set of flags to indicate the type of change.
+  /// * `fields` - An iterable container of field name-value pairs (will be consumed).
+  /// * `changes` - A reference to a container to store the changes.
+  ///
+  /// Complexity: O(n), where n is the number of fields in the input
+  template <typename Container, typename ChangeContainer>
+  constexpr void insert_or_update_from_container(const K &record_id, uint32_t flags, Container &&fields,
+                                                 ChangeContainer &changes) {
+    insert_or_update_from_container_impl(record_id, flags, std::forward<Container>(fields), &changes);
   }
 
   /// Deletes a record by marking it as tombstoned.
@@ -368,7 +431,9 @@ public:
   /// * `record_id` - The unique identifier for the record.
   ///
   /// Complexity: O(1)
-  void delete_record(const K &record_id) { delete_record_impl<CrdtVector<Change<K, V>>>(record_id, nullptr); }
+  void delete_record(const K &record_id, uint32_t flags = 0) {
+    delete_record_impl<CrdtVector<Change<K, V>>>(record_id, flags, nullptr);
+  }
 
   /// Deletes a record by marking it as tombstoned, and stores the change.
   ///
@@ -378,8 +443,8 @@ public:
   /// * `changes` - A reference to a container to store the change.
   ///
   /// Complexity: O(1)
-  template <typename ChangeContainer> void delete_record(const K &record_id, ChangeContainer &changes) {
-    delete_record_impl(record_id, &changes);
+  template <typename ChangeContainer> void delete_record(const K &record_id, ChangeContainer &changes, uint32_t flags = 0) {
+    delete_record_impl(record_id, flags, &changes);
   }
 
   /// Retrieves all changes since a given `last_db_version`.
@@ -463,6 +528,7 @@ public:
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
       std::optional<V> remote_value = std::move(change.value);
+      uint32_t flags = change.flags;
 
       // Always update the logical clock to maintain causal consistency,
       // prevent clock drift, and ensure accurate conflict resolution.
@@ -488,7 +554,7 @@ public:
         should_accept = true;
       } else {
         Change<K, V> local_change(record_id, col_name ? *col_name : "__deleted__", std::nullopt, local_col_info->col_version,
-                                  local_col_info->db_version, local_col_info->node_id);
+                                  local_col_info->db_version, local_col_info->node_id, flags);
         should_accept = merge_rule_(local_change, change);
       }
 
@@ -508,7 +574,7 @@ public:
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
-                                                       remote_db_version, remote_node_id, new_local_db_version));
+                                                       remote_db_version, remote_node_id, new_local_db_version, flags));
           }
         } else if (!is_record_tombstoned(record_id, ignore_parent)) {
           // Handle insertion or update
@@ -532,7 +598,7 @@ public:
                 *col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
                                                        remote_col_version, remote_db_version, remote_node_id,
-                                                       new_local_db_version));
+                                                       new_local_db_version, flags));
           } else {
             record.column_versions.insert_or_assign(
                 std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
@@ -739,64 +805,6 @@ public:
     return *this;
   }
 
-  // Add these new method declarations in the public section of the CRDT class:
-
-  /// Inserts a new record or updates an existing record in the CRDT with a custom node_id.
-  ///
-  /// # Arguments
-  ///
-  /// * `record_id` - The unique identifier for the record.
-  /// * `node_id` - The custom node_id to use for this operation.
-  /// * `fields` - A variadic list of field name-value pairs.
-  ///
-  /// Complexity: O(n), where n is the number of fields in the input
-  template <typename... Pairs>
-  constexpr void insert_or_update_with_node_id(const K &record_id, CrdtNodeId node_id, Pairs &&...pairs) {
-    insert_or_update_impl<CrdtVector<Change<K, V>>>(record_id, nullptr, node_id, std::forward<Pairs>(pairs)...);
-  }
-
-  /// Inserts a new record or updates an existing record in the CRDT with a custom node_id, and stores changes.
-  ///
-  /// # Arguments
-  ///
-  /// * `record_id` - The unique identifier for the record.
-  /// * `node_id` - The custom node_id to use for this operation.
-  /// * `changes` - A reference to a container to store the changes.
-  /// * `fields` - A variadic list of field name-value pairs.
-  ///
-  /// Complexity: O(n), where n is the number of fields in the input
-  template <typename ChangeContainer, typename... Pairs>
-  constexpr void insert_or_update_with_node_id(const K &record_id, CrdtNodeId node_id, ChangeContainer &changes,
-                                               Pairs &&...pairs) {
-    insert_or_update_impl(record_id, &changes, node_id, std::forward<Pairs>(pairs)...);
-  }
-
-  /// Deletes a record by marking it as tombstoned with a custom node_id.
-  ///
-  /// # Arguments
-  ///
-  /// * `record_id` - The unique identifier for the record.
-  /// * `node_id` - The custom node_id to use for this operation.
-  ///
-  /// Complexity: O(1)
-  void delete_record_with_node_id(const K &record_id, CrdtNodeId node_id) {
-    delete_record_impl<CrdtVector<Change<K, V>>>(record_id, nullptr, node_id);
-  }
-
-  /// Deletes a record by marking it as tombstoned with a custom node_id, and stores the change.
-  ///
-  /// # Arguments
-  ///
-  /// * `record_id` - The unique identifier for the record.
-  /// * `node_id` - The custom node_id to use for this operation.
-  /// * `changes` - A reference to a container to store the change.
-  ///
-  /// Complexity: O(1)
-  template <typename ChangeContainer>
-  void delete_record_with_node_id(const K &record_id, CrdtNodeId node_id, ChangeContainer &changes) {
-    delete_record_impl(record_id, &changes, node_id);
-  }
-
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
@@ -992,7 +1000,7 @@ private:
 
   /// Implementation of insert_or_update
   template <typename ChangeContainer, typename... Pairs>
-  constexpr void insert_or_update_impl(const K &record_id, ChangeContainer *changes, Pairs &&...pairs) {
+  constexpr void insert_or_update_impl(const K &record_id, uint32_t flags, ChangeContainer *changes, Pairs &&...pairs) {
     uint64_t db_version = clock_.tick();
 
     // Check if the record is tombstoned
@@ -1022,7 +1030,7 @@ private:
       if (changes) {
         record.fields[col_name] = value;
         add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
-                                                node_id_, db_version));
+                                                node_id_, db_version, flags));
       } else {
         record.fields[std::move(col_name)] = std::move(value);
       }
@@ -1034,7 +1042,8 @@ private:
 
   /// Implementation of insert_or_update_from_container
   template <typename ChangeContainer, typename Container>
-  constexpr void insert_or_update_from_container_impl(const K &record_id, Container &&fields, ChangeContainer *changes) {
+  constexpr void insert_or_update_from_container_impl(const K &record_id, uint32_t flags, Container &&fields,
+                                                      ChangeContainer *changes) {
     uint64_t db_version = clock_.tick();
 
     // Check if the record is tombstoned
@@ -1061,7 +1070,7 @@ private:
       if (changes) {
         record.fields[col_name] = value;
         add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
-                                                node_id_, db_version));
+                                                node_id_, db_version, flags));
       } else {
         record.fields[std::move(col_name)] = std::move(value);
       }
@@ -1069,7 +1078,7 @@ private:
   }
 
   /// Implementation of delete_record
-  template <typename ChangeContainer> void delete_record_impl(const K &record_id, ChangeContainer *changes) {
+  template <typename ChangeContainer> void delete_record_impl(const K &record_id, uint32_t flags, ChangeContainer *changes) {
     if (is_record_tombstoned(record_id)) {
       return;
     }
@@ -1088,73 +1097,7 @@ private:
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     if (changes) {
-      add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version));
-    }
-  }
-
-  /// Implementation of insert_or_update with custom node_id
-  template <typename ChangeContainer, typename... Pairs>
-  constexpr void insert_or_update_impl(const K &record_id, ChangeContainer *changes, CrdtNodeId node_id, Pairs &&...pairs) {
-    uint64_t db_version = clock_.tick();
-
-    // Check if the record is tombstoned
-    if (is_record_tombstoned(record_id)) {
-      return;
-    }
-
-    Record<V> &record = get_or_create_record_unchecked(record_id);
-
-    // Helper function to process each pair
-    auto process_pair = [&](const auto &pair) {
-      const auto &col_name = pair.first;
-      const auto &value = pair.second;
-
-      uint64_t col_version;
-      auto col_it = record.column_versions.find(col_name);
-      if (col_it != record.column_versions.end()) {
-        col_version = ++col_it->second.col_version;
-        col_it->second.db_version = db_version;
-        col_it->second.node_id = node_id;
-        col_it->second.local_db_version = db_version;
-      } else {
-        col_version = 1;
-        record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id, db_version));
-      }
-
-      if (changes) {
-        record.fields[col_name] = value;
-        add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
-                                                node_id, db_version));
-      } else {
-        record.fields[std::move(col_name)] = std::move(value);
-      }
-    };
-
-    // Process all pairs
-    (process_pair(std::forward<Pairs>(pairs)), ...);
-  }
-
-  /// Implementation of delete_record with custom node_id
-  template <typename ChangeContainer> void delete_record_impl(const K &record_id, ChangeContainer *changes, CrdtNodeId node_id) {
-    if (is_record_tombstoned(record_id)) {
-      return;
-    }
-
-    uint64_t db_version = clock_.tick();
-
-    // Mark as tombstone and remove data
-    tombstones_.emplace(record_id);
-    data_.erase(record_id);
-
-    // Insert deletion clock info
-    CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id, db_version));
-
-    // Store deletion info in the data map
-    data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
-
-    if (changes) {
-      add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id, db_version));
+      add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
     }
   }
 };
