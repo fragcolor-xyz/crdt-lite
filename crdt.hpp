@@ -415,7 +415,7 @@ public:
   /// * `record_id` - The unique identifier for the record.
   /// * `flags` - A set of flags to indicate the type of change.
   /// * `fields` - An iterable container of field name-value pairs (will be consumed).
-  /// * `changes` - A reference to a container to store the changes.
+  /// * `changes - A reference to a container to store the changes.
   ///
   /// Complexity: O(n), where n is the number of fields in the input
   template <typename Container, typename ChangeContainer>
@@ -510,7 +510,7 @@ public:
   /// Complexity: O(c), where c is the number of changes to merge
   template <bool ReturnAcceptedChanges = false>
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
-                                                                                          bool ignore_parent = false) {
+                                                                                            bool ignore_parent = false) {
     CrdtVector<Change<K, V>> accepted_changes;
 
     if (changes.empty()) {
@@ -535,6 +535,11 @@ public:
       // This reflects the node's knowledge of global progress, even for
       // non-accepted changes.
       uint64_t new_local_db_version = clock_.update(remote_db_version);
+
+      // Skip all changes for tombstoned records
+      if (is_record_tombstoned(record_id, ignore_parent)) {
+        continue;
+      }
 
       // Retrieve local column version information
       const Record<V> *record_ptr = get_record_ptr(record_id, ignore_parent);
@@ -576,7 +581,7 @@ public:
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
                                                        remote_db_version, remote_node_id, new_local_db_version, flags));
           }
-        } else if (!is_record_tombstoned(record_id, ignore_parent)) {
+        } else {
           // Handle insertion or update
           Record<V> &record = get_or_create_record_unchecked(record_id, ignore_parent);
 
