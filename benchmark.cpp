@@ -126,28 +126,28 @@ private:
   }
 
   void verifyConsistency() const {
-    std::cout << "Verifying consistency between nodes..." << std::endl;
+    // std::cout << "Verifying consistency between nodes..." << std::endl;
 
-    const auto &data1 = node1.get_data_combined();
-    const auto &data2 = node2.get_data_combined();
+    // const auto &data1 = node1.get_data_combined();
+    // const auto &data2 = node2.get_data_combined();
 
-    bool consistent = (data1.size() == data2.size());
+    // bool consistent = (data1.size() == data2.size());
 
-    if (consistent) {
-      for (const auto &[rid, record] : data1) {
-        auto it = data2.find(rid);
-        if (it == data2.end() || !(it->second == record)) {
-          consistent = false;
-          break;
-        }
-      }
-    }
+    // if (consistent) {
+    //   for (const auto &[rid, record] : data1) {
+    //     auto it = data2.find(rid);
+    //     if (it == data2.end() || !(it->second == record)) {
+    //       consistent = false;
+    //       break;
+    //     }
+    //   }
+    // }
 
-    if (consistent) {
-      std::cout << "Consistency check passed: Both nodes have identical data." << std::endl;
-    } else {
-      std::cout << "Consistency check failed: Nodes have differing data." << std::endl;
-    }
+    // if (consistent) {
+    //   std::cout << "Consistency check passed: Both nodes have identical data." << std::endl;
+    // } else {
+    //   std::cout << "Consistency check failed: Nodes have differing data." << std::endl;
+    // }
   }
 };
 

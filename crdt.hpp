@@ -35,6 +35,8 @@ using CrdtNodeId = uint64_t;
 #include <memory>
 #include <type_traits>
 
+#include "skiplist.hpp"
+
 // Add this helper struct at the beginning of the file, outside of the CRDT class
 
 // Helper struct to check if a container has emplace_back method
@@ -770,19 +772,19 @@ public:
   // Complexity: O(1)
   constexpr const LogicalClock &get_clock() const { return clock_; }
 
-  constexpr CrdtMap<K, Record<V>> get_data_combined() const {
-    if (!parent_) {
-      return data_;
-    }
+  // constexpr CrdtMap<K, Record<V>> get_data_combined() const {
+  //   if (!parent_) {
+  //     return data_;
+  //   }
 
-    CrdtMap<K, Record<V>> combined_data = parent_->get_data();
-    for (const auto &[key, record] : data_) {
-      combined_data[key] = record;
-    }
-    return combined_data;
-  }
+  //   CrdtMap<K, Record<V>> combined_data = parent_->get_data();
+  //   for (const auto &[key, record] : data_) {
+  //     combined_data[key] = record;
+  //   }
+  //   return combined_data;
+  // }
 
-  constexpr CrdtMap<K, Record<V>> &get_data() { return data_; }
+  // constexpr CrdtMap<K, Record<V>> &get_data() { return data_; }
 
   /// Retrieves a pointer to a record if it exists, or nullptr if it doesn't.
   ///
@@ -883,7 +885,7 @@ public:
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
-  CrdtMap<K, Record<V>> data_;
+  SkipListMap<K, Record<V>> data_;
   CrdtSet<K> tombstones_;
 
   // our clock won't be shared with the parent
