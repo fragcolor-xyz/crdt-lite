@@ -201,6 +201,26 @@ template <typename V> constexpr bool operator==(const Record<V> &lhs, const Reco
   return true;
 }
 
+template <typename K> class CRDTIndex {
+public:
+  CRDTIndex() = default;
+
+  void insert(uint64_t db_version, const K &key) { index_[db_version].insert(key); }
+
+  void remove(uint64_t db_version, const K &key) { index_[db_version].erase(key); }
+
+  void get_from(uint64_t db_version, CrdtVector<K> &result) const {
+    // get all from bound and above
+    auto it = index_.lower_bound(db_version);
+    for (; it != index_.end(); ++it) {
+      result.insert(result.end(), it->second.begin(), it->second.end());
+    }
+  }
+
+private:
+  CrdtSortedMap<uint64_t, CrdtSet<K>> index_;
+};
+
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
 template <typename K, typename V, MergeRule<K, V> MergeRuleType = DefaultMergeRule<K, V>,
           ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
@@ -458,7 +478,7 @@ public:
   /// A vector of changes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
-  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version, CrdtSet<CrdtNodeId> excluding = {}) const {
+  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version) const {
     CrdtVector<Change<K, V>> changes;
 
     // Get changes from parent
@@ -467,30 +487,59 @@ public:
       changes.insert(changes.end(), parent_changes.begin(), parent_changes.end());
     }
 
-    for (const auto &[record_id, record] : data_) {
-      for (const auto &[col_name, clock_info] : record.column_versions) {
-        if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
-          std::optional<V> value = std::nullopt;
-          std::optional<CrdtString> name = std::nullopt;
-          if (col_name != "__deleted__") {
-            auto field_it = record.fields.find(col_name);
-            if (field_it != record.fields.end()) {
-              value = field_it->second;
+    if (index_) {
+        // Use index to get affected records
+        CrdtVector<K> affected_records;
+        index_->get_from(last_db_version, affected_records);
+
+        // Only process affected records
+        for (const auto& record_id : affected_records) {
+            auto record_it = data_.find(record_id);
+            if (record_it != data_.end()) {
+                const auto& record = record_it->second;
+                for (const auto& [col_name, clock_info] : record.column_versions) {
+                    if (clock_info.local_db_version > last_db_version) {
+                        std::optional<V> value = std::nullopt;
+                        std::optional<CrdtString> name = std::nullopt;
+                        if (col_name != "__deleted__") {
+                            auto field_it = record.fields.find(col_name);
+                            if (field_it != record.fields.end()) {
+                                value = field_it->second;
+                            }
+                            name = col_name;
+                        }
+                        changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value),
+                            clock_info.col_version, clock_info.db_version, clock_info.node_id,
+                            clock_info.local_db_version));
+                    }
+                }
             }
-            name = col_name;
-          }
-          changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value), clock_info.col_version,
-                                            clock_info.db_version, clock_info.node_id, clock_info.local_db_version));
         }
-      }
+    } else {
+        // Fall back to scanning all records
+        for (const auto& [record_id, record] : data_) {
+            for (const auto& [col_name, clock_info] : record.column_versions) {
+                if (clock_info.local_db_version > last_db_version) {
+                    std::optional<V> value = std::nullopt;
+                    std::optional<CrdtString> name = std::nullopt;
+                    if (col_name != "__deleted__") {
+                        auto field_it = record.fields.find(col_name);
+                        if (field_it != record.fields.end()) {
+                            value = field_it->second;
+                        }
+                        name = col_name;
+                    }
+                    changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value),
+                        clock_info.col_version, clock_info.db_version, clock_info.node_id,
+                        clock_info.local_db_version));
+                }
+            }
+        }
     }
 
     if (parent_) {
-      // Since we merge from the parent, we need to also run a compression pass
-      // to remove changes that have been overwritten by top level changes
-      // since we compare at first by col_version, it's fine even if our db_version is lower
-      // since we merge from the parent, we know that the changes are applied in order and col_version should always be increasing
-      compress_changes(changes);
+        // Compress changes when merging from parent
+        compress_changes(changes);
     }
 
     return changes;
@@ -510,7 +559,7 @@ public:
   /// Complexity: O(c), where c is the number of changes to merge
   template <bool ReturnAcceptedChanges = false>
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
-                                                                                            bool ignore_parent = false) {
+                                                                                          bool ignore_parent = false) {
     CrdtVector<Change<K, V>> accepted_changes;
 
     if (changes.empty()) {
@@ -577,6 +626,10 @@ public:
           // Store deletion info in the data map
           data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
+          if (index_) {
+              index_->insert(new_local_db_version, record_id);
+          }
+
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
                                                        remote_db_version, remote_node_id, new_local_db_version, flags));
@@ -607,6 +660,10 @@ public:
           } else {
             record.column_versions.insert_or_assign(
                 std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
+          }
+
+          if (index_) {
+              index_->insert(new_local_db_version, record_id);
           }
         }
       }
@@ -810,6 +867,19 @@ public:
     return *this;
   }
 
+  /// Enables indexing for faster retrieval of changes since a specific version
+  constexpr void enable_indexing() {
+      if (!index_) {
+          index_.emplace();
+          // Populate index with existing data
+          for (const auto& [record_id, record] : data_) {
+              for (const auto& [col_name, version_info] : record.column_versions) {
+                  index_->insert(version_info.local_db_version, record_id);
+              }
+          }
+      }
+  }
+
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
@@ -823,6 +893,8 @@ private:
   MergeRuleType merge_rule_;
   ChangeComparatorType change_comparator_;
   SortFunctionType sort_func_;
+
+  std::optional<CRDTIndex<K>> index_;
 
   // Helper function to print values
   template <typename T> static void print_value(const T &value) {
@@ -886,7 +958,7 @@ private:
 
           // Update the column version info
           record.column_versions.insert_or_assign(std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version,
-                                                                                      remote_node_id, remote_local_db_version));
+                                                                                    remote_node_id, remote_local_db_version));
         }
       }
     }
@@ -1032,6 +1104,10 @@ private:
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
       }
 
+      if (index_) {
+          index_->insert(db_version, record_id);
+      }
+
       if (changes) {
         record.fields[col_name] = value;
         add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
@@ -1100,6 +1176,10 @@ private:
 
     // Store deletion info in the data map
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+
+    if (index_) {
+        index_->insert(db_version, record_id);
+    }
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));

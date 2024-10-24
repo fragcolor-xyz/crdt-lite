@@ -14,7 +14,10 @@ using MyCRDT = CRDT<RecordId, FieldValue>;
 class CrdtBenchmark {
 public:
   CrdtBenchmark(CrdtNodeId node1_id, CrdtNodeId node2_id)
-      : node1(node1_id), node2(node2_id), last_db_version_node1(0), last_db_version_node2(0) {}
+      : node1(node1_id), node2(node2_id), last_db_version_node1(0), last_db_version_node2(0) {
+    // node1.enable_indexing();
+    // node2.enable_indexing();
+  }
 
   void runBenchmark() {
     std::cout << "Starting CRDT Benchmark..." << std::endl;
@@ -81,7 +84,8 @@ private:
       RecordId rid = record_ids[index];
 
       int field_num = field_dist(rng);
-      node1.insert_or_update(rid, std::make_pair("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates)));
+      node1.insert_or_update(rid,
+                             std::make_pair("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates)));
       updates++;
     }
 
@@ -124,8 +128,8 @@ private:
   void verifyConsistency() const {
     std::cout << "Verifying consistency between nodes..." << std::endl;
 
-    const auto &data1 = node1.get_data();
-    const auto &data2 = node2.get_data();
+    const auto &data1 = node1.get_data_combined();
+    const auto &data2 = node2.get_data_combined();
 
     bool consistent = (data1.size() == data2.size());
 
