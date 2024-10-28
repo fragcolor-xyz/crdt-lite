@@ -847,6 +847,10 @@ private:
       if (change.db_version > max_db_version) {
         max_db_version = change.db_version;
       }
+      // also consider the local db_version if it's higher
+      if (change.local_db_version > max_db_version) {
+        max_db_version = change.local_db_version;
+      }
     }
 
     // Set the logical clock to the maximum db_version
