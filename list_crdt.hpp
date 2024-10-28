@@ -11,6 +11,7 @@
 #include <set>
 #include <unordered_map>
 #include <cassert>
+#include <functional> // For std::hash
 
 // -----------------------------------------
 // ElementID Definition
@@ -38,10 +39,14 @@ struct ElementID {
   }
 };
 
-// Hash function for ElementID to use in unordered containers
+// Improved Hash function for ElementID to use in unordered containers
 struct ElementIDHash {
   std::size_t operator()(const ElementID &id) const {
-    return std::hash<CrdtNodeId>()(id.replica_id) ^ std::hash<uint64_t>()(id.sequence);
+    // Using a better hash combination technique to reduce collisions
+    // Example: boost::hash_combine equivalent
+    std::size_t seed = std::hash<CrdtNodeId>()(id.replica_id);
+    seed ^= std::hash<uint64_t>()(id.sequence) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    return seed;
   }
 };
 
@@ -50,8 +55,7 @@ struct ElementIDHash {
 // -----------------------------------------
 
 // Represents an element in the list
-template <typename T>
-struct ListElement {
+template <typename T> struct ListElement {
   ElementID id;                          // Unique identifier for the element
   std::optional<T> value;                // Value stored (None if tombstoned)
   std::optional<ElementID> origin_left;  // Left origin at insertion
@@ -60,12 +64,8 @@ struct ListElement {
   // Checks if the element is tombstoned (deleted)
   bool is_deleted() const { return !value.has_value(); }
 
-  // Comparison operator for std::set ordering (needs to be consistent with ListElementComparator)
-  bool operator<(const ListElement &other) const {
-    // This operator is not used by std::set since a separate comparator is provided
-    // It can be left undefined or implemented based on ElementID
-    return id < other.id;
-  }
+  // Removed unused operator< to prevent confusion
+  // Comparison logic is handled by ListElementComparator
 
   // For printing purposes
   friend std::ostream &operator<<(std::ostream &os, const ListElement &elem) {
@@ -96,12 +96,10 @@ struct ListElement {
 // -----------------------------------------
 
 // Comparator for ListElements to establish a total order
-template <typename T>
-struct ListElementComparator {
+template <typename T> struct ListElementComparator {
   bool operator()(const ListElement<T> &a, const ListElement<T> &b) const {
-    // Compare based on the position in the list using origins
-
-    // Handle root element first
+    // Optimize comparator by reducing conditional branches
+    // First, handle root elements
     bool a_is_root = (a.id.replica_id == 0 && a.id.sequence == 0);
     bool b_is_root = (b.id.replica_id == 0 && b.id.sequence == 0);
 
@@ -113,21 +111,29 @@ struct ListElementComparator {
       return false; // They are the same
 
     // Compare origin_left
-    if (a.origin_left != b.origin_left) {
-      if (!a.origin_left.has_value())
-        return true; // a's origin_left is None, so a is first
-      if (!b.origin_left.has_value())
-        return false; // b's origin_left is None, so b is first
-      return a.origin_left.value() < b.origin_left.value();
+    if (a.origin_left && b.origin_left) {
+      if (a.origin_left.value() != b.origin_left.value()) {
+        return a.origin_left.value() < b.origin_left.value();
+      }
+    } else if (a.origin_left) {
+      // b.origin_left is not set
+      return false;
+    } else if (b.origin_left) {
+      // a.origin_left is not set
+      return true;
     }
 
     // Compare origin_right
-    if (a.origin_right != b.origin_right) {
-      if (!a.origin_right.has_value())
-        return false; // a is before
-      if (!b.origin_right.has_value())
-        return true; // b is before
-      return a.origin_right.value() < b.origin_right.value();
+    if (a.origin_right && b.origin_right) {
+      if (a.origin_right.value() != b.origin_right.value()) {
+        return a.origin_right.value() < b.origin_right.value();
+      }
+    } else if (a.origin_right) {
+      // b.origin_right is not set
+      return false;
+    } else if (b.origin_right) {
+      // a.origin_right is not set
+      return true;
     }
 
     // If both have the same origins, use ElementID to break the tie
@@ -140,11 +146,11 @@ struct ListElementComparator {
 // -----------------------------------------
 
 // Represents the List CRDT using CrdtSortedSet
-template <typename T>
-class ListCRDT {
+template <typename T> class ListCRDT {
 public:
   // Constructor to initialize a new CRDT instance with a unique replica ID
   ListCRDT(const CrdtNodeId &replica_id) : replica_id_(replica_id), counter_(0) {
+    assert(replica_id_ != 0 && "Replica ID 0 is reserved for the root element.");
     // Initialize with a root element to simplify origins
     ElementID root_id{0, 0}; // Use 0 as the root replica_id
     ListElement<T> root_element{root_id, std::nullopt, std::nullopt, std::nullopt};
@@ -188,17 +194,23 @@ public:
   // Deletes the element at the given index by tombstoning it
   void delete_element(uint32_t index) {
     const auto &visible = get_visible_elements();
-    if (index >= visible.size())
+    if (index >= visible.size()) {
+      std::cerr << "Delete operation failed: Index " << index << " is out of bounds.\n";
       return; // Index out of bounds, do nothing
+    }
 
     ElementID target_id = visible[index].id;
     auto it = find_element(target_id);
     if (it != elements_.end()) {
+      if (it->is_deleted()) {
+        // Already deleted
+        return;
+      }
       ListElement<T> updated = *it;
       updated.value.reset(); // Tombstone the element by resetting its value
       elements_.erase(it);
       elements_.insert(updated);
-      element_index_[target_id] = updated;
+      element_index_[updated.id] = updated;
     }
   }
 
@@ -222,9 +234,9 @@ public:
         continue; // Skip the root element
       }
       if (!other.has_element(elem.id)) {
-        new_elements.push_back(elem);
+        new_elements.emplace_back(elem);
         if (elem.is_deleted()) {
-          tombstones.push_back(elem.id);
+          tombstones.emplace_back(elem.id);
         }
       }
     }
@@ -258,6 +270,9 @@ public:
     for (const auto &id : tombstones) {
       auto it = find_element(id);
       if (it != elements_.end()) {
+        if (it->is_deleted()) {
+          continue; // Already deleted
+        }
         ListElement<T> updated = *it;
         updated.value.reset();
         elements_.erase(it);
@@ -270,12 +285,13 @@ public:
   // Retrieves the current list as a vector of values
   CrdtVector<T> get_values() const {
     CrdtVector<T> values;
+    values.reserve(elements_.size()); // Reserve space to avoid reallocations
     for (const auto &elem : elements_) {
       if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
         continue; // Skip the root element
       }
       if (!elem.is_deleted()) {
-        values.push_back(elem.value.value());
+        values.emplace_back(elem.value.value());
       }
     }
     return values;
@@ -305,9 +321,11 @@ public:
   void garbage_collect() {
     // Remove tombstoned elements (excluding root)
     CrdtVector<ListElement<T>> to_remove;
+    to_remove.reserve(elements_.size());
+
     for (const auto &elem : elements_) {
       if (elem.is_deleted() && elem.id.replica_id != 0) {
-        to_remove.push_back(elem);
+        to_remove.emplace_back(elem);
       }
     }
 
@@ -318,16 +336,16 @@ public:
   }
 
 private:
-  CrdtNodeId replica_id_;                                                  // Unique identifier for the replica
-  uint64_t counter_;                                                       // Monotonically increasing counter for generating unique IDs
-  CrdtSortedSet<ListElement<T>, ListElementComparator<T>> elements_;             // Set of all elements (including tombstoned)
-  CrdtMap<ElementID, ListElement<T>, ElementIDHash> element_index_;                          // Maps ElementID to ListElement
+  CrdtNodeId replica_id_;                                            // Unique identifier for the replica
+  uint64_t counter_;                                                 // Monotonically increasing counter for generating unique IDs
+  CrdtSortedSet<ListElement<T>, ListElementComparator<T>> elements_; // Set of all elements (including tombstoned)
+  std::unordered_map<ElementID, ListElement<T>, ElementIDHash> element_index_; // Maps ElementID to ListElement
 
   // Generates a unique ElementID
-  ElementID generate_id() { return ElementID{replica_id_, ++counter_}; }
+  inline ElementID generate_id() { return ElementID{replica_id_, ++counter_}; }
 
   // Checks if an element exists by its ID
-  bool has_element(const ElementID &id) const { return element_index_.find(id) != element_index_.end(); }
+  inline bool has_element(const ElementID &id) const { return element_index_.find(id) != element_index_.end(); }
 
   // Finds an element by its ID using the index
   typename CrdtSortedSet<ListElement<T>, ListElementComparator<T>>::iterator find_element(const ElementID &id) {
@@ -349,12 +367,13 @@ private:
   // Retrieves visible (non-tombstoned) elements in order
   CrdtVector<ListElement<T>> get_visible_elements() const {
     CrdtVector<ListElement<T>> visible;
+    visible.reserve(elements_.size());
     for (const auto &elem : elements_) {
       if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
         continue; // Skip the root element
       }
       if (!elem.is_deleted()) {
-        visible.push_back(elem);
+        visible.emplace_back(elem);
       }
     }
     return visible;
@@ -365,7 +384,7 @@ private:
     auto it = elements_.find(new_elem);
     if (it != elements_.end()) {
       // Element exists, possibly update tombstone
-      if (new_elem.is_deleted()) {
+      if (new_elem.is_deleted() && !it->is_deleted()) {
         ListElement<T> updated = *it;
         updated.value.reset();
         elements_.erase(it);
