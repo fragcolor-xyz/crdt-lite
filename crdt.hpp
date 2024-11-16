@@ -472,13 +472,15 @@ public:
         if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
           std::optional<CrdtString> name = std::nullopt;
-          if (col_name != "__deleted__") {
+
+          if (!record.fields.empty()) { // If record has fields, it's not deleted
             auto field_it = record.fields.find(col_name);
             if (field_it != record.fields.end()) {
               value = field_it->second;
             }
             name = col_name;
           }
+
           changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value), clock_info.col_version,
                                             clock_info.db_version, clock_info.node_id, clock_info.local_db_version));
         }
@@ -510,7 +512,7 @@ public:
   /// Complexity: O(c), where c is the number of changes to merge
   template <bool ReturnAcceptedChanges = false>
   std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
-                                                                                            bool ignore_parent = false) {
+                                                                                          bool ignore_parent = false) {
     CrdtVector<Change<K, V>> accepted_changes;
 
     if (changes.empty()) {
@@ -545,7 +547,7 @@ public:
       const Record<V> *record_ptr = get_record_ptr(record_id, ignore_parent);
       const ColumnVersion *local_col_info = nullptr;
       if (record_ptr != nullptr) {
-        auto col_it = record_ptr->column_versions.find(col_name ? *col_name : "__deleted__");
+        auto col_it = record_ptr->column_versions.find(col_name ? *col_name : "");
         if (col_it != record_ptr->column_versions.end()) {
           local_col_info = &col_it->second;
         }
@@ -558,7 +560,7 @@ public:
         // No local version exists; accept the remote change
         should_accept = true;
       } else {
-        Change<K, V> local_change(record_id, col_name ? *col_name : "__deleted__", std::nullopt, local_col_info->col_version,
+        Change<K, V> local_change(record_id, col_name ? *col_name : "", std::nullopt, local_col_info->col_version,
                                   local_col_info->db_version, local_col_info->node_id, flags);
         should_accept = merge_rule_(local_change, change);
       }
@@ -571,7 +573,7 @@ public:
 
           // Update deletion clock info
           CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-          deletion_clock.emplace("__deleted__",
+          deletion_clock.emplace("",
                                  ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
 
           // Store deletion info in the data map
@@ -871,12 +873,9 @@ private:
         tombstones_.emplace(record_id);
         data_.erase(record_id);
 
-        // Insert deletion clock info
+        // Store empty record with deletion clock info
         CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-        deletion_clock.emplace("__deleted__",
-                               ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
-
-        // Store deletion info in the data map
+        deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
         data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
       } else {
         if (!is_record_tombstoned(record_id)) {
@@ -1098,11 +1097,9 @@ private:
     tombstones_.emplace(record_id);
     data_.erase(record_id);
 
-    // Insert deletion clock info
+    // Create empty record with deletion clock info
     CrdtMap<CrdtString, ColumnVersion> deletion_clock;
-    deletion_clock.emplace("__deleted__", ColumnVersion(1, db_version, node_id_, db_version));
-
-    // Store deletion info in the data map
+    deletion_clock.emplace("", ColumnVersion(1, db_version, node_id_, db_version));
     data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
 
     if (changes) {
