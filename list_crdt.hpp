@@ -64,9 +64,6 @@ template <typename T> struct ListElement {
   // Checks if the element is tombstoned (deleted)
   bool is_deleted() const { return !value.has_value(); }
 
-  // Removed unused operator< to prevent confusion
-  // Comparison logic is handled by ListElementComparator
-
   // For printing purposes
   friend std::ostream &operator<<(std::ostream &os, const ListElement &elem) {
     os << "ID: " << elem.id << ", ";
@@ -98,7 +95,6 @@ template <typename T> struct ListElement {
 // Comparator for ListElements to establish a total order
 template <typename T> struct ListElementComparator {
   bool operator()(const ListElement<T> &a, const ListElement<T> &b) const {
-    // Optimize comparator by reducing conditional branches
     // First, handle root elements
     bool a_is_root = (a.id.replica_id == 0 && a.id.sequence == 0);
     bool b_is_root = (b.id.replica_id == 0 && b.id.sequence == 0);
@@ -145,7 +141,7 @@ template <typename T> struct ListElementComparator {
 // ListCRDT Class Definition
 // -----------------------------------------
 
-// Represents the List CRDT using CrdtSortedSet
+// Represents the List CRDT using optimized data structures
 template <typename T> class ListCRDT {
 public:
   // Constructor to initialize a new CRDT instance with a unique replica ID
@@ -154,8 +150,9 @@ public:
     // Initialize with a root element to simplify origins
     ElementID root_id{0, 0}; // Use 0 as the root replica_id
     ListElement<T> root_element{root_id, std::nullopt, std::nullopt, std::nullopt};
-    elements_.insert(root_element);
-    element_index_.emplace(root_id, root_element); // Store a copy
+    elements_.emplace(root_element);
+    element_index_.emplace(root_id, root_element);               // Store a copy
+    visible_elements_.emplace_back(&element_index_.at(root_id)); // Root is initially visible
   }
 
   // Inserts a value at the given index
@@ -164,26 +161,25 @@ public:
     std::optional<ElementID> left_origin;
     std::optional<ElementID> right_origin;
 
-    // Retrieve visible elements (non-tombstoned)
-    auto visible = get_visible_elements();
-    if (index > visible.size()) {
-      index = visible.size(); // Adjust index if out of bounds
+    // Adjust index if out of bounds
+    if (index > visible_elements_.size() - 1) { // Exclude root
+      index = visible_elements_.size() - 1;
     }
 
     if (index == 0) {
-      // Insert at the beginning, right_origin is the first element
-      if (!visible.empty()) {
-        right_origin = visible[0].id;
+      // Insert after root
+      if (!visible_elements_.empty()) {
+        right_origin = visible_elements_[0]->id;
       }
-    } else if (index == visible.size()) {
-      // Insert at the end, left_origin is the last element
-      if (!visible.empty()) {
-        left_origin = visible.back().id;
+    } else if (index == visible_elements_.size() - 1) {
+      // Insert at the end
+      if (!visible_elements_.empty()) {
+        left_origin = visible_elements_[index - 1]->id;
       }
     } else {
       // Insert in the middle
-      left_origin = visible[index - 1].id;
-      right_origin = visible[index].id;
+      left_origin = visible_elements_[index - 1]->id;
+      right_origin = visible_elements_[index]->id;
     }
 
     // Create a new element with the given value and origins
@@ -193,13 +189,12 @@ public:
 
   // Deletes the element at the given index by tombstoning it
   void delete_element(uint32_t index) {
-    const auto &visible = get_visible_elements();
-    if (index >= visible.size()) {
+    if (index >= visible_elements_.size() - 1) { // Exclude root
       std::cerr << "Delete operation failed: Index " << index << " is out of bounds.\n";
       return; // Index out of bounds, do nothing
     }
 
-    ElementID target_id = visible[index].id;
+    ElementID target_id = visible_elements_[index]->id;
     auto it = find_element(target_id);
     if (it != elements_.end()) {
       if (it->is_deleted()) {
@@ -209,8 +204,15 @@ public:
       ListElement<T> updated = *it;
       updated.value.reset(); // Tombstone the element by resetting its value
       elements_.erase(it);
-      elements_.insert(updated);
+      elements_.emplace(updated);
       element_index_[updated.id] = updated;
+
+      // Remove from visible_elements_
+      auto ve_it = std::find_if(visible_elements_.begin(), visible_elements_.end(),
+                                [&](const ListElement<T> *elem_ptr) { return elem_ptr->id == target_id; });
+      if (ve_it != visible_elements_.end()) {
+        visible_elements_.erase(ve_it);
+      }
     }
   }
 
@@ -222,12 +224,15 @@ public:
       }
       integrate(elem);
     }
+
+    // Rebuild visible_elements_ after merge
+    rebuild_visible_elements();
   }
 
   // Generates a delta containing operations not seen by the other replica
-  std::pair<CrdtVector<ListElement<T>>, CrdtVector<ElementID>> generate_delta(const ListCRDT &other) const {
-    CrdtVector<ListElement<T>> new_elements;
-    CrdtVector<ElementID> tombstones;
+  std::pair<std::vector<ListElement<T>>, std::vector<ElementID>> generate_delta(const ListCRDT &other) const {
+    std::vector<ListElement<T>> new_elements;
+    std::vector<ElementID> tombstones;
 
     for (const auto &elem : elements_) {
       if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
@@ -245,7 +250,7 @@ public:
   }
 
   // Applies a delta to this CRDT
-  void apply_delta(const CrdtVector<ListElement<T>> &new_elements, const CrdtVector<ElementID> &tombstones) {
+  void apply_delta(const std::vector<ListElement<T>> &new_elements, const std::vector<ElementID> &tombstones) {
     // Apply insertions
     for (const auto &elem : new_elements) {
       if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
@@ -260,8 +265,15 @@ public:
           ListElement<T> updated = *it;
           updated.value.reset();
           elements_.erase(it);
-          elements_.insert(updated);
+          elements_.emplace(updated);
           element_index_[updated.id] = updated;
+
+          // Remove from visible_elements_ if present
+          auto ve_it = std::find_if(visible_elements_.begin(), visible_elements_.end(),
+                                    [&](const ListElement<T> *ptr) { return ptr->id == elem.id; });
+          if (ve_it != visible_elements_.end()) {
+            visible_elements_.erase(ve_it);
+          }
         }
       }
     }
@@ -276,22 +288,29 @@ public:
         ListElement<T> updated = *it;
         updated.value.reset();
         elements_.erase(it);
-        elements_.insert(updated);
+        elements_.emplace(updated);
         element_index_[updated.id] = updated;
+
+        // Remove from visible_elements_ if present
+        auto ve_it = std::find_if(visible_elements_.begin(), visible_elements_.end(),
+                                  [&](const ListElement<T> *ptr) { return ptr->id == id; });
+        if (ve_it != visible_elements_.end()) {
+          visible_elements_.erase(ve_it);
+        }
       }
     }
   }
 
   // Retrieves the current list as a vector of values
-  CrdtVector<T> get_values() const {
-    CrdtVector<T> values;
-    values.reserve(elements_.size()); // Reserve space to avoid reallocations
-    for (const auto &elem : elements_) {
-      if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
+  std::vector<T> get_values() const {
+    std::vector<T> values;
+    values.reserve(visible_elements_.size());
+    for (const auto &elem_ptr : visible_elements_) {
+      if (elem_ptr->id.replica_id == 0 && elem_ptr->id.sequence == 0) {
         continue; // Skip the root element
       }
-      if (!elem.is_deleted()) {
-        values.emplace_back(elem.value.value());
+      if (!elem_ptr->is_deleted()) {
+        values.emplace_back(elem_ptr->value.value());
       }
     }
     return values;
@@ -299,12 +318,12 @@ public:
 
   // Prints the current visible list for debugging
   void print_visible() const {
-    for (const auto &elem : elements_) {
-      if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
+    for (const auto &elem_ptr : visible_elements_) {
+      if (elem_ptr->id.replica_id == 0 && elem_ptr->id.sequence == 0) {
         continue; // Skip the root element
       }
-      if (!elem.is_deleted()) {
-        std::cout << elem.value.value() << " ";
+      if (!elem_ptr->is_deleted()) {
+        std::cout << elem_ptr->value.value() << " ";
       }
     }
     std::cout << std::endl;
@@ -319,67 +338,28 @@ public:
 
   // Performs garbage collection by removing tombstones that are safe to delete
   void garbage_collect() {
-    // Remove tombstoned elements (excluding root)
-    CrdtVector<ListElement<T>> to_remove;
-    to_remove.reserve(elements_.size());
+    std::vector<ElementID> to_remove_ids;
 
     for (const auto &elem : elements_) {
       if (elem.is_deleted() && elem.id.replica_id != 0) {
-        to_remove.emplace_back(elem);
+        to_remove_ids.emplace_back(elem.id);
       }
     }
 
-    for (const auto &elem : to_remove) {
-      elements_.erase(elem);
-      element_index_.erase(elem.id);
+    for (const auto &id : to_remove_ids) {
+      auto it = find_element(id);
+      if (it != elements_.end()) {
+        elements_.erase(it);
+        element_index_.erase(id);
+        // No need to remove from visible_elements_ since it's already tombstoned
+      }
     }
   }
 
-private:
-  CrdtNodeId replica_id_;                                            // Unique identifier for the replica
-  uint64_t counter_;                                                 // Monotonically increasing counter for generating unique IDs
-  CrdtSortedSet<ListElement<T>, ListElementComparator<T>> elements_; // Set of all elements (including tombstoned)
-  std::unordered_map<ElementID, ListElement<T>, ElementIDHash> element_index_; // Maps ElementID to ListElement
-
-  // Generates a unique ElementID
+protected:
+  // Make these methods protected so derived classes can access them
   inline ElementID generate_id() { return ElementID{replica_id_, ++counter_}; }
-
-  // Checks if an element exists by its ID
-  inline bool has_element(const ElementID &id) const { return element_index_.find(id) != element_index_.end(); }
-
-  // Finds an element by its ID using the index
-  typename CrdtSortedSet<ListElement<T>, ListElementComparator<T>>::iterator find_element(const ElementID &id) {
-    auto it_map = element_index_.find(id);
-    if (it_map != element_index_.end()) {
-      return elements_.find(it_map->second);
-    }
-    return elements_.end();
-  }
-
-  typename CrdtSortedSet<ListElement<T>, ListElementComparator<T>>::const_iterator find_element(const ElementID &id) const {
-    auto it_map = element_index_.find(id);
-    if (it_map != element_index_.end()) {
-      return elements_.find(it_map->second);
-    }
-    return elements_.end();
-  }
-
-  // Retrieves visible (non-tombstoned) elements in order
-  CrdtVector<ListElement<T>> get_visible_elements() const {
-    CrdtVector<ListElement<T>> visible;
-    visible.reserve(elements_.size());
-    for (const auto &elem : elements_) {
-      if (elem.id.replica_id == 0 && elem.id.sequence == 0) {
-        continue; // Skip the root element
-      }
-      if (!elem.is_deleted()) {
-        visible.emplace_back(elem);
-      }
-    }
-    return visible;
-  }
-
-  // Integrates a single element into the CRDT
+  
   void integrate(const ListElement<T> &new_elem) {
     auto it = elements_.find(new_elem);
     if (it != elements_.end()) {
@@ -388,15 +368,122 @@ private:
         ListElement<T> updated = *it;
         updated.value.reset();
         elements_.erase(it);
-        elements_.insert(updated);
+        elements_.emplace(updated);
         element_index_[updated.id] = updated;
+
+        // Remove from visible_elements_ if present
+        auto ve_it = std::find_if(visible_elements_.begin(), visible_elements_.end(),
+                                  [&](const ListElement<T> *ptr) { return ptr->id == updated.id; });
+        if (ve_it != visible_elements_.end()) {
+          visible_elements_.erase(ve_it);
+        }
       }
       return;
     }
 
     // Insert the new element
-    elements_.insert(new_elem);
+    elements_.emplace(new_elem);
     element_index_.emplace(new_elem.id, new_elem);
+
+    if (!new_elem.is_deleted()) {
+      // Insert into visible_elements_ maintaining order
+      auto pos =
+          std::lower_bound(visible_elements_.begin(), visible_elements_.end(), &new_elem,
+                           [&](const ListElement<T> *a, const ListElement<T> *b) { return ListElementComparator<T>()(*a, *b); });
+      visible_elements_.insert(pos, &element_index_.at(new_elem.id));
+    }
+  }
+
+  // Add new protected methods needed by ListCRDTWithChanges
+  const std::vector<const ListElement<T>*>& get_visible_elements() const {
+    return visible_elements_;
+  }
+
+  const std::set<ListElement<T>, ListElementComparator<T>>& get_all_elements() const {
+    return elements_;
+  }
+
+  const ListElement<T>* get_element(const ElementID& id) const {
+    auto it = element_index_.find(id);
+    if (it != element_index_.end()) {
+      return &it->second;
+    }
+    return nullptr;
+  }
+
+  CrdtNodeId get_replica_id() const {
+    return replica_id_;
+  }
+
+  struct ElementVersionInfo {
+    uint64_t version;
+    uint64_t db_version;
+    CrdtNodeId node_id;
+    uint64_t local_db_version;
+  };
+
+  ElementVersionInfo get_version_info(const ElementID& id) const {
+    auto it = element_index_.find(id);
+    if (it != element_index_.end()) {
+      return ElementVersionInfo{
+        element_versions_.count(id) ? element_versions_.at(id) : 1, // version
+        db_versions_.count(id) ? db_versions_.at(id) : 0,          // db_version
+        it->second.id.replica_id,                                  // node_id
+        local_versions_.count(id) ? local_versions_.at(id) : 0     // local_db_version
+      };
+    }
+    return ElementVersionInfo{1, 0, replica_id_, 0};
+  }
+
+  void update_version_info(const ElementID& id, uint64_t version, uint64_t db_version, uint64_t local_version) {
+    element_versions_[id] = version;
+    db_versions_[id] = db_version;
+    local_versions_[id] = local_version;
+  }
+
+private:
+  CrdtNodeId replica_id_;                                       // Unique identifier for the replica
+  uint64_t counter_;                                            // Monotonically increasing counter for generating unique IDs
+  std::set<ListElement<T>, ListElementComparator<T>> elements_; // Set of all elements (including tombstoned)
+  std::unordered_map<ElementID, ListElement<T>, ElementIDHash> element_index_; // Maps ElementID to ListElement
+  std::vector<const ListElement<T> *> visible_elements_;                       // Ordered list of visible elements
+
+  // Add version tracking
+  std::unordered_map<ElementID, uint64_t, ElementIDHash> element_versions_;
+  std::unordered_map<ElementID, uint64_t, ElementIDHash> db_versions_;
+  std::unordered_map<ElementID, uint64_t, ElementIDHash> local_versions_;
+
+  // Checks if an element exists by its ID
+  inline bool has_element(const ElementID &id) const { return element_index_.find(id) != element_index_.end(); }
+
+  // Finds an element by its ID using the index
+  typename std::set<ListElement<T>, ListElementComparator<T>>::iterator find_element(const ElementID &id) {
+    auto it_map = element_index_.find(id);
+    if (it_map != element_index_.end()) {
+      return elements_.find(it_map->second);
+    }
+    return elements_.end();
+  }
+
+  typename std::set<ListElement<T>, ListElementComparator<T>>::const_iterator find_element(const ElementID &id) const {
+    auto it_map = element_index_.find(id);
+    if (it_map != element_index_.end()) {
+      return elements_.find(it_map->second);
+    }
+    return elements_.end();
+  }
+
+  // Rebuilds the visible_elements_ vector after a merge
+  void rebuild_visible_elements() {
+    visible_elements_.clear();
+    for (const auto &elem : elements_) {
+      if (!elem.is_deleted()) {
+        visible_elements_.emplace_back(&element_index_.at(elem.id));
+      }
+    }
+    // Sort visible_elements_ according to the comparator
+    std::sort(visible_elements_.begin(), visible_elements_.end(),
+              [&](const ListElement<T> *a, const ListElement<T> *b) { return ListElementComparator<T>()(*a, *b); });
   }
 };
 

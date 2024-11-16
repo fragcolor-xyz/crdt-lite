@@ -20,21 +20,25 @@ jobs:
       run: |
         g++ -std=c++20 -g -o crdt tests.cpp && ./crdt
         g++ -std=c++20 -g -o list-crdt list_tests.cpp && ./list-crdt
+        g++ -std=c++20 -g -o list-changes-crdt list_changes_tests.cpp && ./list-changes-crdt
 
     - name: Compile and Run C++ Tests (Release - GCC)
       run: |
         g++ -std=c++20 -O3 -DNDEBUG -o crdt_release tests.cpp && ./crdt_release
         g++ -std=c++20 -O3 -DNDEBUG -o list-crdt_release list_tests.cpp && ./list-crdt_release
+        g++ -std=c++20 -O3 -DNDEBUG -o list-changes-crdt_release list_changes_tests.cpp && ./list-changes-crdt_release
 
     - name: Compile and Run C++ Tests (Debug - Clang)
       run: |
         clang++ -std=c++20 -g -o crdt_clang tests.cpp && ./crdt_clang
         clang++ -std=c++20 -g -o list-crdt_clang list_tests.cpp && ./list-crdt_clang
+        clang++ -std=c++20 -g -o list-changes-crdt_clang list_changes_tests.cpp && ./list-changes-crdt_clang
 
     - name: Compile and Run C++ Tests (Release - Clang)
       run: |
         clang++ -std=c++20 -O3 -DNDEBUG -o crdt_clang_release tests.cpp && ./crdt_clang_release
         clang++ -std=c++20 -O3 -DNDEBUG -o list-crdt_clang_release list_tests.cpp && ./list-crdt_clang_release
+        clang++ -std=c++20 -O3 -DNDEBUG -o list-changes-crdt_clang_release list_changes_tests.cpp && ./list-changes-crdt_clang_release
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
@@ -71,24 +75,28 @@ jobs:
       run: |
         cl.exe /std:c++20 /EHsc /Fe:crdt.exe tests.cpp && .\crdt.exe
         cl.exe /std:c++20 /EHsc /Fe:list-crdt.exe list_tests.cpp && .\list-crdt.exe
+        cl.exe /std:c++20 /EHsc /Fe:list-changes-crdt.exe list_changes_tests.cpp && .\list-changes-crdt.exe
       shell: cmd
 
     - name: Compile and Run C++ Tests with MSVC (Release)
       run: |
         cl.exe /std:c++20 /EHsc /O2 /DNDEBUG /Fe:crdt_release.exe tests.cpp && .\crdt_release.exe
         cl.exe /std:c++20 /EHsc /O2 /DNDEBUG /Fe:list-crdt_release.exe list_tests.cpp && .\list-crdt_release.exe
+        cl.exe /std:c++20 /EHsc /O2 /DNDEBUG /Fe:list-changes-crdt_release.exe list_changes_tests.cpp && .\list-changes-crdt_release.exe
       shell: cmd
 
     - name: Compile and Run C++ Tests with Clang (Debug)
       run: |
         clang++ -std=c++20 -g -o crdt_clang.exe tests.cpp && .\crdt_clang.exe
         clang++ -std=c++20 -g -o list-crdt_clang.exe list_tests.cpp && .\list-crdt_clang.exe
+        clang++ -std=c++20 -g -o list-changes-crdt_clang.exe list_changes_tests.cpp && .\list-changes-crdt_clang.exe
       shell: cmd
 
     - name: Compile and Run C++ Tests with Clang (Release)
       run: |
         clang++ -std=c++20 -O3 -DNDEBUG -o crdt_clang_release.exe tests.cpp && .\crdt_clang_release.exe
         clang++ -std=c++20 -O3 -DNDEBUG -o list-crdt_clang_release.exe list_tests.cpp && .\list-crdt_clang_release.exe
+        clang++ -std=c++20 -O3 -DNDEBUG -o list-changes-crdt_clang_release.exe list_changes_tests.cpp && .\list-changes-crdt_clang_release.exe
       shell: cmd
 
     - name: Setup .NET
