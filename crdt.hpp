@@ -34,6 +34,7 @@ using CrdtNodeId = uint64_t;
 #include <optional>
 #include <memory>
 #include <type_traits>
+#include <functional>
 
 // Add this helper struct at the beginning of the file, outside of the CRDT class
 
@@ -219,12 +220,34 @@ template <typename V> constexpr bool operator==(const Record<V> &lhs, const Reco
   return true;
 }
 
+// Concept for map-like containers
+template<typename Container, typename Key, typename Value>
+concept MapLike = requires(Container c, Key k, Value v) {
+    typename Container::key_type;
+    typename Container::mapped_type;
+    typename Container::value_type;
+    { c[k] } -> std::convertible_to<Value&>;
+    { c.find(k) } -> std::convertible_to<typename Container::iterator>;
+    { c.emplace(k, v) };
+    { c.clear() } -> std::same_as<void>;
+    { c.erase(k) };
+    { c.empty() } -> std::convertible_to<bool>;
+    { c.size() } -> std::convertible_to<size_t>;
+};
+
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V, typename MergeContext = void,
-          MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
-          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
-class CRDT
-    : public std::enable_shared_from_this<CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType>> {
+template <
+    typename K, 
+    typename V, 
+    typename MergeContext = void,
+    MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
+    ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, 
+    typename SortFunctionType = DefaultSort,
+    MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>
+>
+class CRDT : public std::enable_shared_from_this<
+    CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>
+> {
 public:
   // Create a new empty CRDT
   // Complexity: O(1)
@@ -309,7 +332,7 @@ public:
   ///
   /// O(c), where c is the number of changes since the common ancestor
   constexpr CrdtVector<Change<K, V>>
-  diff(const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType> &other) const {
+  diff(const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &other) const {
     // Find the common ancestor (lowest common db_version)
     uint64_t common_version = std::min(clock_.current_time(), other.clock_.current_time());
 
@@ -837,12 +860,12 @@ public:
 private:
   CrdtNodeId node_id_;
   LogicalClock clock_;
-  CrdtMap<K, Record<V>> data_;
+  MapType data_;
   CrdtSet<K> tombstones_;
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
-  std::shared_ptr<CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType>> parent_;
+  std::shared_ptr<CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>> parent_;
   uint64_t base_version_; // Tracks the parent's db_version at the time of child creation
   MergeRuleType merge_rule_;
   ChangeComparatorType change_comparator_;
@@ -978,7 +1001,7 @@ private:
   /// A vector of inverse `Change` objects.
   CrdtVector<Change<K, V>>
   invert_changes(const CrdtVector<Change<K, V>> &changes,
-                 const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType> &reference_crdt) const {
+                 const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &reference_crdt) const {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
