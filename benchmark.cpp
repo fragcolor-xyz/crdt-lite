@@ -81,7 +81,8 @@ private:
       RecordId rid = record_ids[index];
 
       int field_num = field_dist(rng);
-      node1.insert_or_update(rid, std::make_pair("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates)));
+      node1.insert_or_update(rid,
+                             std::make_pair("field" + std::to_string(field_num), "updated_value_" + std::to_string(updates)));
       updates++;
     }
 
@@ -121,11 +122,11 @@ private:
     verifyConsistency();
   }
 
-  void verifyConsistency() const {
+  void verifyConsistency() {
     std::cout << "Verifying consistency between nodes..." << std::endl;
 
-    const auto &data1 = node1.get_data();
-    const auto &data2 = node2.get_data();
+    auto &data1 = node1.get_data();
+    auto &data2 = node2.get_data();
 
     bool consistent = (data1.size() == data2.size());
 

@@ -221,32 +221,28 @@ template <typename V> constexpr bool operator==(const Record<V> &lhs, const Reco
 }
 
 // Concept for map-like containers
-template<typename Container, typename Key, typename Value>
+template <typename Container, typename Key, typename Value>
 concept MapLike = requires(Container c, Key k, Value v) {
-    typename Container::key_type;
-    typename Container::mapped_type;
-    typename Container::value_type;
-    { c[k] } -> std::convertible_to<Value&>;
-    { c.find(k) } -> std::convertible_to<typename Container::iterator>;
-    { c.emplace(k, v) };
-    { c.try_emplace(k, v) } -> std::same_as<std::pair<typename Container::iterator, bool>>;
-    { c.clear() } -> std::same_as<void>;
-    { c.erase(k) };
+  typename Container::key_type;
+  typename Container::mapped_type;
+  typename Container::value_type;
+  typename Container::iterator;
+  { c[k] } -> std::convertible_to<Value &>;
+  { c.find(k) } -> std::convertible_to<typename Container::iterator>;
+  { c.emplace(k, v) };
+  { c.try_emplace(k, v) } -> std::same_as<std::pair<typename Container::iterator, bool>>;
+  { c.insert_or_assign(k, v) } -> std::same_as<std::pair<typename Container::iterator, bool>>;
+  { c.clear() } -> std::same_as<void>;
+  { c.erase(k) };
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <
-    typename K, 
-    typename V, 
-    typename MergeContext = void,
-    MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
-    ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, 
-    typename SortFunctionType = DefaultSort,
-    MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>
->
+template <typename K, typename V, typename MergeContext = void,
+          MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
+          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort,
+          MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>>
 class CRDT : public std::enable_shared_from_this<
-    CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>
-> {
+                 CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>> {
 public:
   // Create a new empty CRDT
   // Complexity: O(1)
@@ -769,7 +765,7 @@ public:
     return combined_data;
   }
 
-  constexpr CrdtMap<K, Record<V>> &get_data() { return data_; }
+  constexpr auto &get_data() { return data_; }
 
   /// Retrieves a pointer to a record if it exists, or nullptr if it doesn't.
   ///
@@ -955,7 +951,7 @@ private:
 
   // Notice that this will not check if the record is tombstoned! Such check should be done by the caller
   constexpr Record<V> &get_or_create_record_unchecked(const K &record_id, bool ignore_parent = false) {
-    auto [it, inserted] = data_.try_emplace(record_id);
+    auto [it, inserted] = data_.try_emplace(record_id, Record<V>());
     if (inserted && parent_ && !ignore_parent) {
       if (auto parent_record = parent_->get_record_ptr(record_id)) {
         it->second = *parent_record;
@@ -998,9 +994,9 @@ private:
   /// # Returns
   ///
   /// A vector of inverse `Change` objects.
-  CrdtVector<Change<K, V>>
-  invert_changes(const CrdtVector<Change<K, V>> &changes,
-                 const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &reference_crdt) const {
+  CrdtVector<Change<K, V>> invert_changes(
+      const CrdtVector<Change<K, V>> &changes,
+      const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &reference_crdt) const {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -1174,9 +1170,10 @@ private:
 /// and m is the complexity of merge_changes
 template <typename K, typename V, typename MergeContext = void,
           MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
-          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort>
-constexpr void sync_nodes(CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType> &source,
-                          CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType> &target,
+          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort,
+          MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>>
+constexpr void sync_nodes(CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &source,
+                          CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &target,
                           uint64_t &last_db_version) {
   auto changes = source.get_changes_since(last_db_version);
 
