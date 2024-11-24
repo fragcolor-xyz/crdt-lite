@@ -35,6 +35,7 @@ using CrdtNodeId = uint64_t;
 #include <memory>
 #include <type_traits>
 #include <functional>
+#include <variant>
 
 // Add this helper struct at the beginning of the file, outside of the CRDT class
 
