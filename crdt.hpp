@@ -229,10 +229,9 @@ concept MapLike = requires(Container c, Key k, Value v) {
     { c[k] } -> std::convertible_to<Value&>;
     { c.find(k) } -> std::convertible_to<typename Container::iterator>;
     { c.emplace(k, v) };
+    { c.try_emplace(k, v) } -> std::same_as<std::pair<typename Container::iterator, bool>>;
     { c.clear() } -> std::same_as<void>;
     { c.erase(k) };
-    { c.empty() } -> std::convertible_to<bool>;
-    { c.size() } -> std::convertible_to<size_t>;
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
