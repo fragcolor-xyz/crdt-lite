@@ -472,7 +472,7 @@ public:
   /// * `record_id` - The unique identifier for the record.
   ///
   /// Complexity: O(1)
-  void delete_record(const K &record_id, uint32_t flags = 0) {
+  virtual void delete_record(const K &record_id, uint32_t flags = 0) {
     delete_record_impl<CrdtVector<Change<K, V>>>(record_id, flags, nullptr);
   }
 
@@ -499,7 +499,7 @@ public:
   /// A vector of changes.
   ///
   /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
-  CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version, CrdtSet<CrdtNodeId> excluding = {}) const {
+  virtual CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version, CrdtSet<CrdtNodeId> excluding = {}) const {
     CrdtVector<Change<K, V>> changes;
 
     // Get changes from parent
@@ -853,7 +853,7 @@ public:
     return *this;
   }
 
-private:
+protected:
   CrdtNodeId node_id_;
   LogicalClock clock_;
   MapType data_;
