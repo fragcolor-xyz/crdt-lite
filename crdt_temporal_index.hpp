@@ -108,7 +108,7 @@ public:
                         !excluding.contains(clock_info.node_id)) {
                         
                         std::optional<V> value = std::nullopt;
-                        std::optional<CrdtString> name = std::nullopt;
+                        std::optional<CrdtKey> name = std::nullopt;
                         
                         if (!record_ptr->fields.empty()) {
                             auto field_it = record_ptr->fields.find(col_name);

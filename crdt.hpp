@@ -17,7 +17,7 @@
 
 template <typename T> using CrdtVector = std::vector<T>;
 
-using CrdtString = std::string;
+using CrdtKey = std::string;
 
 template <typename K, typename V, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
 using CrdtMap = std::unordered_map<K, V, Hash, KeyEqual>;
@@ -60,7 +60,7 @@ template <typename Container, typename Element> void add_to_container(Container 
 /// Represents a single change in the CRDT.
 template <typename K, typename V> struct Change {
   K record_id;
-  std::optional<CrdtString> col_name; // std::nullopt represents tombstone of the record
+  std::optional<CrdtKey> col_name; // std::nullopt represents tombstone of the record
   std::optional<V> value;             // note std::nullopt represents deletion of the column, not the record
   uint64_t col_version;
   uint64_t db_version;
@@ -76,7 +76,7 @@ template <typename K, typename V> struct Change {
 
   Change() = default;
 
-  Change(K rid, std::optional<CrdtString> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid,
+  Change(K rid, std::optional<CrdtKey> cname, std::optional<V> val, uint64_t cver, uint64_t dver, CrdtNodeId nid,
          uint64_t ldb_ver = 0, uint32_t f = 0)
       : record_id(std::move(rid)), col_name(std::move(cname)), value(std::move(val)), col_version(cver), db_version(dver),
         node_id(nid), local_db_version(ldb_ver), flags(f) {}
@@ -198,12 +198,12 @@ struct ColumnVersion {
 
 /// Represents a record in the CRDT.
 template <typename V> struct Record {
-  CrdtMap<CrdtString, V> fields;
-  CrdtMap<CrdtString, ColumnVersion> column_versions;
+  CrdtMap<CrdtKey, V> fields;
+  CrdtMap<CrdtKey, ColumnVersion> column_versions;
 
   Record() = default;
 
-  constexpr Record(CrdtMap<CrdtString, V> &&f, CrdtMap<CrdtString, ColumnVersion> &&cv)
+  constexpr Record(CrdtMap<CrdtKey, V> &&f, CrdtMap<CrdtKey, ColumnVersion> &&cv)
       : fields(std::move(f)), column_versions(std::move(cv)) {}
 };
 
@@ -514,7 +514,7 @@ public:
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
-          std::optional<CrdtString> name = std::nullopt;
+          std::optional<CrdtKey> name = std::nullopt;
 
           if (!record.fields.empty()) { // If record has fields, it's not deleted
             auto field_it = record.fields.find(col_name);
@@ -568,7 +568,7 @@ public:
 
     for (auto &&change : changes) {
       const K &record_id = change.record_id;
-      std::optional<CrdtString> col_name = std::move(change.col_name);
+      std::optional<CrdtKey> col_name = std::move(change.col_name);
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
@@ -614,11 +614,11 @@ public:
           data_.erase(record_id);
 
           // Update deletion clock info
-          CrdtMap<CrdtString, ColumnVersion> deletion_clock;
+          CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
           deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
 
           // Store deletion info in the data map
-          data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+          data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
@@ -952,7 +952,7 @@ protected:
     // Apply each change to reconstruct the CRDT state
     for (auto &&change : changes) {
       const K &record_id = change.record_id;
-      std::optional<CrdtString> col_name = std::move(change.col_name);
+      std::optional<CrdtKey> col_name = std::move(change.col_name);
       uint64_t remote_col_version = change.col_version;
       uint64_t remote_db_version = change.db_version;
       CrdtNodeId remote_node_id = change.node_id;
@@ -965,9 +965,9 @@ protected:
         data_.erase(record_id);
 
         // Store empty record with deletion clock info
-        CrdtMap<CrdtString, ColumnVersion> deletion_clock;
+        CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
         deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
-        data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+        data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
       } else {
         if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
@@ -1048,7 +1048,7 @@ protected:
 
     for (const auto &change : changes) {
       const K &record_id = change.record_id;
-      const std::optional<CrdtString> &col_name = change.col_name;
+      const std::optional<CrdtKey> &col_name = change.col_name;
 
       if (!col_name.has_value()) {
         // The change was a record deletion (tombstone)
@@ -1056,7 +1056,7 @@ protected:
         auto record_ptr = reference_crdt.get_record(record_id);
         if (record_ptr) {
           // Restore all fields from the record, sorted by db_version
-          std::vector<std::pair<CrdtString, V>> sorted_fields(record_ptr->fields.begin(), record_ptr->fields.end());
+          std::vector<std::pair<CrdtKey, V>> sorted_fields(record_ptr->fields.begin(), record_ptr->fields.end());
           std::sort(sorted_fields.begin(), sorted_fields.end(), [&](const auto &a, const auto &b) {
             return record_ptr->column_versions.at(a.first).db_version < record_ptr->column_versions.at(b.first).db_version;
           });
@@ -1069,7 +1069,7 @@ protected:
         }
       } else {
         // The change was an insertion or update of a column
-        CrdtString col = *col_name;
+        CrdtKey col = *col_name;
         auto record_ptr = reference_crdt.get_record(record_id);
         if (record_ptr) {
           auto field_it = record_ptr->fields.find(col);
@@ -1189,9 +1189,9 @@ protected:
     data_.erase(record_id);
 
     // Create empty record with deletion clock info
-    CrdtMap<CrdtString, ColumnVersion> deletion_clock;
+    CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
     deletion_clock.emplace("", ColumnVersion(1, db_version, node_id_, db_version));
-    data_.emplace(record_id, Record<V>(CrdtMap<CrdtString, V>(), std::move(deletion_clock)));
+    data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));

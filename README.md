@@ -129,7 +129,7 @@ Each operation (insert, update, delete) generates a `Change` object for incremen
 template <typename K, typename V>
 struct Change {
   K record_id;
-  std::optional<CrdtString> col_name;
+  std::optional<CrdtKey> col_name;
   std::optional<V> value;
   uint64_t col_version;
   uint64_t db_version;
