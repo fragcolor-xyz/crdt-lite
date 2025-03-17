@@ -1433,6 +1433,118 @@ int main() {
     std::cout << "Test 'Multiple Insertions with No Overwrites' passed." << std::endl;
   }
 
+  // Test Case: Query Records with Predicate
+  {
+    CRDT<CrdtString, CrdtString> node(1);
+
+    // Insert multiple records with different tags
+    CrdtString record_id1 = generate_uuid();
+    CrdtString record_id2 = generate_uuid();
+    CrdtString record_id3 = generate_uuid();
+    
+    CrdtVector<Change<CrdtString, CrdtString>> changes1, changes2, changes3;
+    node.insert_or_update(record_id1, changes1, 
+      std::make_pair("id", record_id1),
+      std::make_pair("tag", "important"),
+      std::make_pair("priority", "high"));
+    
+    node.insert_or_update(record_id2, changes2,
+      std::make_pair("id", record_id2),
+      std::make_pair("tag", "important"),
+      std::make_pair("priority", "low"));
+    
+    node.insert_or_update(record_id3, changes3,
+      std::make_pair("id", record_id3),
+      std::make_pair("tag", "unimportant"),
+      std::make_pair("priority", "medium"));
+
+    // Test query_records with a predicate that matches records with "important" tag
+    auto important_records = node.query_records(
+      [](const CrdtString& key, const Record<CrdtString>& record) {
+        return record.fields.at("tag") == "important";
+      });
+
+    assert_true(important_records.size() == 2, 
+      "Query Records: Should find 2 records with 'important' tag");
+    assert_true(important_records[0].first == record_id1 || important_records[0].first == record_id2,
+      "Query Records: First record should be one of the important records");
+    assert_true(important_records[1].first == record_id1 || important_records[1].first == record_id2,
+      "Query Records: Second record should be one of the important records");
+    assert_true(important_records[0].first != important_records[1].first,
+      "Query Records: Should not return the same record twice");
+
+    std::cout << "Test 'Query Records with Predicate' passed." << std::endl;
+  }
+
+  // Test Case: Query with Projection
+  {
+    CRDT<CrdtString, CrdtString> node(1);
+
+    // Insert records with different priorities
+    CrdtString record_id1 = generate_uuid();
+    CrdtString record_id2 = generate_uuid();
+    CrdtString record_id3 = generate_uuid();
+    
+    CrdtVector<Change<CrdtString, CrdtString>> changes1, changes2, changes3;
+    node.insert_or_update(record_id1, changes1,
+      std::make_pair("id", record_id1),
+      std::make_pair("priority", "high"),
+      std::make_pair("status", "active"));
+    
+    node.insert_or_update(record_id2, changes2,
+      std::make_pair("id", record_id2),
+      std::make_pair("priority", "high"),
+      std::make_pair("status", "inactive"));
+    
+    node.insert_or_update(record_id3, changes3,
+      std::make_pair("id", record_id3),
+      std::make_pair("priority", "low"),
+      std::make_pair("status", "active"));
+
+    // Test query_with_projection to get active high-priority records
+    auto active_high_priority = node.query_with_projection(
+      [](const CrdtString& key, const Record<CrdtString>& record) {
+        return record.fields.at("priority") == "high" && 
+               record.fields.at("status") == "active";
+      },
+      [](const CrdtString& key, const Record<CrdtString>& record) {
+        return std::make_pair(key, record.fields.at("status"));
+      });
+
+    assert_true(active_high_priority.size() == 1,
+      "Query with Projection: Should find 1 active high-priority record");
+    assert_true(active_high_priority[0].first == record_id1,
+      "Query with Projection: Should return record_id1");
+    assert_true(active_high_priority[0].second == "active",
+      "Query with Projection: Should return 'active' status");
+
+    std::cout << "Test 'Query with Projection' passed." << std::endl;
+  }
+
+  // Test Case: Query with Tombstoned Records
+  {
+    CRDT<CrdtString, CrdtString> node(1);
+
+    // Insert and delete a record
+    CrdtString record_id = generate_uuid();
+    CrdtVector<Change<CrdtString, CrdtString>> changes_insert, changes_delete;
+    node.insert_or_update(record_id, changes_insert,
+      std::make_pair("id", record_id),
+      std::make_pair("tag", "test"));
+    node.delete_record(record_id, changes_delete);
+
+    // Query all records (should not include tombstoned record)
+    auto all_records = node.query_records(
+      [](const CrdtString& key, const Record<CrdtString>& record) {
+        return true;
+      });
+
+    assert_true(all_records.empty(),
+      "Query with Tombstoned Records: Should not return tombstoned records");
+
+    std::cout << "Test 'Query with Tombstoned Records' passed." << std::endl;
+  }
+
   std::cout << "All tests passed successfully!" << std::endl;
   return 0;
 }

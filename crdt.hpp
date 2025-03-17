@@ -805,6 +805,52 @@ public:
     return is_record_tombstoned(record_id, ignore_parent);
   }
 
+  /// Query records matching a predicate.
+  ///
+  /// # Arguments
+  ///
+  /// * `pred` - A predicate function that takes a key and record and returns a boolean.
+  ///
+  /// # Returns
+  ///
+  /// A vector of key-record pairs for records that match the predicate.
+  ///
+  /// Complexity: O(n), where n is the number of records
+  template <typename Predicate>
+  CrdtVector<std::pair<K, Record<V>>> query_records(Predicate&& pred) const {
+    CrdtVector<std::pair<K, Record<V>>> results;
+    for (const auto& [key, record] : data_) {
+      if (!is_tombstoned(key) && pred(key, record)) {
+        results.emplace_back(key, record);
+      }
+    }
+    return results;
+  }
+  
+  /// Projection to extract specific columns only.
+  ///
+  /// # Arguments
+  ///
+  /// * `pred` - A predicate function that takes a key and record and returns a boolean.
+  /// * `proj` - A projection function that takes a key and record and returns the desired result type.
+  ///
+  /// # Returns
+  ///
+  /// A vector of projected results for records that match the predicate.
+  ///
+  /// Complexity: O(n), where n is the number of records
+  template <typename Predicate, typename Projection>
+  auto query_with_projection(Predicate&& pred, Projection&& proj) const {
+    using ResultType = std::invoke_result_t<Projection, K, Record<V>>;
+    CrdtVector<ResultType> results;
+    for (const auto& [key, record] : data_) {
+      if (!is_tombstoned(key) && pred(key, record)) {
+        results.push_back(proj(key, record));
+      }
+    }
+    return results;
+  }
+
   // Add this constructor to the CRDT class
   CRDT(const CRDT &other)
       : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), tombstones_(other.tombstones_),
