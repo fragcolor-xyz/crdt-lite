@@ -2,6 +2,8 @@
 #ifndef CRDT_HPP
 #define CRDT_HPP
 
+#include <cstdint>
+
 // Define this if you want to override the default collection types
 // Basically define these before including this header and ensure this define is set before this header is included
 // in any other files that include this file
@@ -816,17 +818,16 @@ public:
   /// A vector of key-record pairs for records that match the predicate.
   ///
   /// Complexity: O(n), where n is the number of records
-  template <typename Predicate>
-  CrdtVector<std::pair<K, Record<V>>> query_records(Predicate&& pred) const {
+  template <typename Predicate> CrdtVector<std::pair<K, Record<V>>> query_records(Predicate &&pred) const {
     CrdtVector<std::pair<K, Record<V>>> results;
-    for (const auto& [key, record] : data_) {
+    for (const auto &[key, record] : data_) {
       if (!is_tombstoned(key) && pred(key, record)) {
         results.emplace_back(key, record);
       }
     }
     return results;
   }
-  
+
   /// Projection to extract specific columns only.
   ///
   /// # Arguments
@@ -839,11 +840,10 @@ public:
   /// A vector of projected results for records that match the predicate.
   ///
   /// Complexity: O(n), where n is the number of records
-  template <typename Predicate, typename Projection>
-  auto query_with_projection(Predicate&& pred, Projection&& proj) const {
+  template <typename Predicate, typename Projection> auto query_with_projection(Predicate &&pred, Projection &&proj) const {
     using ResultType = std::invoke_result_t<Projection, K, Record<V>>;
     CrdtVector<ResultType> results;
-    for (const auto& [key, record] : data_) {
+    for (const auto &[key, record] : data_) {
       if (!is_tombstoned(key) && pred(key, record)) {
         results.push_back(proj(key, record));
       }
