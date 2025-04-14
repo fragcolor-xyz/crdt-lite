@@ -200,11 +200,25 @@ struct ColumnVersion {
 template <typename V> struct Record {
   CrdtMap<CrdtKey, V> fields;
   CrdtMap<CrdtKey, ColumnVersion> column_versions;
+  
+  // Track version boundaries for efficient filtering
+  uint64_t lowest_local_db_version = UINT64_MAX;
+  uint64_t highest_local_db_version = 0;
 
   Record() = default;
 
-  constexpr Record(CrdtMap<CrdtKey, V> &&f, CrdtMap<CrdtKey, ColumnVersion> &&cv)
-      : fields(std::move(f)), column_versions(std::move(cv)) {}
+  Record(CrdtMap<CrdtKey, V> &&f, CrdtMap<CrdtKey, ColumnVersion> &&cv)
+      : fields(std::move(f)), column_versions(std::move(cv)) {
+    // Initialize version boundaries
+    for (const auto& [_, ver] : column_versions) {
+      if (ver.local_db_version < lowest_local_db_version) {
+        lowest_local_db_version = ver.local_db_version;
+      }
+      if (ver.local_db_version > highest_local_db_version) {
+        highest_local_db_version = ver.local_db_version;
+      }
+    }
+  }
 };
 
 // Free function to compare two Record<V> instances
@@ -500,7 +514,7 @@ public:
   ///
   /// A vector of changes.
   ///
-  /// Complexity: O(n * m), where n is the number of records and m is the average number of columns per record
+  /// Complexity: O(n), where n is the number of records (optimized with version bounds)
   virtual CrdtVector<Change<K, V>> get_changes_since(uint64_t last_db_version, CrdtSet<CrdtNodeId> excluding = {}) const {
     CrdtVector<Change<K, V>> changes;
 
@@ -511,6 +525,11 @@ public:
     }
 
     for (const auto &[record_id, record] : data_) {
+      // Skip records that haven't changed since last_db_version
+      if (record.highest_local_db_version <= last_db_version) {
+        continue;
+      }
+      
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
@@ -617,8 +636,13 @@ public:
           CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
           deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
 
+          // Create record with version boundaries
+          Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
+          record.lowest_local_db_version = new_local_db_version;
+          record.highest_local_db_version = new_local_db_version;
+          
           // Store deletion info in the data map
-          data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
+          data_.emplace(record_id, std::move(record));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
@@ -640,16 +664,33 @@ public:
             record.fields.erase(*col_name);
           }
 
-          // Update the column version info
+          // Update the column version info and record version boundaries
           if constexpr (ReturnAcceptedChanges) {
             record.column_versions.insert_or_assign(
                 *col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
+            
+            // Update version boundaries
+            if (new_local_db_version < record.lowest_local_db_version) {
+              record.lowest_local_db_version = new_local_db_version;
+            }
+            if (new_local_db_version > record.highest_local_db_version) {
+              record.highest_local_db_version = new_local_db_version;
+            }
+            
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
                                                        remote_col_version, remote_db_version, remote_node_id,
                                                        new_local_db_version, flags));
           } else {
             record.column_versions.insert_or_assign(
                 std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
+            
+            // Update version boundaries
+            if (new_local_db_version < record.lowest_local_db_version) {
+              record.lowest_local_db_version = new_local_db_version;
+            }
+            if (new_local_db_version > record.highest_local_db_version) {
+              record.highest_local_db_version = new_local_db_version;
+            }
           }
         }
       }
@@ -967,7 +1008,13 @@ protected:
         // Store empty record with deletion clock info
         CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
         deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
-        data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
+        
+        // Create record with version boundaries
+        Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
+        record.lowest_local_db_version = remote_local_db_version;
+        record.highest_local_db_version = remote_local_db_version;
+        
+        data_.emplace(record_id, std::move(record));
       } else {
         if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
@@ -981,6 +1028,14 @@ protected:
           // Update the column version info
           record.column_versions.insert_or_assign(std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version,
                                                                                       remote_node_id, remote_local_db_version));
+                                                                                      
+          // Update version boundaries
+          if (remote_local_db_version < record.lowest_local_db_version) {
+            record.lowest_local_db_version = remote_local_db_version;
+          }
+          if (remote_local_db_version > record.highest_local_db_version) {
+            record.highest_local_db_version = remote_local_db_version;
+          }
         }
       }
     }
@@ -1126,6 +1181,14 @@ protected:
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
       }
 
+      // Update record version boundaries
+      if (db_version < record.lowest_local_db_version) {
+        record.lowest_local_db_version = db_version;
+      }
+      if (db_version > record.highest_local_db_version) {
+        record.highest_local_db_version = db_version;
+      }
+
       if (changes) {
         record.fields[col_name] = value;
         add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
@@ -1166,6 +1229,14 @@ protected:
         record.column_versions.emplace(col_name, ColumnVersion(col_version, db_version, node_id_, db_version));
       }
 
+      // Update record version boundaries
+      if (db_version < record.lowest_local_db_version) {
+        record.lowest_local_db_version = db_version;
+      }
+      if (db_version > record.highest_local_db_version) {
+        record.highest_local_db_version = db_version;
+      }
+
       if (changes) {
         record.fields[col_name] = value;
         add_to_container(*changes, Change<K, V>(record_id, std::move(col_name), std::move(value), col_version, db_version,
@@ -1191,7 +1262,13 @@ protected:
     // Create empty record with deletion clock info
     CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
     deletion_clock.emplace("", ColumnVersion(1, db_version, node_id_, db_version));
-    data_.emplace(record_id, Record<V>(CrdtMap<CrdtKey, V>(), std::move(deletion_clock)));
+    
+    // Create the record with version boundaries initialized
+    Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
+    record.lowest_local_db_version = db_version;
+    record.highest_local_db_version = db_version;
+    
+    data_.emplace(record_id, std::move(record));
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
