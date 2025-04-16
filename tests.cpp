@@ -112,11 +112,9 @@ int main() {
     // Both nodes should reflect the deletion
     assert_true(node1.get_data().at(record_id).fields.empty(), "Delete and Merge: Node1 should have empty fields");
     assert_true(node2.get_data().at(record_id).fields.empty(), "Delete and Merge: Node2 should have empty fields");
-    assert_true(node1.get_data().at(record_id).column_versions.find("") !=
-                    node1.get_data().at(record_id).column_versions.end(),
+    assert_true(node1.get_data().at(record_id).column_versions.find("") != node1.get_data().at(record_id).column_versions.end(),
                 "Delete and Merge: Node1 should have deletion column version");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") !=
-                    node2.get_data().at(record_id).column_versions.end(),
+    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
                 "Delete and Merge: Node2 should have deletion column version");
     std::cout << "Test 'Delete and Merge' passed." << std::endl;
   }
@@ -146,8 +144,7 @@ int main() {
 
     // Node2 should respect the tombstone
     assert_true(node2.get_data().at(record_id).fields.empty(), "Tombstone Handling: Node2 should have empty fields");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") !=
-                    node2.get_data().at(record_id).column_versions.end(),
+    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
                 "Tombstone Handling: Node2 should have deletion column version");
     std::cout << "Test 'Tombstone Handling' passed." << std::endl;
   }
@@ -299,11 +296,9 @@ int main() {
     // The deletion should prevail
     assert_true(node1.get_data().at(record_id).fields.empty(), "Inserting After Deletion: Node1 should have empty fields");
     assert_true(node2.get_data().at(record_id).fields.empty(), "Inserting After Deletion: Node2 should have empty fields");
-    assert_true(node1.get_data().at(record_id).column_versions.find("") !=
-                    node1.get_data().at(record_id).column_versions.end(),
+    assert_true(node1.get_data().at(record_id).column_versions.find("") != node1.get_data().at(record_id).column_versions.end(),
                 "Inserting After Deletion: Node1 should have deletion column version");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") !=
-                    node2.get_data().at(record_id).column_versions.end(),
+    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
                 "Inserting After Deletion: Node2 should have deletion column version");
     std::cout << "Test 'Inserting After Deletion' passed." << std::endl;
   }
@@ -1211,6 +1206,30 @@ int main() {
     std::cout << "Test 'Mixed Inserts, Updates, and Deletions Across Multiple Records' passed." << std::endl;
   }
 
+  // Test Case: Column deletions and multiple column updates
+  {
+    CrdtVector<Change<CrdtKey, CrdtKey>> changes;
+    // Record1
+    changes.emplace_back(Change<CrdtKey, CrdtKey>("record1", "col1", "r1c1_v1", 1, 1, 1));
+    changes.emplace_back(Change<CrdtKey, CrdtKey>("record1", "col2", "r1c2_v1", 1, 2, 1));
+    changes.emplace_back(Change<CrdtKey, CrdtKey>("record1", std::nullopt, std::nullopt, 1, 3, 1));
+    // changes.emplace_back(Change<CrdtKey, CrdtKey>("record1", std::nullopt, std::nullopt, 1, 4, 1));
+
+    CRDT<CrdtKey, CrdtKey>::compress_changes(changes);
+
+    assert_true(changes.size() == 1, "Compress Changes: Column deletions and multiple column updates correctly.");
+    for (const auto &change : changes) {
+      // std::cout << "change: " << change.record_id << " " << (change.col_name ? *change.col_name : "null") << " "
+      //           << (change.value ? *change.value : "null") << std::endl;
+      if (change.record_id == "record1" && change.col_name == std::nullopt) {
+        assert_true(change.value == std::nullopt, "Compress Changes: record1 col1 latest value mismatch.");
+      } else {
+        assert_true(false, "Compress Changes: Unexpected change present.");
+      }
+    }
+    std::cout << "Test 'Column deletions and multiple column updates' passed." << std::endl;
+  }
+
   // Test Case: Diffing between CRDTs using revert
   {
     // Step 1: Initialize Parent CRDT
@@ -1441,37 +1460,28 @@ int main() {
     CrdtKey record_id1 = generate_uuid();
     CrdtKey record_id2 = generate_uuid();
     CrdtKey record_id3 = generate_uuid();
-    
+
     CrdtVector<Change<CrdtKey, CrdtKey>> changes1, changes2, changes3;
-    node.insert_or_update(record_id1, changes1, 
-      std::make_pair("id", record_id1),
-      std::make_pair("tag", "important"),
-      std::make_pair("priority", "high"));
-    
-    node.insert_or_update(record_id2, changes2,
-      std::make_pair("id", record_id2),
-      std::make_pair("tag", "important"),
-      std::make_pair("priority", "low"));
-    
-    node.insert_or_update(record_id3, changes3,
-      std::make_pair("id", record_id3),
-      std::make_pair("tag", "unimportant"),
-      std::make_pair("priority", "medium"));
+    node.insert_or_update(record_id1, changes1, std::make_pair("id", record_id1), std::make_pair("tag", "important"),
+                          std::make_pair("priority", "high"));
+
+    node.insert_or_update(record_id2, changes2, std::make_pair("id", record_id2), std::make_pair("tag", "important"),
+                          std::make_pair("priority", "low"));
+
+    node.insert_or_update(record_id3, changes3, std::make_pair("id", record_id3), std::make_pair("tag", "unimportant"),
+                          std::make_pair("priority", "medium"));
 
     // Test query_records with a predicate that matches records with "important" tag
     auto important_records = node.query_records(
-      [](const CrdtKey& key, const Record<CrdtKey>& record) {
-        return record.fields.at("tag") == "important";
-      });
+        [](const CrdtKey &key, const Record<CrdtKey> &record) { return record.fields.at("tag") == "important"; });
 
-    assert_true(important_records.size() == 2, 
-      "Query Records: Should find 2 records with 'important' tag");
+    assert_true(important_records.size() == 2, "Query Records: Should find 2 records with 'important' tag");
     assert_true(important_records[0].first == record_id1 || important_records[0].first == record_id2,
-      "Query Records: First record should be one of the important records");
+                "Query Records: First record should be one of the important records");
     assert_true(important_records[1].first == record_id1 || important_records[1].first == record_id2,
-      "Query Records: Second record should be one of the important records");
+                "Query Records: Second record should be one of the important records");
     assert_true(important_records[0].first != important_records[1].first,
-      "Query Records: Should not return the same record twice");
+                "Query Records: Should not return the same record twice");
 
     std::cout << "Test 'Query Records with Predicate' passed." << std::endl;
   }
@@ -1484,39 +1494,27 @@ int main() {
     CrdtKey record_id1 = generate_uuid();
     CrdtKey record_id2 = generate_uuid();
     CrdtKey record_id3 = generate_uuid();
-    
+
     CrdtVector<Change<CrdtKey, CrdtKey>> changes1, changes2, changes3;
-    node.insert_or_update(record_id1, changes1,
-      std::make_pair("id", record_id1),
-      std::make_pair("priority", "high"),
-      std::make_pair("status", "active"));
-    
-    node.insert_or_update(record_id2, changes2,
-      std::make_pair("id", record_id2),
-      std::make_pair("priority", "high"),
-      std::make_pair("status", "inactive"));
-    
-    node.insert_or_update(record_id3, changes3,
-      std::make_pair("id", record_id3),
-      std::make_pair("priority", "low"),
-      std::make_pair("status", "active"));
+    node.insert_or_update(record_id1, changes1, std::make_pair("id", record_id1), std::make_pair("priority", "high"),
+                          std::make_pair("status", "active"));
+
+    node.insert_or_update(record_id2, changes2, std::make_pair("id", record_id2), std::make_pair("priority", "high"),
+                          std::make_pair("status", "inactive"));
+
+    node.insert_or_update(record_id3, changes3, std::make_pair("id", record_id3), std::make_pair("priority", "low"),
+                          std::make_pair("status", "active"));
 
     // Test query_with_projection to get active high-priority records
     auto active_high_priority = node.query_with_projection(
-      [](const CrdtKey& key, const Record<CrdtKey>& record) {
-        return record.fields.at("priority") == "high" && 
-               record.fields.at("status") == "active";
-      },
-      [](const CrdtKey& key, const Record<CrdtKey>& record) {
-        return std::make_pair(key, record.fields.at("status"));
-      });
+        [](const CrdtKey &key, const Record<CrdtKey> &record) {
+          return record.fields.at("priority") == "high" && record.fields.at("status") == "active";
+        },
+        [](const CrdtKey &key, const Record<CrdtKey> &record) { return std::make_pair(key, record.fields.at("status")); });
 
-    assert_true(active_high_priority.size() == 1,
-      "Query with Projection: Should find 1 active high-priority record");
-    assert_true(active_high_priority[0].first == record_id1,
-      "Query with Projection: Should return record_id1");
-    assert_true(active_high_priority[0].second == "active",
-      "Query with Projection: Should return 'active' status");
+    assert_true(active_high_priority.size() == 1, "Query with Projection: Should find 1 active high-priority record");
+    assert_true(active_high_priority[0].first == record_id1, "Query with Projection: Should return record_id1");
+    assert_true(active_high_priority[0].second == "active", "Query with Projection: Should return 'active' status");
 
     std::cout << "Test 'Query with Projection' passed." << std::endl;
   }
@@ -1528,19 +1526,13 @@ int main() {
     // Insert and delete a record
     CrdtKey record_id = generate_uuid();
     CrdtVector<Change<CrdtKey, CrdtKey>> changes_insert, changes_delete;
-    node.insert_or_update(record_id, changes_insert,
-      std::make_pair("id", record_id),
-      std::make_pair("tag", "test"));
+    node.insert_or_update(record_id, changes_insert, std::make_pair("id", record_id), std::make_pair("tag", "test"));
     node.delete_record(record_id, changes_delete);
 
     // Query all records (should not include tombstoned record)
-    auto all_records = node.query_records(
-      [](const CrdtKey& key, const Record<CrdtKey>& record) {
-        return true;
-      });
+    auto all_records = node.query_records([](const CrdtKey &key, const Record<CrdtKey> &record) { return true; });
 
-    assert_true(all_records.empty(),
-      "Query with Tombstoned Records: Should not return tombstoned records");
+    assert_true(all_records.empty(), "Query with Tombstoned Records: Should not return tombstoned records");
 
     std::cout << "Test 'Query with Tombstoned Records' passed." << std::endl;
   }

@@ -61,7 +61,7 @@ template <typename Container, typename Element> void add_to_container(Container 
 template <typename K, typename V> struct Change {
   K record_id;
   std::optional<CrdtKey> col_name; // std::nullopt represents tombstone of the record
-  std::optional<V> value;             // note std::nullopt represents deletion of the column, not the record
+  std::optional<V> value;          // note std::nullopt represents deletion of the column, not the record
   uint64_t col_version;
   uint64_t db_version;
   CrdtNodeId node_id;
@@ -749,7 +749,9 @@ public:
       } else if (!read->col_name.has_value() && write->col_name.has_value()) {
         // Current read is a deletion, keep it and skip all previous changes for this record
         *write = std::move(*read);
-      } else if (read->col_name != write->col_name) {
+
+      } // Check if new column name, but make sure it's not a deletion
+      else if (read->col_name != write->col_name && write->col_name.has_value()) {
         // New column for the same record
         ++write;
         if (write != read) {
