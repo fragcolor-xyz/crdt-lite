@@ -98,8 +98,8 @@ concept MergeRule =
 // Default merge rule with proper void handling
 template <typename K, typename V, typename Context = void> struct DefaultMergeRule {
   // Primary version with scalar values
-  constexpr bool operator()(uint64_t local_col, uint64_t local_db, uint64_t local_node,
-                           uint64_t remote_col, uint64_t remote_db, uint64_t remote_node) const {
+  constexpr bool operator()(uint64_t local_col, uint64_t local_db, const CrdtNodeId &local_node, uint64_t remote_col,
+                            uint64_t remote_db, const CrdtNodeId &remote_node) const {
     if (remote_col > local_col) {
       return true;
     } else if (remote_col < local_col) {
@@ -114,11 +114,10 @@ template <typename K, typename V, typename Context = void> struct DefaultMergeRu
       }
     }
   }
-  
+
   // Adapter for Change objects
   constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote) const {
-    return (*this)(local.col_version, local.db_version, local.node_id,
-                  remote.col_version, remote.db_version, remote.node_id);
+    return (*this)(local.col_version, local.db_version, local.node_id, remote.col_version, remote.db_version, remote.node_id);
   }
 };
 
@@ -127,17 +126,16 @@ template <typename K, typename V, typename Context>
   requires(!std::is_void_v<Context>)
 struct DefaultMergeRule<K, V, Context> {
   // Primary version with scalar values
-  constexpr bool operator()(uint64_t local_col, uint64_t local_db, uint64_t local_node,
-                           uint64_t remote_col, uint64_t remote_db, uint64_t remote_node,
-                           const Context &) const {
+  constexpr bool operator()(uint64_t local_col, uint64_t local_db, uint64_t local_node, uint64_t remote_col, uint64_t remote_db,
+                            uint64_t remote_node, const Context &) const {
     DefaultMergeRule<K, V, void> default_rule;
     return default_rule(local_col, local_db, local_node, remote_col, remote_db, remote_node);
   }
-  
+
   // Adapter for Change objects
   constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote, const Context &ctx) const {
-    return (*this)(local.col_version, local.db_version, local.node_id,
-                  remote.col_version, remote.db_version, remote.node_id, ctx);
+    return (*this)(local.col_version, local.db_version, local.node_id, remote.col_version, remote.db_version, remote.node_id,
+                   ctx);
   }
 };
 
@@ -636,9 +634,9 @@ public:
         should_accept = true;
       } else {
         // Use scalars directly instead of creating temporary Change objects
-        should_accept = should_accept_change_scalars(
-            local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
-            remote_col_version, remote_db_version, remote_node_id);
+        should_accept =
+            should_accept_change_scalars(local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
+                                         remote_col_version, remote_db_version, remote_node_id);
       }
 
       if (should_accept) {
@@ -1288,8 +1286,8 @@ protected:
   }
 
   // Helper to handle merge rule calls with/without context using scalar values
-  constexpr bool should_accept_change_scalars(uint64_t local_col, uint64_t local_db, uint64_t local_node,
-                                             uint64_t remote_col, uint64_t remote_db, uint64_t remote_node) {
+  constexpr bool should_accept_change_scalars(uint64_t local_col, uint64_t local_db, const CrdtNodeId &local_node,
+                                              uint64_t remote_col, uint64_t remote_db, const CrdtNodeId &remote_node) {
     if constexpr (std::is_void_v<MergeContext>) {
       return merge_rule_(local_col, local_db, local_node, remote_col, remote_db, remote_node);
     } else {
