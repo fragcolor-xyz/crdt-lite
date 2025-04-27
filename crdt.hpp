@@ -97,21 +97,28 @@ concept MergeRule =
 
 // Default merge rule with proper void handling
 template <typename K, typename V, typename Context = void> struct DefaultMergeRule {
-  // Primary version without context
-  constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote) const {
-    if (remote.col_version > local.col_version) {
+  // Primary version with scalar values
+  constexpr bool operator()(uint64_t local_col, uint64_t local_db, uint64_t local_node,
+                           uint64_t remote_col, uint64_t remote_db, uint64_t remote_node) const {
+    if (remote_col > local_col) {
       return true;
-    } else if (remote.col_version < local.col_version) {
+    } else if (remote_col < local_col) {
       return false;
     } else {
-      if (remote.db_version > local.db_version) {
+      if (remote_db > local_db) {
         return true;
-      } else if (remote.db_version < local.db_version) {
+      } else if (remote_db < local_db) {
         return false;
       } else {
-        return (remote.node_id > local.node_id);
+        return (remote_node > local_node);
       }
     }
+  }
+  
+  // Adapter for Change objects
+  constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote) const {
+    return (*this)(local.col_version, local.db_version, local.node_id,
+                  remote.col_version, remote.db_version, remote.node_id);
   }
 };
 
@@ -119,9 +126,18 @@ template <typename K, typename V, typename Context = void> struct DefaultMergeRu
 template <typename K, typename V, typename Context>
   requires(!std::is_void_v<Context>)
 struct DefaultMergeRule<K, V, Context> {
-  constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote, const Context &) const {
+  // Primary version with scalar values
+  constexpr bool operator()(uint64_t local_col, uint64_t local_db, uint64_t local_node,
+                           uint64_t remote_col, uint64_t remote_db, uint64_t remote_node,
+                           const Context &) const {
     DefaultMergeRule<K, V, void> default_rule;
-    return default_rule(local, remote);
+    return default_rule(local_col, local_db, local_node, remote_col, remote_db, remote_node);
+  }
+  
+  // Adapter for Change objects
+  constexpr bool operator()(const Change<K, V> &local, const Change<K, V> &remote, const Context &ctx) const {
+    return (*this)(local.col_version, local.db_version, local.node_id,
+                  remote.col_version, remote.db_version, remote.node_id, ctx);
   }
 };
 
@@ -200,17 +216,16 @@ struct ColumnVersion {
 template <typename V> struct Record {
   CrdtMap<CrdtKey, V> fields;
   CrdtMap<CrdtKey, ColumnVersion> column_versions;
-  
+
   // Track version boundaries for efficient filtering
   uint64_t lowest_local_db_version = UINT64_MAX;
   uint64_t highest_local_db_version = 0;
 
   Record() = default;
 
-  Record(CrdtMap<CrdtKey, V> &&f, CrdtMap<CrdtKey, ColumnVersion> &&cv)
-      : fields(std::move(f)), column_versions(std::move(cv)) {
+  Record(CrdtMap<CrdtKey, V> &&f, CrdtMap<CrdtKey, ColumnVersion> &&cv) : fields(std::move(f)), column_versions(std::move(cv)) {
     // Initialize version boundaries
-    for (const auto& [_, ver] : column_versions) {
+    for (const auto &[_, ver] : column_versions) {
       if (ver.local_db_version < lowest_local_db_version) {
         lowest_local_db_version = ver.local_db_version;
       }
@@ -269,7 +284,7 @@ public:
                           std::monostate, // Use monostate for void case
                           MergeContext>
            context = {})
-      : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent), merge_rule_(std::move(merge_rule)),
+      : node_id_(node_id), clock_(), data_(), parent_(parent), merge_rule_(std::move(merge_rule)),
         change_comparator_(std::move(change_comparator)), sort_func_(std::move(sort_func)), merge_context_(std::move(context)) {
     if (parent_) {
       clock_ = parent_->clock_;
@@ -287,7 +302,7 @@ public:
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
   ///
   /// Complexity: O(n), where n is the number of changes
-  constexpr CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
+  constexpr CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_() {
     apply_changes(std::move(changes));
   }
 
@@ -301,7 +316,6 @@ public:
   constexpr void reset(CrdtVector<Change<K, V>> &&changes) {
     // Clear existing data
     data_.clear();
-    tombstones_.clear();
 
     // Reset the logical clock
     clock_ = LogicalClock();
@@ -529,7 +543,7 @@ public:
       if (record.highest_local_db_version <= last_db_version) {
         continue;
       }
-      
+
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
@@ -621,15 +635,15 @@ public:
       if (local_col_info == nullptr) {
         should_accept = true;
       } else {
-        Change<K, V> local_change(record_id, col_name ? *col_name : "", std::nullopt, local_col_info->col_version,
-                                  local_col_info->db_version, local_col_info->node_id, flags);
-        should_accept = should_accept_change(local_change, change);
+        // Use scalars directly instead of creating temporary Change objects
+        should_accept = should_accept_change_scalars(
+            local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
+            remote_col_version, remote_db_version, remote_node_id);
       }
 
       if (should_accept) {
         if (!col_name) {
           // Handle deletion
-          tombstones_.emplace(record_id);
           data_.erase(record_id);
 
           // Update deletion clock info
@@ -640,7 +654,7 @@ public:
           Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
           record.lowest_local_db_version = new_local_db_version;
           record.highest_local_db_version = new_local_db_version;
-          
+
           // Store deletion info in the data map
           data_.emplace(record_id, std::move(record));
 
@@ -668,7 +682,7 @@ public:
           if constexpr (ReturnAcceptedChanges) {
             record.column_versions.insert_or_assign(
                 *col_name, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
-            
+
             // Update version boundaries
             if (new_local_db_version < record.lowest_local_db_version) {
               record.lowest_local_db_version = new_local_db_version;
@@ -676,14 +690,14 @@ public:
             if (new_local_db_version > record.highest_local_db_version) {
               record.highest_local_db_version = new_local_db_version;
             }
-            
+
             accepted_changes.emplace_back(Change<K, V>(record_id, std::move(col_name), std::move(remote_value),
                                                        remote_col_version, remote_db_version, remote_node_id,
                                                        new_local_db_version, flags));
           } else {
             record.column_versions.insert_or_assign(
                 std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
-            
+
             // Update version boundaries
             if (new_local_db_version < record.lowest_local_db_version) {
               record.lowest_local_db_version = new_local_db_version;
@@ -771,9 +785,6 @@ public:
   constexpr void print_data() const {
     std::cout << "Node " << node_id_ << " Data:" << std::endl;
     for (const auto &[record_id, record] : data_) {
-      if (tombstones_.find(record_id) != tombstones_.end()) {
-        continue; // Skip tombstoned records
-      }
       std::cout << "ID: ";
       print_value(record_id);
       std::cout << std::endl;
@@ -785,12 +796,6 @@ public:
         std::cout << std::endl;
       }
     }
-    std::cout << "Tombstones: ";
-    for (const auto &tid : tombstones_) {
-      print_value(tid);
-      std::cout << " ";
-    }
-    std::cout << std::endl << std::endl;
   }
 #else
   constexpr void print_data() const {}
@@ -896,9 +901,9 @@ public:
 
   // Add this constructor to the CRDT class
   CRDT(const CRDT &other)
-      : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), tombstones_(other.tombstones_),
-        parent_(other.parent_), base_version_(other.base_version_), merge_rule_(other.merge_rule_),
-        change_comparator_(other.change_comparator_), sort_func_(other.sort_func_), merge_context_(other.merge_context_) {
+      : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), parent_(other.parent_),
+        base_version_(other.base_version_), merge_rule_(other.merge_rule_), change_comparator_(other.change_comparator_),
+        sort_func_(other.sort_func_), merge_context_(other.merge_context_) {
     // Note: This creates a shallow copy of the parent pointer
   }
 
@@ -907,7 +912,6 @@ public:
       node_id_ = other.node_id_;
       clock_ = other.clock_;
       data_ = other.data_;
-      tombstones_ = other.tombstones_;
       parent_ = other.parent_;
       base_version_ = other.base_version_;
       merge_rule_ = other.merge_rule_;
@@ -921,9 +925,9 @@ public:
   // Move constructor
   CRDT(CRDT &&other) noexcept
       : node_id_(other.node_id_), clock_(std::move(other.clock_)), data_(std::move(other.data_)),
-        tombstones_(std::move(other.tombstones_)), parent_(std::move(other.parent_)), base_version_(other.base_version_),
-        merge_rule_(std::move(other.merge_rule_)), change_comparator_(std::move(other.change_comparator_)),
-        sort_func_(std::move(other.sort_func_)), merge_context_(std::move(other.merge_context_)) {}
+        parent_(std::move(other.parent_)), base_version_(other.base_version_), merge_rule_(std::move(other.merge_rule_)),
+        change_comparator_(std::move(other.change_comparator_)), sort_func_(std::move(other.sort_func_)),
+        merge_context_(std::move(other.merge_context_)) {}
 
   // Move assignment operator
   CRDT &operator=(CRDT &&other) noexcept {
@@ -931,7 +935,6 @@ public:
       node_id_ = other.node_id_;
       clock_ = std::move(other.clock_);
       data_ = std::move(other.data_);
-      tombstones_ = std::move(other.tombstones_);
       parent_ = std::move(other.parent_);
       base_version_ = other.base_version_;
       merge_rule_ = std::move(other.merge_rule_);
@@ -946,7 +949,6 @@ protected:
   CrdtNodeId node_id_;
   LogicalClock clock_;
   MapType data_;
-  CrdtSet<K> tombstones_;
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
@@ -1004,18 +1006,17 @@ protected:
 
       if (!col_name.has_value()) {
         // Handle deletion
-        tombstones_.emplace(record_id);
         data_.erase(record_id);
 
         // Store empty record with deletion clock info
         CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
         deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
-        
+
         // Create record with version boundaries
         Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
         record.lowest_local_db_version = remote_local_db_version;
         record.highest_local_db_version = remote_local_db_version;
-        
+
         data_.emplace(record_id, std::move(record));
       } else {
         if (!is_record_tombstoned(record_id)) {
@@ -1030,7 +1031,7 @@ protected:
           // Update the column version info
           record.column_versions.insert_or_assign(std::move(*col_name), ColumnVersion(remote_col_version, remote_db_version,
                                                                                       remote_node_id, remote_local_db_version));
-                                                                                      
+
           // Update version boundaries
           if (remote_local_db_version < record.lowest_local_db_version) {
             record.lowest_local_db_version = remote_local_db_version;
@@ -1044,9 +1045,10 @@ protected:
   }
 
   constexpr bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
-    if (tombstones_.find(record_id) != tombstones_.end()) {
+    auto it = data_.find(record_id);
+    if (it != data_.end() && it->second.column_versions.contains("")) // the "" entry represents tombstone
       return true;
-    }
+
     if (parent_ && !ignore_parent) {
       return parent_->is_record_tombstoned(record_id);
     }
@@ -1258,18 +1260,17 @@ protected:
     uint64_t db_version = clock_.tick();
 
     // Mark as tombstone and remove data
-    tombstones_.emplace(record_id);
     data_.erase(record_id);
 
     // Create empty record with deletion clock info
     CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
     deletion_clock.emplace("", ColumnVersion(1, db_version, node_id_, db_version));
-    
+
     // Create the record with version boundaries initialized
     Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
     record.lowest_local_db_version = db_version;
     record.highest_local_db_version = db_version;
-    
+
     data_.emplace(record_id, std::move(record));
 
     if (changes) {
@@ -1283,6 +1284,16 @@ protected:
       return merge_rule_(local, remote);
     } else {
       return merge_rule_(local, remote, merge_context_);
+    }
+  }
+
+  // Helper to handle merge rule calls with/without context using scalar values
+  constexpr bool should_accept_change_scalars(uint64_t local_col, uint64_t local_db, uint64_t local_node,
+                                             uint64_t remote_col, uint64_t remote_db, uint64_t remote_node) {
+    if constexpr (std::is_void_v<MergeContext>) {
+      return merge_rule_(local_col, local_db, local_node, remote_col, remote_db, remote_node);
+    } else {
+      return merge_rule_(local_col, local_db, local_node, remote_col, remote_db, remote_node, merge_context_);
     }
   }
 };
