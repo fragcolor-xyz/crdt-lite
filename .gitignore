@@ -8,4 +8,6 @@ list-crdt*
 obj
 bin
 TestResult.xml
-.vscode
+.vscode/
+*.diff
+build*/
