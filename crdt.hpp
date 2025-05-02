@@ -547,7 +547,7 @@ public:
           std::optional<V> value = std::nullopt;
           std::optional<CrdtKey> name = std::nullopt;
 
-          if (!record.fields.empty()) { // If record has fields, it's not deleted
+          if (!record.fields.empty()) { // Records with fields are never tombstoned (but empty fields alone don't indicate a tombstone)
             auto field_it = record.fields.find(col_name);
             if (field_it != record.fields.end()) {
               value = field_it->second;
