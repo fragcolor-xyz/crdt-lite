@@ -245,7 +245,7 @@ void test_compression() {
     
     std::filesystem::remove_all("test_compression");
     FileStorage<uint32_t> storage("test_compression");
-    SimpleBlockCRDT crdt(1, std::move(storage));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
     
     // Create a large uniform region (should compress very well)
     BoundingBox large_uniform({0, 0, 0}, {31, 15, 15});
