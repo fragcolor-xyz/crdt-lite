@@ -496,7 +496,9 @@ class BlockCRDT {
     }
     
 public:
-    explicit BlockCRDT(NodeId node_id, StorageBackend storage = StorageBackend{}) 
+    explicit BlockCRDT(NodeId node_id) : node_id_(node_id) {}
+    
+    explicit BlockCRDT(NodeId node_id, StorageBackend storage) 
         : storage_(std::move(storage)), node_id_(node_id) {}
     
     void set_block(const BlockCoord& coord, const BlockData& value) {
