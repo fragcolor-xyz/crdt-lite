@@ -30,7 +30,7 @@ void test_templated_block_types() {
     // Test with uint64_t NFT IDs
     {
         FileStorage<uint64_t> storage("test_templates/nft");
-        NFTBlockCRDT crdt(1, std::move(storage));
+        BlockCRDT<uint64_t, FileStorage<uint64_t>> crdt(1, std::move(storage));
         
         crdt.set_block({0, 0, 0}, 0x123456789ABCDEF0ULL);  // NFT ID
         crdt.set_block({1, 1, 1}, 0xFEDCBA9876543210ULL);  // Another NFT
