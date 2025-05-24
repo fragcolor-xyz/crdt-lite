@@ -65,7 +65,7 @@ void test_sandbox_scale() {
     
     std::filesystem::remove_all("test_sandbox");
     FileStorage<uint32_t> storage("test_sandbox");
-    SimpleBlockCRDT crdt(1, std::move(storage));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
     
     // Test LAND constants
     std::cout << "  LAND dimensions: 96x96x128 blocks = " << SandboxLAND::block_count() << " blocks\n";
