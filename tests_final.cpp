@@ -110,7 +110,7 @@ void test_bulk_operations() {
     
     std::filesystem::remove_all("test_bulk");
     FileStorage<uint32_t> storage("test_bulk");
-    SimpleBlockCRDT crdt(1, std::move(storage));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
     
     // Build a wall: 20 blocks long, 5 blocks high
     BoundingBox wall({0, 0, 0}, {19, 4, 0});
