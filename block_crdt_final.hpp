@@ -662,9 +662,14 @@ public:
 };
 
 // Common block data types for different use cases
-using SimpleBlockCRDT = BlockCRDT<uint32_t>;              // Simple material IDs
-using NFTBlockCRDT = BlockCRDT<uint64_t>;                 // NFT references
-using RichBlockCRDT = BlockCRDT<std::pair<uint64_t, uint32_t>>; // NFT ID + metadata
+template<typename StorageBackend = FileStorage<uint32_t>>
+using SimpleBlockCRDT = BlockCRDT<uint32_t, StorageBackend>;              // Simple material IDs
+
+template<typename StorageBackend = FileStorage<uint64_t>>
+using NFTBlockCRDT = BlockCRDT<uint64_t, StorageBackend>;                 // NFT references
+
+template<typename StorageBackend = FileStorage<std::pair<uint64_t, uint32_t>>>
+using RichBlockCRDT = BlockCRDT<std::pair<uint64_t, uint32_t>, StorageBackend>; // NFT ID + metadata
 
 // Serialization implementation for BlockChunk
 template<typename BlockData>
