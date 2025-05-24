@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <optional>
 #include <array>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <concepts>
 #include <span>
+#include <cstring>
 
 namespace voxel_crdt {
 
