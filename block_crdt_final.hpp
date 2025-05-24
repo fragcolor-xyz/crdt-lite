@@ -381,7 +381,7 @@ public:
     std::vector<uint8_t> serialize() const;
     static std::optional<BlockChunk<BlockData>> deserialize(const std::vector<uint8_t>& data);
     
-    template<BlockStorage<BlockData> StorageType>
+    template<typename StorageType>
     friend class FileStorage; // For direct access during serialization
 };
 
