@@ -44,7 +44,7 @@ void test_templated_block_types() {
     // Test with rich data (NFT ID + metadata)
     {
         FileStorage<std::pair<uint64_t, uint32_t>> storage("test_templates/rich");
-        RichBlockCRDT crdt(1, std::move(storage));
+        BlockCRDT<std::pair<uint64_t, uint32_t>, FileStorage<std::pair<uint64_t, uint32_t>>> crdt(1, std::move(storage));
         
         crdt.set_block({0, 0, 0}, {0x123456789ABCDEF0ULL, 0x12345678u}); // NFT + metadata
         crdt.set_block({1, 1, 1}, {0xFEDCBA9876543210ULL, 0x87654321u}); // Another rich block
