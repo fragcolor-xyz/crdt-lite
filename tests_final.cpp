@@ -194,8 +194,8 @@ void test_crdt_operations() {
     FileStorage<uint32_t> storage1("test_crdt/node1");
     FileStorage<uint32_t> storage2("test_crdt/node2");
     
-    SimpleBlockCRDT crdt1(1, std::move(storage1));
-    SimpleBlockCRDT crdt2(2, std::move(storage2));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt1(1, std::move(storage1));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt2(2, std::move(storage2));
     
     // Node 1 builds some blocks
     crdt1.set_block({0, 0, 0}, 100u);
