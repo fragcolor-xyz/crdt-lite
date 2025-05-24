@@ -496,7 +496,8 @@ class BlockCRDT {
     }
     
 public:
-    explicit BlockCRDT(NodeId node_id) : node_id_(node_id) {}
+    explicit BlockCRDT(NodeId node_id) requires std::default_constructible<StorageBackend> 
+        : node_id_(node_id) {}
     
     explicit BlockCRDT(NodeId node_id, StorageBackend storage) 
         : storage_(std::move(storage)), node_id_(node_id) {}
