@@ -14,7 +14,7 @@ void test_templated_block_types() {
     // Test with simple uint32_t material IDs
     {
         FileStorage<uint32_t> storage("test_templates/simple");
-        SimpleBlockCRDT crdt(1, std::move(storage));
+        BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
         
         crdt.set_block({0, 0, 0}, 100u);      // Stone
         crdt.set_block({1, 1, 1}, 200u);      // Wood
