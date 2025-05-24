@@ -78,7 +78,7 @@ struct ChunkCoord {
 struct BoundingBox {
     BlockCoord min, max;
     
-    BoundingBox(BlockCoord min, BlockCoord max) : min(min), max(max) {}
+    constexpr BoundingBox(BlockCoord min, BlockCoord max) : min(min), max(max) {}
     
     bool contains(const BlockCoord& coord) const {
         return coord.x >= min.x && coord.x <= max.x &&
