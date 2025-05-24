@@ -146,7 +146,7 @@ void test_spatial_queries() {
     
     std::filesystem::remove_all("test_spatial");
     FileStorage<uint32_t> storage("test_spatial");
-    SimpleBlockCRDT crdt(1, std::move(storage));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
     
     // Create a 3D plus sign pattern
     BlockCoord center{8, 8, 8};
