@@ -279,7 +279,7 @@ void test_performance() {
     
     std::filesystem::remove_all("test_perf");
     FileStorage<uint32_t> storage("test_perf");
-    SimpleBlockCRDT crdt(1, std::move(storage));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt(1, std::move(storage));
     
     constexpr int BLOCK_COUNT = 10000;
     
