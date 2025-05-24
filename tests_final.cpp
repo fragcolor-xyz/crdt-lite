@@ -218,8 +218,8 @@ void test_crdt_operations() {
     std::cout << "  ✓ Basic merge working\n";
     
     // Test conflict resolution
-    BlockCRDT<uint32_t> crdt3(3);
-    BlockCRDT<uint32_t> crdt4(4);
+    SimpleBlockCRDT crdt3(3);
+    SimpleBlockCRDT crdt4(4);
     
     // Both nodes modify same block
     crdt3.set_block({5, 5, 5}, 500u);
