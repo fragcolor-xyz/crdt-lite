@@ -455,8 +455,8 @@ clang++ -std=c++20 -O2 -o test_phase2 tests_phase2.cpp && ./test_phase2
 
 ## 📄 License
 
-This implementation is designed for integration with The Sandbox ecosystem and Shards engine. Contact for licensing terms.
+This implementation is designed for integration with The Sandbox ecosystem and Formabble engine. Contact for licensing terms.
 
 ---
 
-*Built for the future of collaborative virtual worlds. Optimized for The Sandbox partnership.*
+*Built for the future of collaborative virtual worlds.*
