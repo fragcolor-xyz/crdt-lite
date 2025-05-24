@@ -385,6 +385,42 @@ public:
     friend class FileStorage; // For direct access during serialization
 };
 
+// Simple in-memory storage for testing (no file dependencies)
+template<typename BlockData>
+class MemoryStorage {
+    std::unordered_map<ChunkCoord, BlockChunk<BlockData>, ChunkCoordHash> chunks_;
+    
+public:
+    MemoryStorage() = default;
+    
+    bool save_chunk(const ChunkCoord& coord, const BlockChunk<BlockData>& chunk) {
+        chunks_[coord] = chunk;
+        return true;
+    }
+    
+    std::optional<BlockChunk<BlockData>> load_chunk(const ChunkCoord& coord) {
+        auto it = chunks_.find(coord);
+        return it != chunks_.end() ? std::optional{it->second} : std::nullopt;
+    }
+    
+    bool delete_chunk(const ChunkCoord& coord) {
+        return chunks_.erase(coord) > 0;
+    }
+    
+    bool chunk_exists(const ChunkCoord& coord) {
+        return chunks_.contains(coord);
+    }
+    
+    std::vector<ChunkCoord> list_chunks() {
+        std::vector<ChunkCoord> result;
+        result.reserve(chunks_.size());
+        for (const auto& [coord, _] : chunks_) {
+            result.push_back(coord);
+        }
+        return result;
+    }
+};
+
 // Simple file-based storage backend for testing
 template<typename BlockData>
 class FileStorage {
