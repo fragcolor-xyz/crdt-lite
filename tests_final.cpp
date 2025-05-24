@@ -259,7 +259,7 @@ void test_compression() {
     
     // Create new instance to test compressed serialization
     FileStorage<uint32_t> storage2("test_compression");
-    SimpleBlockCRDT crdt2(2, std::move(storage2));
+    BlockCRDT<uint32_t, FileStorage<uint32_t>> crdt2(2, std::move(storage2));
     
     // Verify data integrity after compression/decompression
     assert(crdt2.get_block({0, 0, 0}) == 888u);
