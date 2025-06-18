@@ -267,23 +267,17 @@ concept MapLike = requires(Container c, Key k, Value v) {
 };
 
 /// Represents the CRDT structure, generic over key (`K`) and value (`V`) types.
-template <typename K, typename V, typename MergeContext = void,
-          MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
-          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort,
+template <typename K, typename V, typename SortFunctionType = DefaultSort,
           MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>>
 class CRDT : public std::enable_shared_from_this<
-                 CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>> {
+                 CRDT<K, V, SortFunctionType, MapType>> {
 public:
   // Create a new empty CRDT
   // Complexity: O(1)
-  CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT> parent = nullptr, MergeRuleType merge_rule = MergeRuleType(),
-       ChangeComparatorType change_comparator = ChangeComparatorType(), SortFunctionType sort_func = SortFunctionType(),
-       std::conditional_t<std::is_void_v<MergeContext>,
-                          std::monostate, // Use monostate for void case
-                          MergeContext>
-           context = {})
-      : node_id_(node_id), clock_(), data_(), parent_(parent), merge_rule_(std::move(merge_rule)),
-        change_comparator_(std::move(change_comparator)), sort_func_(std::move(sort_func)), merge_context_(std::move(context)) {
+  CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT> parent = nullptr,
+       SortFunctionType sort_func = SortFunctionType())
+      : node_id_(node_id), clock_(), data_(), parent_(parent),
+        sort_func_(std::move(sort_func)) {
     if (parent_) {
       clock_ = parent_->clock_;
       base_version_ = parent_->clock_.current_time();
@@ -356,7 +350,7 @@ public:
   ///
   /// O(c), where c is the number of changes since the common ancestor
   constexpr CrdtVector<Change<K, V>>
-  diff(const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &other) const {
+  diff(const CRDT<K, V, SortFunctionType, MapType> &other) const {
     // Find the common ancestor (lowest common db_version)
     uint64_t common_version = std::min(clock_.current_time(), other.clock_.current_time());
 
@@ -577,6 +571,8 @@ public:
   /// # Arguments
   ///
   /// * `changes` - A vector of changes to merge.
+  /// * `merge_rule` - The merge rule to use for conflict resolution.
+  /// * `context` - Optional context for the merge rule.
   ///
   /// # Returns
   ///
@@ -584,9 +580,15 @@ public:
   /// Otherwise, returns `void`.
   ///
   /// Complexity: O(c), where c is the number of changes to merge
-  template <bool ReturnAcceptedChanges = false>
-  std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> merge_changes(CrdtVector<Change<K, V>> &&changes,
-                                                                                          bool ignore_parent = false) {
+  template <bool ReturnAcceptedChanges = false, typename MergeContext = void,
+            MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>>
+  std::conditional_t<ReturnAcceptedChanges, CrdtVector<Change<K, V>>, void> 
+  merge_changes(CrdtVector<Change<K, V>> &&changes, bool ignore_parent = false,
+                MergeRuleType merge_rule = MergeRuleType(),
+                std::conditional_t<std::is_void_v<MergeContext>,
+                                   std::monostate, // Use monostate for void case
+                                   MergeContext>
+                    context = {}) {
     CrdtVector<Change<K, V>> accepted_changes;
 
     if (changes.empty()) {
@@ -633,10 +635,14 @@ public:
       if (local_col_info == nullptr) {
         should_accept = true;
       } else {
-        // Use scalars directly instead of creating temporary Change objects
-        should_accept =
-            should_accept_change_scalars(local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
-                                         remote_col_version, remote_db_version, remote_node_id);
+        // Use the provided merge rule with context handling
+        if constexpr (std::is_void_v<MergeContext>) {
+          should_accept = merge_rule(local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
+                                   remote_col_version, remote_db_version, remote_node_id);
+        } else {
+          should_accept = merge_rule(local_col_info->col_version, local_col_info->db_version, local_col_info->node_id,
+                                   remote_col_version, remote_db_version, remote_node_id, context);
+        }
       }
 
       if (should_accept) {
@@ -745,8 +751,8 @@ public:
       return end;
 
     if constexpr (!Sorted) {
-      // Sort changes using the custom ChangeComparator
-      SortFunctionType()(begin, end, ChangeComparatorType());
+      // Sort changes using the DefaultChangeComparator
+      SortFunctionType()(begin, end, DefaultChangeComparator<K, V>());
     }
 
     // Use two-pointer technique to compress in-place
@@ -900,8 +906,7 @@ public:
   // Add this constructor to the CRDT class
   CRDT(const CRDT &other)
       : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), parent_(other.parent_),
-        base_version_(other.base_version_), merge_rule_(other.merge_rule_), change_comparator_(other.change_comparator_),
-        sort_func_(other.sort_func_), merge_context_(other.merge_context_) {
+        base_version_(other.base_version_), sort_func_(other.sort_func_) {
     // Note: This creates a shallow copy of the parent pointer
   }
 
@@ -912,10 +917,7 @@ public:
       data_ = other.data_;
       parent_ = other.parent_;
       base_version_ = other.base_version_;
-      merge_rule_ = other.merge_rule_;
-      change_comparator_ = other.change_comparator_;
       sort_func_ = other.sort_func_;
-      merge_context_ = other.merge_context_;
     }
     return *this;
   }
@@ -923,9 +925,8 @@ public:
   // Move constructor
   CRDT(CRDT &&other) noexcept
       : node_id_(other.node_id_), clock_(std::move(other.clock_)), data_(std::move(other.data_)),
-        parent_(std::move(other.parent_)), base_version_(other.base_version_), merge_rule_(std::move(other.merge_rule_)),
-        change_comparator_(std::move(other.change_comparator_)), sort_func_(std::move(other.sort_func_)),
-        merge_context_(std::move(other.merge_context_)) {}
+        parent_(std::move(other.parent_)), base_version_(other.base_version_), 
+        sort_func_(std::move(other.sort_func_)) {}
 
   // Move assignment operator
   CRDT &operator=(CRDT &&other) noexcept {
@@ -935,10 +936,7 @@ public:
       data_ = std::move(other.data_);
       parent_ = std::move(other.parent_);
       base_version_ = other.base_version_;
-      merge_rule_ = std::move(other.merge_rule_);
-      change_comparator_ = std::move(other.change_comparator_);
       sort_func_ = std::move(other.sort_func_);
-      merge_context_ = std::move(other.merge_context_);
     }
     return *this;
   }
@@ -950,15 +948,9 @@ protected:
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
-  std::shared_ptr<CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType>> parent_;
+  std::shared_ptr<CRDT<K, V, SortFunctionType, MapType>> parent_;
   uint64_t base_version_; // Tracks the parent's db_version at the time of child creation
-  MergeRuleType merge_rule_;
-  ChangeComparatorType change_comparator_;
   SortFunctionType sort_func_;
-  std::conditional_t<std::is_void_v<MergeContext>,
-                     std::monostate, // Use monostate for void case
-                     MergeContext>
-      merge_context_;
 
   // Helper function to print values
   template <typename T> static void print_value(const T &value) {
@@ -1100,7 +1092,7 @@ protected:
   /// A vector of inverse `Change` objects.
   CrdtVector<Change<K, V>> invert_changes(
       const CrdtVector<Change<K, V>> &changes,
-      const CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &reference_crdt) const {
+      const CRDT<K, V, SortFunctionType, MapType> &reference_crdt) const {
     CrdtVector<Change<K, V>> inverse_changes;
 
     for (const auto &change : changes) {
@@ -1275,25 +1267,6 @@ protected:
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
     }
   }
-
-  // Helper to handle merge rule calls with/without context
-  constexpr bool should_accept_change(const Change<K, V> &local, const Change<K, V> &remote) {
-    if constexpr (std::is_void_v<MergeContext>) {
-      return merge_rule_(local, remote);
-    } else {
-      return merge_rule_(local, remote, merge_context_);
-    }
-  }
-
-  // Helper to handle merge rule calls with/without context using scalar values
-  constexpr bool should_accept_change_scalars(uint64_t local_col, uint64_t local_db, const CrdtNodeId &local_node,
-                                              uint64_t remote_col, uint64_t remote_db, const CrdtNodeId &remote_node) {
-    if constexpr (std::is_void_v<MergeContext>) {
-      return merge_rule_(local_col, local_db, local_node, remote_col, remote_db, remote_node);
-    } else {
-      return merge_rule_(local_col, local_db, local_node, remote_col, remote_db, remote_node, merge_context_);
-    }
-  }
 };
 
 /// Synchronizes two CRDT nodes.
@@ -1303,13 +1276,17 @@ protected:
 ///
 /// Complexity: O(c + m), where c is the number of changes since last_db_version,
 /// and m is the complexity of merge_changes
-template <typename K, typename V, typename MergeContext = void,
-          MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>,
-          ChangeComparator<K, V> ChangeComparatorType = DefaultChangeComparator<K, V>, typename SortFunctionType = DefaultSort,
-          MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>>
-constexpr void sync_nodes(CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &source,
-                          CRDT<K, V, MergeContext, MergeRuleType, ChangeComparatorType, SortFunctionType, MapType> &target,
-                          uint64_t &last_db_version) {
+template <typename K, typename V, typename SortFunctionType = DefaultSort, 
+          MapLike<K, Record<V>> MapType = CrdtMap<K, Record<V>>,
+          typename MergeContext = void, MergeRule<K, V, MergeContext> MergeRuleType = DefaultMergeRule<K, V, MergeContext>>
+constexpr void sync_nodes(CRDT<K, V, SortFunctionType, MapType> &source,
+                          CRDT<K, V, SortFunctionType, MapType> &target,
+                          uint64_t &last_db_version,
+                          MergeRuleType merge_rule = MergeRuleType(),
+                          std::conditional_t<std::is_void_v<MergeContext>,
+                                             std::monostate, // Use monostate for void case
+                                             MergeContext>
+                              context = {}) {
   auto changes = source.get_changes_since(last_db_version);
 
   // Update last_db_version to the current max db_version in source
@@ -1323,7 +1300,7 @@ constexpr void sync_nodes(CRDT<K, V, MergeContext, MergeRuleType, ChangeComparat
     last_db_version = max_version;
   }
 
-  target.merge_changes(std::move(changes));
+  target.merge_changes(std::move(changes), false, merge_rule, context);
 }
 
 #endif // CRDT_HPP
