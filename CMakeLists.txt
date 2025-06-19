@@ -7,3 +7,6 @@ target_compile_features(crdt-lite INTERFACE cxx_std_20)
 
 add_executable(tests tests.cpp)
 target_link_libraries(tests PRIVATE crdt-lite)
+
+add_executable(test_memory test_memory.cpp)
+target_link_libraries(test_memory PRIVATE crdt-lite)
