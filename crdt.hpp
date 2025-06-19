@@ -881,6 +881,32 @@ public:
     return is_record_tombstoned(record_id, ignore_parent);
   }
 
+  /// Gets tombstone information for a record.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `ignore_parent` - If true, only checks the current CRDT instance, ignoring the parent.
+  ///
+  /// # Returns
+  ///
+  /// std::optional<ColumnVersion> containing the tombstone version information if the record is tombstoned,
+  /// or std::nullopt if the record is not tombstoned.
+  ///
+  /// Complexity: O(1) average case for hash table lookup
+  constexpr std::optional<ColumnVersion> get_tombstone(const K &record_id, bool ignore_parent = false) const {
+    auto it = tombstones_.find(record_id);
+    if (it != tombstones_.end()) {
+      return it->second;
+    }
+
+    if (parent_ && !ignore_parent) {
+      return parent_->get_tombstone(record_id);
+    }
+    
+    return std::nullopt;
+  }
+
   /// Query records matching a predicate.
   ///
   /// # Arguments

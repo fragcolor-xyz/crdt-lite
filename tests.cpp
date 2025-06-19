@@ -110,12 +110,12 @@ int main() {
     node2.merge_changes(std::move(changes_delete));
 
     // Both nodes should reflect the deletion
-    assert_true(node1.get_data().at(record_id).fields.empty(), "Delete and Merge: Node1 should have empty fields");
-    assert_true(node2.get_data().at(record_id).fields.empty(), "Delete and Merge: Node2 should have empty fields");
-    assert_true(node1.get_data().at(record_id).column_versions.find("") != node1.get_data().at(record_id).column_versions.end(),
-                "Delete and Merge: Node1 should have deletion column version");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
-                "Delete and Merge: Node2 should have deletion column version");
+    assert_true(node1.get_data().find(record_id) == node1.get_data().end(),
+                "Delete and Merge: Node1 should not have record in data");
+    assert_true(node2.get_data().find(record_id) == node2.get_data().end(),
+                "Delete and Merge: Node2 should not have record in data");
+    assert_true(node1.get_tombstone(record_id).has_value(), "Delete and Merge: Node1 should have tombstone information");
+    assert_true(node2.get_tombstone(record_id).has_value(), "Delete and Merge: Node2 should have tombstone information");
     std::cout << "Test 'Delete and Merge' passed." << std::endl;
   }
 
@@ -143,9 +143,9 @@ int main() {
     node1.merge_changes(std::move(changes_attempt_insert));
 
     // Node2 should respect the tombstone
-    assert_true(node2.get_data().at(record_id).fields.empty(), "Tombstone Handling: Node2 should have empty fields");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
-                "Tombstone Handling: Node2 should have deletion column version");
+    assert_true(node2.get_data().find(record_id) == node2.get_data().end(),
+                "Tombstone Handling: Node2 should not have record in data");
+    assert_true(node2.get_tombstone(record_id).has_value(), "Tombstone Handling: Node2 should have tombstone information");
     std::cout << "Test 'Tombstone Handling' passed." << std::endl;
   }
 
@@ -294,12 +294,12 @@ int main() {
     node1.merge_changes(std::move(changes_attempt_insert));
 
     // The deletion should prevail
-    assert_true(node1.get_data().at(record_id).fields.empty(), "Inserting After Deletion: Node1 should have empty fields");
-    assert_true(node2.get_data().at(record_id).fields.empty(), "Inserting After Deletion: Node2 should have empty fields");
-    assert_true(node1.get_data().at(record_id).column_versions.find("") != node1.get_data().at(record_id).column_versions.end(),
-                "Inserting After Deletion: Node1 should have deletion column version");
-    assert_true(node2.get_data().at(record_id).column_versions.find("") != node2.get_data().at(record_id).column_versions.end(),
-                "Inserting After Deletion: Node2 should have deletion column version");
+    assert_true(node1.get_data().find(record_id) == node1.get_data().end(),
+                "Inserting After Deletion: Node1 should not have record in data");
+    assert_true(node2.get_data().find(record_id) == node2.get_data().end(),
+                "Inserting After Deletion: Node2 should not have record in data");
+    assert_true(node1.get_tombstone(record_id).has_value(), "Inserting After Deletion: Node1 should have tombstone information");
+    assert_true(node2.get_tombstone(record_id).has_value(), "Inserting After Deletion: Node2 should have tombstone information");
     std::cout << "Test 'Inserting After Deletion' passed." << std::endl;
   }
 
@@ -800,12 +800,10 @@ int main() {
     child_crdt.merge_changes(std::move(parent_delete_changes));
 
     // Child should now have the record tombstoned
-    child_data_combined = child_crdt.get_data_combined();
-    assert_true(child_data_combined.at(record_id).fields.empty(),
-                "Tombstone Propagation: Child should have empty fields after deletion");
-    assert_true(child_data_combined.at(record_id).column_versions.find("") !=
-                    child_data_combined.at(record_id).column_versions.end(),
-                "Tombstone Propagation: Child should have deletion column version");
+    assert_true(child_crdt.get_data().find(record_id) == child_crdt.get_data().end(),
+                "Tombstone Propagation: Child should not have record in data after deletion");
+    assert_true(child_crdt.get_tombstone(record_id).has_value(),
+                "Tombstone Propagation: Child should have tombstone information");
 
     std::cout << "Test 'Tombstone Propagation from Parent to Child' passed." << std::endl;
   }
@@ -956,11 +954,9 @@ int main() {
                 "Child Deletion: Parent should still have the record after child deletion");
 
     // Child should have the record tombstoned
-    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
-                "Child Deletion: Child should have empty fields after deletion");
-    assert_true(child_crdt.get_data().at(record_id).column_versions.find("") !=
-                    child_crdt.get_data().at(record_id).column_versions.end(),
-                "Child Deletion: Child should have deletion column version");
+    assert_true(child_crdt.get_data().find(record_id) == child_crdt.get_data().end(),
+                "Child Deletion: Child should not have record in data after deletion");
+    assert_true(child_crdt.get_tombstone(record_id).has_value(), "Child Deletion: Child should have tombstone information");
 
     std::cout << "Test 'Child Deletion Does Not Affect Parent' passed." << std::endl;
   }
@@ -1030,18 +1026,14 @@ int main() {
     parent_crdt.merge_changes(std::move(child_change_insert));
 
     // Parent should still have the record tombstoned without the new field
-    assert_true(parent_crdt.get_data().at(record_id).fields.empty(),
-                "Parent Deletion: Parent should still have empty fields after child insertion attempt");
-    assert_true(parent_crdt.get_data().at(record_id).column_versions.find("") !=
-                    parent_crdt.get_data().at(record_id).column_versions.end(),
-                "Parent Deletion: Parent should have deletion column version");
+    assert_true(parent_crdt.get_data().find(record_id) == parent_crdt.get_data().end(),
+                "Parent Deletion: Parent should not have record in data after deletion");
+    assert_true(parent_crdt.get_tombstone(record_id).has_value(), "Parent Deletion: Parent should have tombstone information");
 
     // Child should also respect the tombstone
-    assert_true(child_crdt.get_data().at(record_id).fields.empty(),
-                "Parent Deletion: Child should have empty fields after parent's deletion");
-    assert_true(child_crdt.get_data().at(record_id).column_versions.find("") !=
-                    child_crdt.get_data().at(record_id).column_versions.end(),
-                "Parent Deletion: Child should have deletion column version");
+    assert_true(child_crdt.get_data().find(record_id) == child_crdt.get_data().end(),
+                "Parent Deletion: Child should not have record in data after parent's deletion");
+    assert_true(child_crdt.get_tombstone(record_id).has_value(), "Parent Deletion: Child should have tombstone information");
 
     std::cout << "Test 'Parent Deletion Prevents Child Insertions' passed." << std::endl;
   }
