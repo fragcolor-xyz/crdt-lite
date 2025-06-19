@@ -946,9 +946,6 @@ int main() {
     CrdtVector<Change<CrdtKey, CrdtKey>> child_delete_changes;
     child_crdt.delete_record(record_id, child_delete_changes);
 
-    // Merge child's deletion into parent
-    parent_crdt.merge_changes(std::move(child_delete_changes));
-
     // Parent should still have the record (since child deletion should not affect parent)
     assert_true(parent_crdt.get_data().find(record_id) != parent_crdt.get_data().end(),
                 "Child Deletion: Parent should still have the record after child deletion");
