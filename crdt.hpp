@@ -210,6 +210,82 @@ struct ColumnVersion {
       : col_version(c), db_version(d), node_id(n), local_db_version(ldb_ver) {}
 };
 
+/// Compact tombstone information structure to reduce memory usage
+/// Maintains full 64-bit precision to avoid overflow issues
+struct TombstoneInfo {
+  uint64_t col_version;
+  uint64_t db_version;
+  CrdtNodeId node_id;
+  uint64_t local_db_version;
+  
+  constexpr TombstoneInfo(uint64_t c, uint64_t d, CrdtNodeId n, uint64_t ldb_ver = 0)
+      : col_version(c), db_version(d), node_id(n), local_db_version(ldb_ver) {}
+        
+  // Convert back to ColumnVersion when needed
+  constexpr ColumnVersion to_column_version() const {
+    return ColumnVersion(col_version, db_version, node_id, local_db_version);
+  }
+};
+
+// Alternative compact storage for tombstones using sorted vector
+// More memory efficient than hash map for large numbers of tombstones
+template<typename K>
+struct CompactTombstoneEntry {
+  K record_id;
+  TombstoneInfo info;
+  
+  constexpr CompactTombstoneEntry(K id, TombstoneInfo inf) 
+    : record_id(std::move(id)), info(inf) {}
+};
+
+template<typename K>
+class CompactTombstoneStorage {
+public:
+  using Entry = CompactTombstoneEntry<K>;
+  
+private:
+  CrdtVector<Entry> entries_;
+  
+public:
+  void insert_or_assign(const K& key, const TombstoneInfo& info) {
+    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
+      [](const Entry& entry, const K& key) { return entry.record_id < key; });
+    
+    if (it != entries_.end() && it->record_id == key) {
+      it->info = info;
+    } else {
+      entries_.emplace(it, key, info);
+    }
+  }
+  
+  std::optional<TombstoneInfo> find(const K& key) const {
+    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
+      [](const Entry& entry, const K& key) { return entry.record_id < key; });
+    
+    if (it != entries_.end() && it->record_id == key) {
+      return it->info;
+    }
+    return std::nullopt;
+  }
+  
+  bool erase(const K& key) {
+    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
+      [](const Entry& entry, const K& key) { return entry.record_id < key; });
+    
+    if (it != entries_.end() && it->record_id == key) {
+      entries_.erase(it);
+      return true;
+    }
+    return false;
+  }
+  
+  void clear() { entries_.clear(); }
+  
+  auto begin() const { return entries_.begin(); }
+  auto end() const { return entries_.end(); }
+  size_t size() const { return entries_.size(); }
+};
+
 /// Represents a record in the CRDT.
 template <typename V> struct Record {
   CrdtMap<CrdtKey, V> fields;
@@ -275,7 +351,8 @@ protected:
   MapType data_;
 
   // Separate storage for tombstones - maps record IDs to their deletion information
-  CrdtMap<K, ColumnVersion> tombstones_;
+  // Use compact storage for better memory efficiency with large numbers of tombstones
+  CompactTombstoneStorage<K> tombstones_;
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
@@ -564,7 +641,9 @@ public:
     }
 
     // Get deletion changes from tombstones
-    for (const auto &[record_id, clock_info] : tombstones_) {
+    for (const auto &entry : tombstones_) {
+      const auto &record_id = entry.record_id;
+      const auto clock_info = entry.info.to_column_version();
       if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
         changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, clock_info.col_version,
                                           clock_info.db_version, clock_info.node_id, clock_info.local_db_version));
@@ -640,9 +719,10 @@ public:
       
       if (!col_name) {
         // For deletions, check tombstones
-        auto tombstone_it = tombstones_.find(record_id);
-        if (tombstone_it != tombstones_.end()) {
-          local_col_info = &tombstone_it->second;
+        if (auto tombstone_info = tombstones_.find(record_id)) {
+          static thread_local ColumnVersion temp_col_version{0, 0, 0, 0};
+          temp_col_version = tombstone_info->to_column_version();
+          local_col_info = &temp_col_version;
         }
       } else if (record_ptr != nullptr) {
         // For column updates, check the record
@@ -674,7 +754,7 @@ public:
           data_.erase(record_id);
 
           // Store deletion information in tombstones
-          tombstones_.insert_or_assign(record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
+          tombstones_.insert_or_assign(record_id, TombstoneInfo(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
@@ -830,8 +910,8 @@ public:
     CrdtMap<K, Record<V>> combined_data = parent_->get_data_combined();
     
     // Remove any records that are tombstoned in this CRDT
-    for (const auto &[record_id, _] : tombstones_) {
-      combined_data.erase(record_id);
+    for (const auto &entry : tombstones_) {
+      combined_data.erase(entry.record_id);
     }
     
     // Add records from this CRDT
@@ -895,9 +975,8 @@ public:
   ///
   /// Complexity: O(1) average case for hash table lookup
   constexpr std::optional<ColumnVersion> get_tombstone(const K &record_id, bool ignore_parent = false) const {
-    auto it = tombstones_.find(record_id);
-    if (it != tombstones_.end()) {
-      return it->second;
+    if (auto tombstone_info = tombstones_.find(record_id)) {
+      return tombstone_info->to_column_version();
     }
 
     if (parent_ && !ignore_parent) {
@@ -1038,7 +1117,7 @@ protected:
         data_.erase(record_id);
 
         // Store deletion information in tombstones
-        tombstones_.insert_or_assign(record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
+        tombstones_.insert_or_assign(record_id, TombstoneInfo(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
       } else {
         if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
@@ -1066,8 +1145,7 @@ protected:
   }
 
   constexpr bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
-    auto it = tombstones_.find(record_id);
-    if (it != tombstones_.end()) {
+    if (tombstones_.find(record_id).has_value()) {
       return true;
     }
 
@@ -1283,7 +1361,7 @@ protected:
     data_.erase(record_id);
 
     // Store deletion information in tombstones
-    tombstones_.insert_or_assign(record_id, ColumnVersion(1, db_version, node_id_, db_version));
+    tombstones_.insert_or_assign(record_id, TombstoneInfo(1, db_version, node_id_, db_version));
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
