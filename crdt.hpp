@@ -274,6 +274,9 @@ protected:
   LogicalClock clock_;
   MapType data_;
 
+  // Separate storage for tombstones - maps record IDs to their deletion information
+  CrdtMap<K, ColumnVersion> tombstones_;
+
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
   std::shared_ptr<CRDT> parent_;
@@ -284,7 +287,7 @@ public:
   // Create a new empty CRDT
   // Complexity: O(1)
   CRDT(CrdtNodeId node_id, std::shared_ptr<CRDT> parent = nullptr, SortFunctionType sort_func = SortFunctionType())
-      : node_id_(node_id), clock_(), data_(), parent_(parent), sort_func_(std::move(sort_func)) {
+      : node_id_(node_id), clock_(), data_(), tombstones_(), parent_(parent), sort_func_(std::move(sort_func)) {
     if (parent_) {
       clock_ = parent_->clock_;
       base_version_ = parent_->clock_.current_time();
@@ -301,7 +304,7 @@ public:
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state.
   ///
   /// Complexity: O(n), where n is the number of changes
-  constexpr CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_() {
+  constexpr CRDT(CrdtNodeId node_id, CrdtVector<Change<K, V>> &&changes) : node_id_(node_id), clock_(), data_(), tombstones_() {
     apply_changes(std::move(changes));
   }
 
@@ -315,6 +318,7 @@ public:
   constexpr void reset(CrdtVector<Change<K, V>> &&changes) {
     // Clear existing data
     data_.clear();
+    tombstones_.clear();
 
     // Reset the logical clock
     clock_ = LogicalClock();
@@ -536,6 +540,7 @@ public:
       changes.insert(changes.end(), parent_changes.begin(), parent_changes.end());
     }
 
+    // Get changes from regular records
     for (const auto &[record_id, record] : data_) {
       // Skip records that haven't changed since last_db_version
       if (record.highest_local_db_version <= last_db_version) {
@@ -545,20 +550,24 @@ public:
       for (const auto &[col_name, clock_info] : record.column_versions) {
         if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
           std::optional<V> value = std::nullopt;
-          std::optional<CrdtKey> name = std::nullopt;
+          std::optional<CrdtKey> name = col_name;
 
-          if (!record.fields
-                   .empty()) { // Records with fields are never tombstoned (but empty fields alone don't indicate a tombstone)
-            auto field_it = record.fields.find(col_name);
-            if (field_it != record.fields.end()) {
-              value = field_it->second;
-            }
-            name = col_name;
+          auto field_it = record.fields.find(col_name);
+          if (field_it != record.fields.end()) {
+            value = field_it->second;
           }
 
           changes.emplace_back(Change<K, V>(record_id, std::move(name), std::move(value), clock_info.col_version,
                                             clock_info.db_version, clock_info.node_id, clock_info.local_db_version));
         }
+      }
+    }
+
+    // Get deletion changes from tombstones
+    for (const auto &[record_id, clock_info] : tombstones_) {
+      if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
+        changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, clock_info.col_version,
+                                          clock_info.db_version, clock_info.node_id, clock_info.local_db_version));
       }
     }
 
@@ -628,8 +637,16 @@ public:
       // Retrieve local column version information
       const Record<V> *record_ptr = get_record_ptr(record_id, ignore_parent);
       const ColumnVersion *local_col_info = nullptr;
-      if (record_ptr != nullptr) {
-        auto col_it = record_ptr->column_versions.find(col_name ? *col_name : "");
+      
+      if (!col_name) {
+        // For deletions, check tombstones
+        auto tombstone_it = tombstones_.find(record_id);
+        if (tombstone_it != tombstones_.end()) {
+          local_col_info = &tombstone_it->second;
+        }
+      } else if (record_ptr != nullptr) {
+        // For column updates, check the record
+        auto col_it = record_ptr->column_versions.find(*col_name);
         if (col_it != record_ptr->column_versions.end()) {
           local_col_info = &col_it->second;
         }
@@ -656,17 +673,8 @@ public:
           // Handle deletion
           data_.erase(record_id);
 
-          // Update deletion clock info
-          CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
-          deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
-
-          // Create record with version boundaries
-          Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
-          record.lowest_local_db_version = new_local_db_version;
-          record.highest_local_db_version = new_local_db_version;
-
-          // Store deletion info in the data map
-          data_.emplace(record_id, std::move(record));
+          // Store deletion information in tombstones
+          tombstones_.insert_or_assign(record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
@@ -819,10 +827,18 @@ public:
       return data_;
     }
 
-    CrdtMap<K, Record<V>> combined_data = parent_->get_data();
+    CrdtMap<K, Record<V>> combined_data = parent_->get_data_combined();
+    
+    // Remove any records that are tombstoned in this CRDT
+    for (const auto &[record_id, _] : tombstones_) {
+      combined_data.erase(record_id);
+    }
+    
+    // Add records from this CRDT
     for (const auto &[key, record] : data_) {
       combined_data[key] = record;
     }
+    
     return combined_data;
   }
 
@@ -911,7 +927,7 @@ public:
 
   // Add this constructor to the CRDT class
   CRDT(const CRDT &other)
-      : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), parent_(other.parent_),
+      : node_id_(other.node_id_), clock_(other.clock_), data_(other.data_), tombstones_(other.tombstones_), parent_(other.parent_),
         base_version_(other.base_version_), sort_func_(other.sort_func_) {
     // Note: This creates a shallow copy of the parent pointer
   }
@@ -921,6 +937,7 @@ public:
       node_id_ = other.node_id_;
       clock_ = other.clock_;
       data_ = other.data_;
+      tombstones_ = other.tombstones_;
       parent_ = other.parent_;
       base_version_ = other.base_version_;
       sort_func_ = other.sort_func_;
@@ -930,7 +947,7 @@ public:
 
   // Move constructor
   CRDT(CRDT &&other) noexcept
-      : node_id_(other.node_id_), clock_(std::move(other.clock_)), data_(std::move(other.data_)),
+      : node_id_(other.node_id_), clock_(std::move(other.clock_)), data_(std::move(other.data_)), tombstones_(std::move(other.tombstones_)),
         parent_(std::move(other.parent_)), base_version_(other.base_version_), sort_func_(std::move(other.sort_func_)) {}
 
   // Move assignment operator
@@ -939,6 +956,7 @@ public:
       node_id_ = other.node_id_;
       clock_ = std::move(other.clock_);
       data_ = std::move(other.data_);
+      tombstones_ = std::move(other.tombstones_);
       parent_ = std::move(other.parent_);
       base_version_ = other.base_version_;
       sort_func_ = std::move(other.sort_func_);
@@ -993,16 +1011,8 @@ protected:
         // Handle deletion
         data_.erase(record_id);
 
-        // Store empty record with deletion clock info
-        CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
-        deletion_clock.emplace("", ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
-
-        // Create record with version boundaries
-        Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
-        record.lowest_local_db_version = remote_local_db_version;
-        record.highest_local_db_version = remote_local_db_version;
-
-        data_.emplace(record_id, std::move(record));
+        // Store deletion information in tombstones
+        tombstones_.insert_or_assign(record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
       } else {
         if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
@@ -1030,9 +1040,10 @@ protected:
   }
 
   constexpr bool is_record_tombstoned(const K &record_id, bool ignore_parent = false) const {
-    auto it = data_.find(record_id);
-    if (it != data_.end() && it->second.column_versions.contains("")) // the "" entry represents tombstone
+    auto it = tombstones_.find(record_id);
+    if (it != tombstones_.end()) {
       return true;
+    }
 
     if (parent_ && !ignore_parent) {
       return parent_->is_record_tombstoned(record_id);
@@ -1245,16 +1256,8 @@ protected:
     // Mark as tombstone and remove data
     data_.erase(record_id);
 
-    // Create empty record with deletion clock info
-    CrdtMap<CrdtKey, ColumnVersion> deletion_clock;
-    deletion_clock.emplace("", ColumnVersion(1, db_version, node_id_, db_version));
-
-    // Create the record with version boundaries initialized
-    Record<V> record(CrdtMap<CrdtKey, V>(), std::move(deletion_clock));
-    record.lowest_local_db_version = db_version;
-    record.highest_local_db_version = db_version;
-
-    data_.emplace(record_id, std::move(record));
+    // Store deletion information in tombstones
+    tombstones_.insert_or_assign(record_id, ColumnVersion(1, db_version, node_id_, db_version));
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
