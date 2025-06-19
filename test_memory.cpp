@@ -274,19 +274,12 @@ void test_memory_comparison() {
 
     double creation_time = measure_time_ms([&]() {
       // Create tombstones
+      std::string buf{"tomb_"};
       for (int i = 0; i < tombstone_count; i++) {
-        std::string record_id = "tomb_" + std::to_string(i);
-        crdt_test.insert_or_update(record_id, std::make_pair("temp_field", "temp_value"));
-        crdt_test.delete_record(record_id);
-      }
-
-      // Create 100 active records
-      for (int i = 0; i < 100; i++) {
-        std::string record_id = "active_" + std::to_string(i);
-        crdt_test.insert_or_update(record_id, std::make_pair("field_01", "value_01_" + std::to_string(i)),
-                                   std::make_pair("field_02", "value_02_" + std::to_string(i)),
-                                   std::make_pair("field_03", "value_03_" + std::to_string(i)),
-                                   std::make_pair("field_04", "value_04_" + std::to_string(i)));
+        buf.resize(256);
+        size_t dst = sprintf(buf.data() + 5, "%d", i);
+        buf.resize(dst + 5);
+        crdt_test.delete_record(buf);
       }
     });
 
