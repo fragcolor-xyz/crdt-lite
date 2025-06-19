@@ -41,7 +41,9 @@ std::atomic<size_t> g_peak_bytes{0};
 std::atomic<size_t> g_allocation_count{0};
 std::atomic<size_t> g_deallocation_count{0};
 std::mutex g_memory_mutex;
-std::unordered_map<uintptr_t, size_t, std::hash<uintptr_t>, std::equal_to<uintptr_t>, MallocAllocator<std::pair<const uintptr_t, size_t>>>  g_tracked_allocations;
+std::unordered_map<uintptr_t, size_t, std::hash<uintptr_t>, std::equal_to<uintptr_t>,
+                   MallocAllocator<std::pair<const uintptr_t, size_t>>>
+    g_tracked_allocations;
 
 // Memory snapshot structure
 struct MemorySnapshot {
@@ -261,7 +263,7 @@ void test_memory_comparison() {
   }
 
   // Test 2: Various tombstone counts
-  std::vector<int> tombstone_counts = {1000, 10000, 50000, 100000};
+  std::vector<int> tombstone_counts = {1000, 10000, 50000, 100000, 300000, 1200000};
 
   for (int tombstone_count : tombstone_counts) {
 
@@ -292,7 +294,7 @@ void test_memory_comparison() {
     std::cout << "Creation completed in " << creation_time << " ms" << std::endl;
     MemoryTracker::print_delta_stats("CRDT with " + std::to_string(tombstone_count) + " Tombstones + 100 Active", test_start,
                                      test_final);
-                                     
+
     // Calculate memory per tombstone
     double memory_per_tombstone_bytes = (test_final.allocated_bytes - test_start.allocated_bytes) / tombstone_count;
     std::cout << "Memory per tombstone: " << memory_per_tombstone_bytes << " bytes" << std::endl;
