@@ -36,6 +36,7 @@ public:
 };
 
 // Memory tracking global variables
+bool g_trackMemoryEnabled = false;
 std::atomic<size_t> g_allocated_bytes{0};
 std::atomic<size_t> g_peak_bytes{0};
 std::atomic<size_t> g_allocation_count{0};
@@ -186,7 +187,8 @@ void *operator new(size_t size) {
   if (!ptr) {
     std::abort(); // Cannot use exceptions, so abort on allocation failure
   }
-  MemoryTracker::record_allocation(ptr, size);
+  if (g_trackMemoryEnabled)
+    MemoryTracker::record_allocation(ptr, size);
   return ptr;
 }
 
@@ -195,7 +197,8 @@ void *operator new[](size_t size) {
   if (!ptr) {
     std::abort(); // Cannot use exceptions, so abort on allocation failure
   }
-  MemoryTracker::record_allocation(ptr, size);
+  if (g_trackMemoryEnabled)
+    MemoryTracker::record_allocation(ptr, size);
   return ptr;
 }
 
@@ -295,6 +298,8 @@ void test_memory_comparison() {
 }
 
 int main() {
+  g_trackMemoryEnabled = true;
+  
   std::cout << "=== CRDT Memory Performance Test Suite ===" << std::endl;
 
   // Additional comparison tests

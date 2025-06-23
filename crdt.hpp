@@ -219,12 +219,9 @@ template <typename K> struct CompactTombstoneEntry {
   constexpr CompactTombstoneEntry(K id, ColumnVersion inf) : first(std::move(id)), second(inf) {}
 };
 
-template <typename K> class MapTombstoneStorage {
-public:
-  using Entry = CompactTombstoneEntry<K>;
-
+template <typename K> class TombstoneStorage {
 private:
-  CrdtMap<K, ColumnVersion> entries_;
+  std::map<K, ColumnVersion> entries_;
 
 public:
   void insert_or_assign(const K &key, const ColumnVersion &info) { entries_.insert_or_assign(key, info); }
@@ -238,100 +235,6 @@ public:
   }
 
   bool erase(const K &key) { return entries_.erase(key); }
-
-  void clear() { entries_.clear(); }
-
-  auto begin() const { return entries_.begin(); }
-  auto end() const { return entries_.end(); }
-  size_t size() const { return entries_.size(); }
-};
-
-template <typename K> class CompactTombstoneStorage {
-public:
-  using Entry = CompactTombstoneEntry<K>;
-
-private:
-  CrdtVector<Entry> entries_;
-
-public:
-  void insert_or_assign(const K &key, const ColumnVersion &info) {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      it->second = info;
-    } else {
-      entries_.emplace(it, key, info);
-    }
-  }
-
-  std::optional<ColumnVersion> find(const K &key) const {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      return it->second;
-    }
-    return std::nullopt;
-  }
-
-  bool erase(const K &key) {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      entries_.erase(it);
-      return true;
-    }
-    return false;
-  }
-
-  void clear() { entries_.clear(); }
-
-  auto begin() const { return entries_.begin(); }
-  auto end() const { return entries_.end(); }
-  size_t size() const { return entries_.size(); }
-};
-
-template <typename K, typename Hash = std::hash<K>> class CompactHashTombstoneStorage {
-public:
-  using Entry = CompactTombstoneEntry<K>;
-
-private:
-  CrdtVector<Entry> entries_;
-
-public:
-  void insert_or_assign(const K &key, const ColumnVersion &info) {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      it->second = info;
-    } else {
-      entries_.emplace(it, key, info);
-    }
-  }
-
-  std::optional<ColumnVersion> find(const K &key) const {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      return it->second;
-    }
-    return std::nullopt;
-  }
-
-  bool erase(const K &key) {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), key,
-                               [](const Entry &entry, const K &key) { return entry.first < key; });
-
-    if (it != entries_.end() && it->first == key) {
-      entries_.erase(it);
-      return true;
-    }
-    return false;
-  }
 
   void clear() { entries_.clear(); }
 
@@ -406,8 +309,7 @@ protected:
 
   // Separate storage for tombstones - maps record IDs to their deletion information
   // Use compact storage for better memory efficiency with large numbers of tombstones
-  // MapTombstoneStorage<K> tombstones_;
-  CompactTombstoneStorage<K> tombstones_;
+  TombstoneStorage<K> tombstones_;
 
   // our clock won't be shared with the parent
   // we optionally allow to merge from the parent or push to the parent
