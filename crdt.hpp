@@ -27,6 +27,9 @@ template <typename K, typename V, typename Comparator = std::less<K>> using Crdt
 template <typename K, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
 using CrdtSet = std::unordered_set<K, Hash, KeyEqual>;
 
+template <typename K, typename V>
+using CrdtTombstoneMap = std::unordered_map<K, V>;
+
 template <typename T, typename Comparator> using CrdtSortedSet = std::set<T, Comparator>;
 using CrdtNodeId = uint64_t;
 #endif
@@ -221,7 +224,7 @@ template <typename K> struct CompactTombstoneEntry {
 
 template <typename K> class TombstoneStorage {
 private:
-  std::map<K, ColumnVersion> entries_;
+  CrdtTombstoneMap<K, ColumnVersion> entries_;
 
 public:
   void insert_or_assign(const K &key, const ColumnVersion &info) { entries_.insert_or_assign(key, info); }
