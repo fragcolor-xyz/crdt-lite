@@ -213,6 +213,22 @@ struct ColumnVersion {
       : col_version(c), db_version(d), node_id(n), local_db_version(ldb_ver) {}
 };
 
+/// Minimal version information for tombstones.
+/// Stores essential data: db_version for conflict resolution, node_id for sync exclusion, and local_db_version for sync.
+struct TombstoneInfo {
+  uint64_t db_version;
+  CrdtNodeId node_id;
+  uint64_t local_db_version;
+
+  constexpr TombstoneInfo(uint64_t d, CrdtNodeId n, uint64_t ldb_ver)
+      : db_version(d), node_id(n), local_db_version(ldb_ver) {}
+
+  // Helper to create a ColumnVersion for comparison with regular columns
+  constexpr ColumnVersion as_column_version() const {
+    return ColumnVersion(UINT64_MAX, db_version, node_id, local_db_version);
+  }
+};
+
 // Alternative compact storage for tombstones using sorted vector
 // More memory efficient than hash map for large numbers of tombstones
 template <typename K> struct CompactTombstoneEntry {
@@ -224,12 +240,12 @@ template <typename K> struct CompactTombstoneEntry {
 
 template <typename K> class TombstoneStorage {
 private:
-  CrdtTombstoneMap<K, ColumnVersion> entries_;
+  CrdtTombstoneMap<K, TombstoneInfo> entries_;
 
 public:
-  void insert_or_assign(const K &key, const ColumnVersion &info) { entries_.insert_or_assign(key, info); }
+  void insert_or_assign(const K &key, const TombstoneInfo &info) { entries_.insert_or_assign(key, info); }
 
-  std::optional<ColumnVersion> find(const K &key) const {
+  std::optional<TombstoneInfo> find(const K &key) const {
     auto it = entries_.find(key);
     if (it != entries_.end()) {
       return it->second;
@@ -603,10 +619,10 @@ public:
     // Get deletion changes from tombstones
     for (const auto &entry : tombstones_) {
       const auto &record_id = entry.first;
-      const auto clock_info = entry.second;
-      if (clock_info.local_db_version > last_db_version && !excluding.contains(clock_info.node_id)) {
-        changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, clock_info.col_version, clock_info.db_version,
-                                          clock_info.node_id, clock_info.local_db_version));
+      const auto &tombstone_info = entry.second;
+      if (tombstone_info.local_db_version > last_db_version && !excluding.contains(tombstone_info.node_id)) {
+        changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, 1, tombstone_info.db_version,
+                                          tombstone_info.node_id, tombstone_info.local_db_version));
       }
     }
 
@@ -681,7 +697,7 @@ public:
         // For deletions, check tombstones
         if (auto tombstone_info = tombstones_.find(record_id)) {
           static thread_local ColumnVersion temp_col_version{0, 0, {}, 0};
-          temp_col_version = *tombstone_info;
+          temp_col_version = tombstone_info->as_column_version();
           local_col_info = &temp_col_version;
         }
       } else if (record_ptr != nullptr) {
@@ -715,7 +731,7 @@ public:
 
           // Store deletion information in tombstones
           tombstones_.insert_or_assign(
-              record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, new_local_db_version));
+              record_id, TombstoneInfo(remote_db_version, remote_node_id, new_local_db_version));
 
           if constexpr (ReturnAcceptedChanges) {
             accepted_changes.emplace_back(Change<K, V>(record_id, std::nullopt, std::nullopt, remote_col_version,
@@ -931,11 +947,11 @@ public:
   ///
   /// # Returns
   ///
-  /// std::optional<ColumnVersion> containing the tombstone version information if the record is tombstoned,
+  /// std::optional<TombstoneInfo> containing the tombstone version information if the record is tombstoned,
   /// or std::nullopt if the record is not tombstoned.
   ///
   /// Complexity: O(1) average case for hash table lookup
-  constexpr std::optional<ColumnVersion> get_tombstone(const K &record_id, bool ignore_parent = false) const {
+  constexpr std::optional<TombstoneInfo> get_tombstone(const K &record_id, bool ignore_parent = false) const {
     if (auto tombstone_info = tombstones_.find(record_id)) {
       return tombstone_info;
     }
@@ -1080,7 +1096,7 @@ protected:
 
         // Store deletion information in tombstones
         tombstones_.insert_or_assign(
-            record_id, ColumnVersion(remote_col_version, remote_db_version, remote_node_id, remote_local_db_version));
+            record_id, TombstoneInfo(remote_db_version, remote_node_id, remote_local_db_version));
       } else {
         if (!is_record_tombstoned(record_id)) {
           // Handle insertion or update
@@ -1324,7 +1340,7 @@ protected:
     data_.erase(record_id);
 
     // Store deletion information in tombstones
-    tombstones_.insert_or_assign(record_id, ColumnVersion(1, db_version, node_id_, db_version));
+    tombstones_.insert_or_assign(record_id, TombstoneInfo(db_version, node_id_, db_version));
 
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
