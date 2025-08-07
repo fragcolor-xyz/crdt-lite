@@ -260,6 +260,22 @@ public:
   auto begin() const { return entries_.begin(); }
   auto end() const { return entries_.end(); }
   size_t size() const { return entries_.size(); }
+
+  // Compact tombstones older than the specified version
+  size_t compact(uint64_t min_acknowledged_version) {
+    size_t removed_count = 0;
+    
+    for (auto it = entries_.begin(); it != entries_.end();) {
+      if (it->second.db_version < min_acknowledged_version) {
+        it = entries_.erase(it);
+        ++removed_count;
+      } else {
+        ++it;
+      }
+    }
+    
+    return removed_count;
+  }
 };
 
 /// Represents a record in the CRDT.
@@ -961,6 +977,39 @@ public:
     }
 
     return std::nullopt;
+  }
+
+  /// Removes tombstones that are older than the specified version.
+  /// Only call this with a version that ALL known nodes have acknowledged.
+  /// This is safe for tombstone compaction when you know all peers have 
+  /// synchronized past this version.
+  ///
+  /// # Arguments
+  ///
+  /// * `min_acknowledged_version` - Minimum version acknowledged by ALL nodes
+  ///
+  /// # Returns
+  ///
+  /// Number of tombstones removed
+  ///
+  /// # Complexity
+  ///
+  /// O(t), where t is the number of tombstones
+  size_t compact_tombstones(uint64_t min_acknowledged_version) {
+    return tombstones_.compact(min_acknowledged_version);
+  }
+
+  /// Gets the number of tombstones currently stored.
+  ///
+  /// # Returns
+  ///
+  /// Number of tombstones
+  ///
+  /// # Complexity
+  ///
+  /// O(1)
+  size_t tombstone_count() const {
+    return tombstones_.size();
   }
 
   /// Query records matching a predicate.

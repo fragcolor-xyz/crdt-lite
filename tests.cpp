@@ -1537,6 +1537,72 @@ int main() {
     std::cout << "Test 'Query with Tombstoned Records' passed." << std::endl;
   }
 
+  // Test Case: Tombstone Compaction
+  {
+    CRDT<CrdtKey, CrdtKey> node(1);
+    
+    // Insert some records
+    CrdtKey record1 = generate_uuid();
+    CrdtKey record2 = generate_uuid();
+    CrdtKey record3 = generate_uuid();
+    
+    node.insert_or_update(record1, std::make_pair("field1", "value1"));
+    node.insert_or_update(record2, std::make_pair("field1", "value2"));
+    node.insert_or_update(record3, std::make_pair("field1", "value3"));
+    
+    // Delete records at different versions
+    node.delete_record(record1);  // db_version 4
+    node.delete_record(record2);  // db_version 5
+    node.delete_record(record3);  // db_version 6
+    
+    assert_true(node.tombstone_count() == 3, "Tombstone Compaction: Should have 3 tombstones initially");
+    
+    // Compact tombstones older than version 5
+    size_t removed = node.compact_tombstones(5);
+    
+    assert_true(removed == 1, "Tombstone Compaction: Should remove 1 tombstone");
+    assert_true(node.tombstone_count() == 2, "Tombstone Compaction: Should have 2 tombstones after compaction");
+    
+    // Verify specific tombstones
+    assert_true(!node.get_tombstone(record1).has_value(), "Tombstone Compaction: record1 tombstone should be removed");
+    assert_true(node.get_tombstone(record2).has_value(), "Tombstone Compaction: record2 tombstone should remain");
+    assert_true(node.get_tombstone(record3).has_value(), "Tombstone Compaction: record3 tombstone should remain");
+    
+    // Compact all remaining tombstones
+    size_t removed_all = node.compact_tombstones(10);
+    assert_true(removed_all == 2, "Tombstone Compaction: Should remove remaining 2 tombstones");
+    assert_true(node.tombstone_count() == 0, "Tombstone Compaction: Should have no tombstones after full compaction");
+    
+    std::cout << "Test 'Tombstone Compaction' passed." << std::endl;
+  }
+
+  // Test Case: Tombstone Compaction Safety
+  {
+    CRDT<CrdtKey, CrdtKey> node(1);
+    
+    // Insert and delete a record
+    CrdtKey record_id = generate_uuid();
+    node.insert_or_update(record_id, std::make_pair("field1", "value1"));
+    node.delete_record(record_id);  // Creates tombstone at current db_version
+    
+    uint64_t current_version = node.get_clock().current_time();
+    
+    // The tombstone was created at current_version, so:
+    // - Compacting with current_version should NOT remove it (< comparison)
+    // - Compacting with current_version + 1 should remove it
+    
+    size_t removed = node.compact_tombstones(current_version);
+    assert_true(removed == 0, "Tombstone Compaction Safety: Should not remove tombstones at exact threshold");
+    assert_true(node.tombstone_count() == 1, "Tombstone Compaction Safety: Tombstone should remain");
+    
+    // Compact with version higher than tombstone version (should remove)
+    removed = node.compact_tombstones(current_version + 1);
+    assert_true(removed == 1, "Tombstone Compaction Safety: Should remove tombstones older than threshold");
+    assert_true(node.tombstone_count() == 0, "Tombstone Compaction Safety: No tombstones should remain");
+    
+    std::cout << "Test 'Tombstone Compaction Safety' passed." << std::endl;
+  }
+
   std::cout << "All tests passed successfully!" << std::endl;
   return 0;
 }
