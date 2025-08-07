@@ -895,6 +895,11 @@ public:
   // Complexity: O(1)
   constexpr const LogicalClock &get_clock() const { return clock_; }
 
+  // Update the clock to the maximum of the current clock and the new clock
+  void update_max_clock(uint64_t new_clock) {
+    clock_.update(new_clock);
+  }
+
   constexpr CrdtMap<K, Record<V>> get_data_combined() const {
     if (!parent_) {
       return data_;
