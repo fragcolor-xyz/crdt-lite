@@ -260,7 +260,7 @@ public:
   explicit TextCRDT(CrdtNodeId node_id) : node_id_(node_id), clock_() {}
 
   /// Insert a line at the beginning of the document
-  K insert_line_at_start(const V &content) {
+  K insert_line_at_start(const V &content, std::vector<TextChange<K, V>> *changes = nullptr) {
     uint64_t db_version = clock_.tick();
     K line_id = generate_line_id();
 
@@ -274,13 +274,18 @@ public:
     LineData<K, V> line(line_id, pos, content, VersionInfo(1, db_version, node_id_, db_version));
 
     position_to_id_[pos] = line_id;
-    lines_[line_id] = std::move(line);
+    lines_[line_id] = line;
+
+    if (changes) {
+      changes->push_back(TextChange<K, V>{
+          TextChangeType::Insert, line_id, pos, content, VersionInfo(1, db_version, node_id_, db_version)});
+    }
 
     return line_id;
   }
 
   /// Insert a line at the end of the document
-  K insert_line_at_end(const V &content) {
+  K insert_line_at_end(const V &content, std::vector<TextChange<K, V>> *changes = nullptr) {
     uint64_t db_version = clock_.tick();
     K line_id = generate_line_id();
 
@@ -294,21 +299,26 @@ public:
     LineData<K, V> line(line_id, pos, content, VersionInfo(1, db_version, node_id_, db_version));
 
     position_to_id_[pos] = line_id;
-    lines_[line_id] = std::move(line);
+    lines_[line_id] = line;
+
+    if (changes) {
+      changes->push_back(TextChange<K, V>{
+          TextChangeType::Insert, line_id, pos, content, VersionInfo(1, db_version, node_id_, db_version)});
+    }
 
     return line_id;
   }
 
   /// Insert a line after a specific position
   /// If after_id is nullopt or invalid, inserts at end
-  K insert_line_after(const std::optional<K> &after_id, const V &content) {
+  K insert_line_after(const std::optional<K> &after_id, const V &content, std::vector<TextChange<K, V>> *changes = nullptr) {
     if (!after_id.has_value()) {
-      return insert_line_at_end(content);
+      return insert_line_at_end(content, changes);
     }
 
     auto it = lines_.find(*after_id);
     if (it == lines_.end()) {
-      return insert_line_at_end(content);
+      return insert_line_at_end(content, changes);
     }
 
     uint64_t db_version = clock_.tick();
@@ -332,23 +342,28 @@ public:
       new_pos = FractionalPosition::after(after_pos);
     }
 
-    LineData<K, V> line(line_id, new_pos, content, VersionInfo(db_version, node_id_, db_version));
+    LineData<K, V> line(line_id, new_pos, content, VersionInfo(1, db_version, node_id_, db_version));
 
     position_to_id_[new_pos] = line_id;
-    lines_[line_id] = std::move(line);
+    lines_[line_id] = line;
+
+    if (changes) {
+      changes->push_back(TextChange<K, V>{
+          TextChangeType::Insert, line_id, new_pos, content, VersionInfo(1, db_version, node_id_, db_version)});
+    }
 
     return line_id;
   }
 
   /// Insert a line before a specific position
-  K insert_line_before(const std::optional<K> &before_id, const V &content) {
+  K insert_line_before(const std::optional<K> &before_id, const V &content, std::vector<TextChange<K, V>> *changes = nullptr) {
     if (!before_id.has_value()) {
-      return insert_line_at_start(content);
+      return insert_line_at_start(content, changes);
     }
 
     auto it = lines_.find(*before_id);
     if (it == lines_.end()) {
-      return insert_line_at_start(content);
+      return insert_line_at_start(content, changes);
     }
 
     uint64_t db_version = clock_.tick();
@@ -368,16 +383,21 @@ public:
       new_pos = FractionalPosition::before(before_pos);
     }
 
-    LineData<K, V> line(line_id, new_pos, content, VersionInfo(db_version, node_id_, db_version));
+    LineData<K, V> line(line_id, new_pos, content, VersionInfo(1, db_version, node_id_, db_version));
 
     position_to_id_[new_pos] = line_id;
-    lines_[line_id] = std::move(line);
+    lines_[line_id] = line;
+
+    if (changes) {
+      changes->push_back(TextChange<K, V>{
+          TextChangeType::Insert, line_id, new_pos, content, VersionInfo(1, db_version, node_id_, db_version)});
+    }
 
     return line_id;
   }
 
   /// Edit a line's content (Last-Write-Wins by default)
-  bool edit_line(const K &line_id, const V &new_content) {
+  bool edit_line(const K &line_id, const V &new_content, std::vector<TextChange<K, V>> *changes = nullptr) {
     auto it = lines_.find(line_id);
     if (it == lines_.end() || is_tombstoned(line_id)) {
       return false;
@@ -396,24 +416,38 @@ public:
     // Clear conflicts on new edit (user resolved)
     it->second.conflicts.reset();
 
+    if (changes) {
+      changes->push_back(TextChange<K, V>{
+          TextChangeType::Edit, line_id, it->second.position, new_content,
+          VersionInfo(new_line_version, db_version, node_id_, db_version)});
+    }
+
     return true;
   }
 
   /// Delete a line (tombstone it)
-  bool delete_line(const K &line_id) {
+  bool delete_line(const K &line_id, std::vector<TextChange<K, V>> *changes = nullptr) {
     auto it = lines_.find(line_id);
     if (it == lines_.end() || is_tombstoned(line_id)) {
       return false;
     }
 
     uint64_t db_version = clock_.tick();
+    FractionalPosition deleted_pos = it->second.position;
 
     // Remove from position index
     position_to_id_.erase(it->second.position);
 
     // Remove from lines and add tombstone
-    tombstones_[line_id] = VersionInfo(1, db_version, node_id_, db_version);
+    VersionInfo tombstone_version(1, db_version, node_id_, db_version);
+    tombstones_[line_id] = tombstone_version;
     lines_.erase(it);
+
+    if (changes) {
+      TextChange<K, V> change(TextChangeType::Delete, line_id, tombstone_version);
+      change.position = deleted_pos;
+      changes->push_back(std::move(change));
+    }
 
     return true;
   }
@@ -441,6 +475,27 @@ public:
       auto it = lines_.find(id);
       if (it != lines_.end()) {
         result.push_back(it->second);
+      }
+    }
+
+    return result;
+  }
+
+  /// Get full document as text with line separator
+  /// Requires V to be convertible to std::string (works for std::string by default)
+  template <typename T = V, typename = std::enable_if_t<std::is_convertible_v<T, std::string>>>
+  std::string to_text(const std::string &line_separator = "\n") const {
+    std::string result;
+    bool first = true;
+
+    for (const auto &[pos, id] : position_to_id_) {
+      auto it = lines_.find(id);
+      if (it != lines_.end()) {
+        if (!first) {
+          result += line_separator;
+        }
+        result += it->second.content;
+        first = false;
       }
     }
 

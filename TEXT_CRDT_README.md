@@ -28,6 +28,8 @@ This implementation provides a **line-based text CRDT** that avoids the complexi
    - Logical clock for causality tracking
    - Tombstone-based deletion
    - Change tracking for efficient sync
+   - **Optional change streaming** - All modification operations accept optional `std::vector<TextChange>*` for live sync
+   - **Text output** - `to_text()` for full document string, `get_all_lines()` for structured access
 
 3. **LineData** (`text_crdt.hpp:156-186`)
    - UUID identity (template parameter K)
@@ -70,6 +72,8 @@ node.merge_changes_with_rule(changes, auto_merge);
 
 ## Usage Example
 
+### Basic Usage with Initial Sync
+
 ```cpp
 #include "text_crdt.hpp"
 
@@ -81,7 +85,10 @@ TextCRDT<std::string> node2(2);
 auto id1 = node1.insert_line_at_end("Hello world");
 auto id2 = node1.insert_line_at_end("Goodbye world");
 
-// Sync to node2
+// Get full text
+std::string text = node1.to_text();  // "Hello world\nGoodbye world"
+
+// Initial sync to node2 using get_changes_since()
 uint64_t last_sync = 0;
 auto changes = node1.get_changes_since(last_sync);
 node2.merge_changes(changes);
@@ -100,6 +107,30 @@ node1.merge_changes_with_rule(node2.get_changes_since(0), bww);
 // Now node1 has conflicts - both versions preserved
 ```
 
+### Live Sync with Change Streaming
+
+For real-time collaboration after initial sync, use change streaming to avoid expensive `get_changes_since()` calls:
+
+```cpp
+TextCRDT<std::string> node1(1);
+TextCRDT<std::string> node2(2);
+
+// Container to collect changes
+std::vector<TextChange<std::string, std::string>> changes;
+
+// All operations support optional change streaming
+auto id1 = node1.insert_line_at_end("Line 1", &changes);
+auto id2 = node1.insert_line_at_end("Line 2", &changes);
+node1.edit_line(id1, "Modified Line 1", &changes);
+node1.delete_line(id2, &changes);
+
+// Stream changes to node2 immediately
+node2.merge_changes(changes);
+
+// Both nodes are now in sync without calling get_changes_since()
+assert(node1.to_text() == node2.to_text());
+```
+
 ## Testing
 
 Run the comprehensive test suite:
@@ -108,15 +139,14 @@ Run the comprehensive test suite:
 clang++ -std=c++20 -O2 -o test-text-crdt test_text_crdt.cpp && ./test-text-crdt
 ```
 
-**Test Coverage** (24 tests):
-- ✅ FractionalPosition edge cases
-- ✅ Basic operations (insert, edit, delete)
-- ✅ Concurrent insertions
-- ✅ Concurrent edits (LWW and BWW)
-- ✅ Delete vs edit conflicts
-- ✅ Multi-node scenarios (3+ nodes)
-- ✅ Three-way sync convergence
-- ⚠️ Auto-merge (currently disabled due to bugs)
+**Test Coverage** (30 tests):
+- ✅ FractionalPosition edge cases (5 tests)
+- ✅ Basic operations (insert, edit, delete) (6 tests)
+- ✅ Advanced operations (interleaved insertions, consistency) (3 tests)
+- ✅ Distributed CRDT (sync, concurrent edits, conflicts) (8 tests)
+- ✅ Change streaming (insert, edit, delete, live sync) (4 tests)
+- ✅ Text output (to_text, get_all_lines) (2 tests)
+- ⚠️ Auto-merge (2 tests, non-overlapping disabled due to bugs)
 
 ## Known Issues
 

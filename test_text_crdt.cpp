@@ -714,6 +714,142 @@ bool test_text_crdt_auto_merge_overlapping() {
   return true;
 }
 
+// Test change streaming on insert operations
+bool test_text_crdt_change_streaming_insert() {
+  TextCRDT<std::string> node(1);
+  std::vector<TextChange<std::string, std::string>> changes;
+
+  auto id1 = node.insert_line_at_end("Line 1", &changes);
+  TEST_ASSERT(changes.size() == 1, "Should have 1 change after first insert");
+  TEST_ASSERT(changes[0].line_id == id1, "Change should have correct line ID");
+  TEST_ASSERT(changes[0].content == "Line 1", "Change should have correct content");
+  TEST_ASSERT(changes[0].type == TextChangeType::Insert, "Change should be Insert type");
+
+  auto id2 = node.insert_line_at_start("Line 0", &changes);
+  TEST_ASSERT(changes.size() == 2, "Should have 2 changes after second insert");
+  TEST_ASSERT(changes[1].line_id == id2, "Second change should have correct line ID");
+
+  auto id3 = node.insert_line_after(id1, "Line 1.5", &changes);
+  TEST_ASSERT(changes.size() == 3, "Should have 3 changes after third insert");
+
+  auto id4 = node.insert_line_before(id2, "Line -1", &changes);
+  TEST_ASSERT(changes.size() == 4, "Should have 4 changes after fourth insert");
+
+  return true;
+}
+
+// Test change streaming on edit operations
+bool test_text_crdt_change_streaming_edit() {
+  TextCRDT<std::string> node(1);
+  std::vector<TextChange<std::string, std::string>> changes;
+
+  auto id = node.insert_line_at_end("Original", &changes);
+  changes.clear();
+
+  node.edit_line(id, "Modified", &changes);
+  TEST_ASSERT(changes.size() == 1, "Should have 1 change after edit");
+  TEST_ASSERT(changes[0].line_id == id, "Change should have correct line ID");
+  TEST_ASSERT(changes[0].content == "Modified", "Change should have new content");
+  TEST_ASSERT(changes[0].type == TextChangeType::Edit, "Change should be Edit type");
+
+  return true;
+}
+
+// Test change streaming on delete operations
+bool test_text_crdt_change_streaming_delete() {
+  TextCRDT<std::string> node(1);
+  std::vector<TextChange<std::string, std::string>> changes;
+
+  auto id = node.insert_line_at_end("To delete", &changes);
+  changes.clear();
+
+  node.delete_line(id, &changes);
+  TEST_ASSERT(changes.size() == 1, "Should have 1 change after delete");
+  TEST_ASSERT(changes[0].line_id == id, "Change should have correct line ID");
+  TEST_ASSERT(!changes[0].content.has_value(), "Delete change should have no content");
+  TEST_ASSERT(changes[0].type == TextChangeType::Delete, "Change should be Delete type");
+
+  return true;
+}
+
+// Test change streaming for live sync scenario
+bool test_text_crdt_change_streaming_live_sync() {
+  TextCRDT<std::string> node1(1);
+  TextCRDT<std::string> node2(2);
+  std::vector<TextChange<std::string, std::string>> changes;
+
+  // Node1 does operations with change streaming
+  auto id1 = node1.insert_line_at_end("Hello", &changes);
+  auto id2 = node1.insert_line_at_end("World", &changes);
+
+  TEST_ASSERT(changes.size() == 2, "Should have 2 changes");
+
+  // Stream changes to node2
+  node2.merge_changes(changes);
+
+  TEST_ASSERT(node2.line_count() == 2, "Node2 should have 2 lines");
+  TEST_ASSERT(node2.to_text() == "Hello\nWorld", "Node2 should have correct content");
+
+  // Continue with more operations
+  changes.clear();
+  node1.edit_line(id1, "Hi", &changes);
+  node1.delete_line(id2, &changes);
+
+  TEST_ASSERT(changes.size() == 2, "Should have 2 more changes");
+
+  // Stream to node2
+  node2.merge_changes(changes);
+
+  TEST_ASSERT(node2.line_count() == 1, "Node2 should have 1 line after delete");
+  TEST_ASSERT(node2.to_text() == "Hi", "Node2 should have updated content");
+
+  return true;
+}
+
+// Test to_text() method
+bool test_text_crdt_to_text() {
+  TextCRDT<std::string> node(1);
+
+  TEST_ASSERT(node.to_text() == "", "Empty document should return empty string");
+
+  node.insert_line_at_end("Line 1");
+  TEST_ASSERT(node.to_text() == "Line 1", "Single line should have no separator");
+
+  node.insert_line_at_end("Line 2");
+  node.insert_line_at_end("Line 3");
+  TEST_ASSERT(node.to_text() == "Line 1\nLine 2\nLine 3", "Multiple lines should be separated by newline");
+
+  // Test custom separator
+  TEST_ASSERT(node.to_text(" | ") == "Line 1 | Line 2 | Line 3", "Custom separator should work");
+
+  return true;
+}
+
+// Test get_all_lines() method
+bool test_text_crdt_get_all_lines() {
+  TextCRDT<std::string> node(1);
+
+  auto lines = node.get_all_lines();
+  TEST_ASSERT(lines.size() == 0, "Empty document should return empty vector");
+
+  auto id1 = node.insert_line_at_end("First");
+  auto id2 = node.insert_line_at_end("Second");
+  auto id3 = node.insert_line_at_start("Zeroth");
+
+  lines = node.get_all_lines();
+  TEST_ASSERT(lines.size() == 3, "Should have 3 lines");
+  TEST_ASSERT(lines[0].content == "Zeroth", "First line should be 'Zeroth'");
+  TEST_ASSERT(lines[1].content == "First", "Second line should be 'First'");
+  TEST_ASSERT(lines[2].content == "Second", "Third line should be 'Second'");
+
+  // Verify order is by position, not insertion order
+  TEST_ASSERT(lines[0].id == id3, "First line ID should match");
+  TEST_ASSERT(lines[1].id == id1, "Second line ID should match");
+  TEST_ASSERT(lines[2].id == id2, "Third line ID should match");
+
+  return true;
+}
+
 int main() {
   int total = 0, passed = 0, failed = 0;
 
@@ -752,6 +888,16 @@ int main() {
   std::cout << "\n--- Auto-Merge Tests ---\n";
   RUN_TEST(test_text_crdt_auto_merge_non_overlapping);
   RUN_TEST(test_text_crdt_auto_merge_overlapping);
+
+  std::cout << "\n--- Change Streaming Tests ---\n";
+  RUN_TEST(test_text_crdt_change_streaming_insert);
+  RUN_TEST(test_text_crdt_change_streaming_edit);
+  RUN_TEST(test_text_crdt_change_streaming_delete);
+  RUN_TEST(test_text_crdt_change_streaming_live_sync);
+
+  std::cout << "\n--- Text Output Tests ---\n";
+  RUN_TEST(test_text_crdt_to_text);
+  RUN_TEST(test_text_crdt_get_all_lines);
 
   std::cout << "\n=== Summary ===\n";
   std::cout << "Total:  " << total << "\n";
