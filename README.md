@@ -38,6 +38,30 @@ Both Rust and C++ implementations share the same core algorithms and maintain AP
 - ✅ **Conflict detection** - Preserve or resolve concurrent edits
 - ✅ **Change streaming** - Real-time collaboration support
 
+### Platform Support
+
+- ✅ **`no_std` compatible** - Works in embedded systems and other `no_std` environments (requires `alloc`)
+- ✅ **Zero-cost abstractions** - Uses hashbrown (same HashMap as std) in `no_std` mode
+- ✅ **Optional std** - std is enabled by default for backwards compatibility
+
+#### Using in `no_std` Environments
+
+The Rust implementation supports `no_std` environments with allocator support:
+
+```toml
+[dependencies]
+# For no_std with basic CRDT functionality
+crdt-lite = { version = "0.2", default-features = false }
+
+# For no_std with JSON serialization
+crdt-lite = { version = "0.2", default-features = false, features = ["json"] }
+
+# For standard environments (default, uses std::collections::HashMap)
+crdt-lite = { version = "0.2", features = ["json"] }
+```
+
+**Note:** `no_std` mode uses `hashbrown::HashMap`, which is the same underlying implementation that `std::collections::HashMap` uses. Performance characteristics are identical. The `std` feature is enabled by default for backwards compatibility.
+
 ## Quick Start
 
 ### Rust Implementation

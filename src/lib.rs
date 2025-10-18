@@ -70,10 +70,29 @@
 //! the minimum version. Compacting too early may cause deleted records to reappear on
 //! nodes that haven't received the deletion yet.
 
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::Arc;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(feature = "std")]
+use std::{
+  cmp::Ordering,
+  collections::{HashMap, HashSet},
+  hash::Hash,
+  sync::Arc,
+};
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+  string::String,
+  sync::Arc,
+  vec::Vec,
+};
+#[cfg(not(feature = "std"))]
+use core::{cmp::Ordering, hash::Hash};
+#[cfg(not(feature = "std"))]
+use hashbrown::{HashMap, HashSet};
 
 /// Type alias for node IDs
 pub type NodeId = u64;
@@ -902,14 +921,14 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   where
     K: Ord,
   {
-    self.get_changes_since_excluding(last_db_version, &std::collections::HashSet::new())
+    self.get_changes_since_excluding(last_db_version, &HashSet::new())
   }
 
   /// Retrieves all changes since a given `last_db_version`, excluding specific nodes.
   pub fn get_changes_since_excluding(
     &self,
     last_db_version: u64,
-    excluding: &std::collections::HashSet<NodeId>,
+    excluding: &HashSet<NodeId>,
   ) -> Vec<Change<K, V>>
   where
     K: Ord,
@@ -1178,7 +1197,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     record_id: &K,
     ignore_parent: bool,
   ) -> &mut Record<V> {
+    #[cfg(feature = "std")]
     use std::collections::hash_map::Entry;
+    #[cfg(not(feature = "std"))]
+    use hashbrown::hash_map::Entry;
 
     match self.data.entry(record_id.clone()) {
       Entry::Occupied(e) => e.into_mut(),

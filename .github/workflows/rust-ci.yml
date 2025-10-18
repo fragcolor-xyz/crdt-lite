@@ -32,3 +32,29 @@ jobs:
 
     - name: Run Clippy
       run: cargo clippy -- -D warnings
+
+  test-no-std:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Build no_std (no features)
+      run: cargo build --no-default-features --verbose
+
+    - name: Build no_std + serde
+      run: cargo build --no-default-features --features serde --verbose
+
+    - name: Build no_std + json
+      run: cargo build --no-default-features --features json --verbose
+
+    - name: Build no_std + binary
+      run: cargo build --no-default-features --features binary --verbose
+
+    - name: Build no_std + all features
+      run: cargo build --no-default-features --features serde,json,binary --verbose
