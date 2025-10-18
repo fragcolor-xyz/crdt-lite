@@ -416,13 +416,13 @@ fn test_get_changes_since() {
   let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
-  crdt.insert_or_update(
+  let _ = crdt.insert_or_update(
     &record_id,
     vec![("field1".to_string(), "value1".to_string())],
   );
 
   // Make additional changes
-  crdt.insert_or_update(
+  let _ = crdt.insert_or_update(
     &record_id,
     vec![("field2".to_string(), "value2".to_string())],
   );
@@ -487,9 +487,9 @@ fn test_tombstone_compaction() {
   let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
-  crdt.insert_or_update(&record_id, vec![("tag".to_string(), "test".to_string())]);
+  let _ = crdt.insert_or_update(&record_id, vec![("tag".to_string(), "test".to_string())]);
 
-  crdt.delete_record(&record_id);
+  let _ = crdt.delete_record(&record_id);
 
   assert_eq!(crdt.tombstone_count(), 1);
 
@@ -514,8 +514,8 @@ fn test_inserting_after_tombstone() {
   let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
-  crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
-  crdt.delete_record(&record_id);
+  let _ = crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
+  let _ = crdt.delete_record(&record_id);
 
   // Attempting to insert into a tombstoned record should fail silently
   let changes = crdt.insert_or_update(&record_id, vec![("new".to_string(), "data".to_string())]);
@@ -528,7 +528,7 @@ fn test_multiple_deletes_same_record() {
   let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
-  crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
+  let _ = crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
 
   // First delete
   let delete1 = crdt.delete_record(&record_id);

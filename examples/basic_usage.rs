@@ -109,19 +109,19 @@ fn main() {
   println!("\n--- Change Tracking ---");
   let mut node3: CRDT<String, String> = CRDT::new(3, None);
 
-  node3.insert_or_update(
+  let _ = node3.insert_or_update(
     &"bob".to_string(),
     vec![("name".to_string(), "Bob".to_string())],
   );
 
   let version_1 = node3.get_clock().current_time();
 
-  node3.insert_or_update(
+  let _ = node3.insert_or_update(
     &"bob".to_string(),
     vec![("email".to_string(), "bob@example.com".to_string())],
   );
 
-  node3.insert_or_update(
+  let _ = node3.insert_or_update(
     &"charlie".to_string(),
     vec![("name".to_string(), "Charlie".to_string())],
   );

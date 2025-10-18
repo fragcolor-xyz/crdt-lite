@@ -767,32 +767,9 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
       };
 
       if should_accept {
-        if col_name.is_none() {
-          // Handle deletion
-          self.data.remove(&record_id);
-
-          // Store deletion information in tombstones
-          self.tombstones.insert_or_assign(
-            record_id.clone(),
-            TombstoneInfo::new(remote_db_version, remote_node_id, new_local_db_version),
-          );
-
-          accepted_changes.push(Change::new(
-            record_id,
-            None,
-            None,
-            remote_col_version,
-            remote_db_version,
-            remote_node_id,
-            new_local_db_version,
-            flags,
-          ));
-        } else {
+        if let Some(col_key) = col_name {
           // Handle insertion or update
           let record = self.get_or_create_record_unchecked(&record_id, ignore_parent);
-
-          // Extract col_name value to avoid multiple unwraps/clones
-          let col_key = col_name.as_ref().unwrap().clone();
 
           // Update field value
           if let Some(value) = remote_value.clone() {
@@ -804,7 +781,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
 
           // Update the column version info and record version boundaries
           record.column_versions.insert(
-            col_key,
+            col_key.clone(),
             ColumnVersion::new(
               remote_col_version,
               remote_db_version,
@@ -823,8 +800,28 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
 
           accepted_changes.push(Change::new(
             record_id,
-            col_name,
+            Some(col_key),
             remote_value,
+            remote_col_version,
+            remote_db_version,
+            remote_node_id,
+            new_local_db_version,
+            flags,
+          ));
+        } else {
+          // Handle deletion
+          self.data.remove(&record_id);
+
+          // Store deletion information in tombstones
+          self.tombstones.insert_or_assign(
+            record_id.clone(),
+            TombstoneInfo::new(remote_db_version, remote_node_id, new_local_db_version),
+          );
+
+          accepted_changes.push(Change::new(
+            record_id,
+            None,
+            None,
             remote_col_version,
             remote_db_version,
             remote_node_id,
@@ -848,7 +845,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// A vector of changes
   #[must_use]
-  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>> {
+  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>>
+  where
+    K: Ord,
+  {
     self.get_changes_since_excluding(last_db_version, &std::collections::HashSet::new())
   }
 
@@ -857,7 +857,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     &self,
     last_db_version: u64,
     excluding: &std::collections::HashSet<NodeId>,
-  ) -> Vec<Change<K, V>> {
+  ) -> Vec<Change<K, V>>
+  where
+    K: Ord,
+  {
     let mut changes = Vec::new();
 
     // Get changes from parent
@@ -950,8 +953,14 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
           changes[write] = changes[read].clone();
         }
       } else if changes[read].col_name.is_none() && changes[write].col_name.is_some() {
-        // Current read is a deletion, keep it and skip all previous changes for this record
-        changes[write] = changes[read].clone();
+        // Current read is a deletion, backtrack to first change for this record
+        // and replace it with the deletion, effectively discarding all field updates
+        let mut first_pos = write;
+        while first_pos > 0 && changes[first_pos - 1].record_id == changes[read].record_id {
+          first_pos -= 1;
+        }
+        changes[first_pos] = changes[read].clone();
+        write = first_pos;
       } else if changes[read].col_name != changes[write].col_name
         && changes[write].col_name.is_some()
       {
@@ -1143,7 +1152,7 @@ mod tests {
     let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
     let fields = vec![("name".to_string(), "Bob".to_string())];
-    crdt.insert_or_update(&"user2".to_string(), fields);
+    let _ = crdt.insert_or_update(&"user2".to_string(), fields);
 
     let delete_change = crdt.delete_record(&"user2".to_string());
     assert!(delete_change.is_some());
