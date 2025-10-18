@@ -38,6 +38,51 @@ Both Rust and C++ implementations share the same core algorithms and maintain AP
 - ✅ **Conflict detection** - Preserve or resolve concurrent edits
 - ✅ **Change streaming** - Real-time collaboration support
 
+### Platform Support
+
+- ✅ **`no_std` compatible** - Works in embedded systems and other `no_std` environments (requires `alloc`)
+- ✅ **Zero-cost abstractions** - Uses hashbrown (same HashMap as std) in `no_std` mode
+- ✅ **Optional std** - std is enabled by default for backwards compatibility
+
+#### Using in `no_std` Environments
+
+The Rust implementation supports `no_std` environments with allocator support.
+
+**Requirements:**
+- **`alloc` crate required**: This library needs an allocator for `Vec`, `HashMap`, `Arc`, etc.
+- **Example setup**:
+  ```rust
+  #![no_std]
+  extern crate alloc;
+
+  use crdt_lite::CRDT;
+  // ... use as normal
+  ```
+
+**Cargo.toml configuration:**
+
+```toml
+[dependencies]
+# For no_std with basic CRDT functionality (requires alloc feature)
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc"] }
+
+# For no_std with JSON serialization
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "json"] }
+
+# For no_std with binary serialization (bincode)
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "binary"] }
+
+# For standard environments (default, uses std::collections::HashMap)
+crdt-lite = { version = "0.2", features = ["json"] }
+```
+
+**Implementation Notes:**
+- `no_std` mode uses `hashbrown::HashMap`, which is the same underlying implementation that `std::collections::HashMap` uses (identical performance)
+- The `std` feature is enabled by default for backwards compatibility
+- The `alloc` feature is required for `no_std` environments and pulls in `hashbrown` only when needed
+- When using std (default), `hashbrown` is not compiled, reducing dependency bloat
+- Binary serialization uses `bincode` 2.0 which has full `no_std` support
+
 ## Quick Start
 
 ### Rust Implementation

@@ -27,8 +27,59 @@ jobs:
     - name: Run Rust Tests (Release)
       run: cargo test --release --verbose
 
+    # Test with serialization features enabled
+    - name: Test with serde feature
+      run: cargo test --features serde --verbose
+
+    - name: Test with json feature
+      run: cargo test --features json --verbose
+
+    - name: Test with binary feature
+      run: cargo test --features binary --verbose
+
+    - name: Test with all features
+      run: cargo test --all-features --verbose
+
     # - name: Check formatting
     #   run: cargo fmt --check
 
     - name: Run Clippy
       run: cargo clippy -- -D warnings
+
+  test-no-std:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Build no_std + alloc (minimal)
+      run: cargo build --no-default-features --features alloc --verbose
+
+    - name: Build no_std + alloc + serde
+      run: cargo build --no-default-features --features alloc,serde --verbose
+
+    - name: Build no_std + alloc + json
+      run: cargo build --no-default-features --features alloc,json --verbose
+
+    - name: Build no_std + alloc + binary
+      run: cargo build --no-default-features --features alloc,binary --verbose
+
+    - name: Build no_std + all features
+      run: cargo build --no-default-features --features alloc,serde,json,binary --verbose
+
+    - name: Install embedded target
+      run: rustup target add thumbv7em-none-eabihf
+
+    - name: Test actual no_std compilation (embedded target + alloc)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc --verbose
+
+    - name: Test actual no_std compilation (embedded target + alloc + json)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc,json --verbose
+
+    - name: Test actual no_std compilation (embedded target + alloc + binary)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc,binary --verbose

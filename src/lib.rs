@@ -13,11 +13,22 @@
 //!
 //! ## Features
 //!
-//! This crate provides optional serialization support through feature flags:
+//! This crate provides optional features through feature flags:
 //!
+//! - `std` - Enables standard library support (enabled by default)
+//! - `alloc` - Enables allocator support for no_std environments (pulls in hashbrown for HashMap)
 //! - `serde` - Enables Serde support for all CRDT types
 //! - `json` - Enables JSON serialization (includes `serde` + `serde_json`)
 //! - `binary` - Enables binary serialization (includes `serde` + `bincode`)
+//!
+//! ### no_std Support
+//!
+//! For no_std environments, disable default features and enable the `alloc` feature:
+//!
+//! ```toml
+//! [dependencies]
+//! crdt-lite = { version = "0.2", default-features = false, features = ["alloc"] }
+//! ```
 //!
 //! ### Usage Example with Serialization
 //!
@@ -70,10 +81,33 @@
 //! the minimum version. Compacting too early may cause deleted records to reappear on
 //! nodes that haven't received the deletion yet.
 
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::Arc;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+// Ensure valid feature combination: either std or alloc must be enabled
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!("Either 'std' (default) or 'alloc' feature must be enabled. For no_std environments, use: cargo build --no-default-features --features alloc");
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(feature = "std")]
+use std::{
+  cmp::Ordering,
+  collections::{HashMap, HashSet},
+  hash::Hash,
+  sync::Arc,
+};
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+  string::String,
+  sync::Arc,
+  vec::Vec,
+};
+#[cfg(not(feature = "std"))]
+use core::{cmp::Ordering, hash::Hash};
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use hashbrown::{HashMap, HashSet};
 
 /// Type alias for node IDs
 pub type NodeId = u64;
@@ -902,14 +936,14 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   where
     K: Ord,
   {
-    self.get_changes_since_excluding(last_db_version, &std::collections::HashSet::new())
+    self.get_changes_since_excluding(last_db_version, &HashSet::new())
   }
 
   /// Retrieves all changes since a given `last_db_version`, excluding specific nodes.
   pub fn get_changes_since_excluding(
     &self,
     last_db_version: u64,
-    excluding: &std::collections::HashSet<NodeId>,
+    excluding: &HashSet<NodeId>,
   ) -> Vec<Change<K, V>>
   where
     K: Ord,
@@ -1132,12 +1166,12 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// Returns an error if serialization fails.
   #[cfg(feature = "binary")]
-  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error>
+  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError>
   where
     K: serde::Serialize,
     V: serde::Serialize,
   {
-    bincode::serialize(self)
+    bincode::serde::encode_to_vec(self, bincode::config::standard())
   }
 
   /// Deserializes a CRDT from bytes using bincode.
@@ -1149,12 +1183,13 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// Returns an error if deserialization fails.
   #[cfg(feature = "binary")]
-  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error>
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError>
   where
     K: serde::de::DeserializeOwned + Hash + Eq + Clone,
     V: serde::de::DeserializeOwned + Clone,
   {
-    bincode::deserialize(bytes)
+    let (result, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+    Ok(result)
   }
 
   // Helper methods
@@ -1178,7 +1213,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     record_id: &K,
     ignore_parent: bool,
   ) -> &mut Record<V> {
+    #[cfg(feature = "std")]
     use std::collections::hash_map::Entry;
+    #[cfg(all(not(feature = "std"), feature = "alloc"))]
+    use hashbrown::hash_map::Entry;
 
     match self.data.entry(record_id.clone()) {
       Entry::Occupied(e) => e.into_mut(),
@@ -1333,8 +1371,9 @@ mod tests {
     // Test binary serialization
     #[cfg(feature = "binary")]
     {
-      let bytes = bincode::serialize(&change).unwrap();
-      let deserialized: Change<String, String> = bincode::deserialize(&bytes).unwrap();
+      let bytes = bincode::serde::encode_to_vec(&change, bincode::config::standard()).unwrap();
+      let (deserialized, _): (Change<String, String>, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(change, deserialized);
     }
   }
@@ -1364,8 +1403,9 @@ mod tests {
     // Test binary serialization
     #[cfg(feature = "binary")]
     {
-      let bytes = bincode::serialize(&record).unwrap();
-      let deserialized: Record<String> = bincode::deserialize(&bytes).unwrap();
+      let bytes = bincode::serde::encode_to_vec(&record, bincode::config::standard()).unwrap();
+      let (deserialized, _): (Record<String>, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(record, deserialized);
     }
   }
