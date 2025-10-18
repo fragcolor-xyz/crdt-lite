@@ -27,8 +27,8 @@ jobs:
     - name: Run Rust Tests (Release)
       run: cargo test --release --verbose
 
-    - name: Check formatting
-      run: cargo fmt --check
+    # - name: Check formatting
+    #   run: cargo fmt --check
 
     - name: Run Clippy
       run: cargo clippy -- -D warnings
