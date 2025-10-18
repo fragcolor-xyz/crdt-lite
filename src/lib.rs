@@ -10,8 +10,6 @@
 //! - Custom merge rules and comparators
 //! - Change compression
 
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -395,10 +393,9 @@ pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
     tombstones: TombstoneStorage<K>,
     parent: Option<Arc<CRDT<K, V>>>,
     base_version: u64,
-    self_weak: Option<Weak<CRDT<K, V>>>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
+impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
     /// Creates a new empty CRDT.
     ///
     /// # Arguments
@@ -421,7 +418,6 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
             tombstones: TombstoneStorage::new(),
             parent,
             base_version,
-            self_weak: None,
         }
     }
 
@@ -555,19 +551,20 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
         }
 
         let mut changes = Vec::new();
+        let node_id = self.node_id; // Store node_id before mutable borrow
         let record = self.get_or_create_record_unchecked(record_id, false);
 
         for (col_name, value) in fields {
             let col_version = if let Some(col_info) = record.column_versions.get_mut(&col_name) {
                 col_info.col_version += 1;
                 col_info.db_version = db_version;
-                col_info.node_id = self.node_id;
+                col_info.node_id = node_id;
                 col_info.local_db_version = db_version;
                 col_info.col_version
             } else {
                 record.column_versions.insert(
                     col_name.clone(),
-                    ColumnVersion::new(1, db_version, self.node_id, db_version),
+                    ColumnVersion::new(1, db_version, node_id, db_version),
                 );
                 1
             };
@@ -587,7 +584,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
                 Some(value),
                 col_version,
                 db_version,
-                self.node_id,
+                node_id,
                 db_version,
                 flags,
             ));
