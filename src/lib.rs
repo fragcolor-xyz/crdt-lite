@@ -9,6 +9,49 @@
 //! - Parent-child CRDT hierarchies
 //! - Custom merge rules and comparators
 //! - Change compression
+//! - Optional serialization support via Serde
+//!
+//! ## Features
+//!
+//! This crate provides optional serialization support through feature flags:
+//!
+//! - `serde` - Enables Serde support for all CRDT types
+//! - `json` - Enables JSON serialization (includes `serde` + `serde_json`)
+//! - `binary` - Enables binary serialization (includes `serde` + `bincode`)
+//!
+//! ### Usage Example with Serialization
+//!
+//! ```toml
+//! [dependencies]
+//! crdt-lite = { version = "0.1", features = ["json", "binary"] }
+//! ```
+//!
+//! ```rust,ignore
+//! use crdt_lite::CRDT;
+//!
+//! // Create and populate a CRDT
+//! let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+//! let fields = vec![("name".to_string(), "Alice".to_string())];
+//! crdt.insert_or_update(&"user1".to_string(), fields);
+//!
+//! // Serialize to JSON (requires "json" feature)
+//! let json = crdt.to_json().unwrap();
+//!
+//! // Deserialize from JSON
+//! let restored: CRDT<String, String> = CRDT::from_json(&json).unwrap();
+//!
+//! // Serialize to binary (requires "binary" feature)
+//! let bytes = crdt.to_bytes().unwrap();
+//! let restored: CRDT<String, String> = CRDT::from_bytes(&bytes).unwrap();
+//!
+//! // Or use generic serde with any format (requires "serde" feature)
+//! let json = serde_json::to_string(&crdt).unwrap();
+//! let restored: CRDT<String, String> = serde_json::from_str(&json).unwrap();
+//! ```
+//!
+//! **Note on Parent Relationships**: Parent-child CRDT hierarchies are not serialized.
+//! After deserialization, the `parent` field will always be `None`. Applications must
+//! rebuild parent-child relationships if needed.
 //!
 //! ## Security and Resource Management
 //!
@@ -49,6 +92,7 @@ const TOMBSTONE_COL_VERSION: u64 = u64::MAX;
 /// - A deletion of a specific column (when `col_name` is `Some` and `value` is `None`)
 /// - A deletion of an entire record (when `col_name` is `None`)
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Change<K, V> {
   pub record_id: K,
   /// `None` represents tombstone of the record
@@ -94,6 +138,7 @@ impl<K, V> Change<K, V> {
 
 /// Represents version information for a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ColumnVersion {
   pub col_version: u64,
   pub db_version: u64,
@@ -118,6 +163,7 @@ impl ColumnVersion {
 /// Stores essential data: db_version for conflict resolution, node_id for sync exclusion,
 /// and local_db_version for sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TombstoneInfo {
   pub db_version: u64,
   pub node_id: NodeId,
@@ -146,6 +192,7 @@ impl TombstoneInfo {
 
 /// Represents a logical clock for maintaining causality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LogicalClock {
   time: u64,
 }
@@ -190,6 +237,7 @@ impl Default for LogicalClock {
 ///
 /// Uses a HashMap for efficient lookups and supports compaction.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TombstoneStorage<K: Hash + Eq> {
   entries: HashMap<K, TombstoneInfo>,
 }
@@ -249,6 +297,7 @@ impl<K: Hash + Eq> Default for TombstoneStorage<K> {
 
 /// Represents a record in the CRDT.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Record<V> {
   pub fields: HashMap<ColumnKey, V>,
   pub column_versions: HashMap<ColumnKey, ColumnVersion>,
@@ -421,11 +470,15 @@ impl<K: Ord, V> ChangeComparator<K, V> for DefaultChangeComparator {
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
 pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
   data: HashMap<K, Record<V>>,
   tombstones: TombstoneStorage<K>,
+  #[cfg_attr(feature = "serde", serde(skip, default))]
   parent: Option<Arc<CRDT<K, V>>>,
   #[allow(dead_code)]
   base_version: u64,
@@ -1038,6 +1091,72 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     &self.data
   }
 
+  /// Serializes the CRDT to a JSON string.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "json")]
+  pub fn to_json(&self) -> Result<String, serde_json::Error>
+  where
+    K: serde::Serialize,
+    V: serde::Serialize,
+  {
+    serde_json::to_string(self)
+  }
+
+  /// Deserializes a CRDT from a JSON string.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "json")]
+  pub fn from_json(json: &str) -> Result<Self, serde_json::Error>
+  where
+    K: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    serde_json::from_str(json)
+  }
+
+  /// Serializes the CRDT to bytes using bincode.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "binary")]
+  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error>
+  where
+    K: serde::Serialize,
+    V: serde::Serialize,
+  {
+    bincode::serialize(self)
+  }
+
+  /// Deserializes a CRDT from bytes using bincode.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "binary")]
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error>
+  where
+    K: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    bincode::deserialize(bytes)
+  }
+
   // Helper methods
 
   fn is_record_tombstoned(&self, record_id: &K, ignore_parent: bool) -> bool {
@@ -1186,5 +1305,177 @@ mod tests {
       "Node2"
     );
     assert_eq!(crdt1.get_data(), crdt2.get_data());
+  }
+
+  #[test]
+  #[cfg(feature = "serde")]
+  fn test_change_serialization() {
+    #[allow(unused_variables)]
+    let change = Change::new(
+      "record1".to_string(),
+      Some("name".to_string()),
+      Some("Alice".to_string()),
+      1,
+      10,
+      1,
+      10,
+      0,
+    );
+
+    // Test JSON serialization
+    #[cfg(feature = "json")]
+    {
+      let json = serde_json::to_string(&change).unwrap();
+      let deserialized: Change<String, String> = serde_json::from_str(&json).unwrap();
+      assert_eq!(change, deserialized);
+    }
+
+    // Test binary serialization
+    #[cfg(feature = "binary")]
+    {
+      let bytes = bincode::serialize(&change).unwrap();
+      let deserialized: Change<String, String> = bincode::deserialize(&bytes).unwrap();
+      assert_eq!(change, deserialized);
+    }
+  }
+
+  #[test]
+  #[cfg(feature = "serde")]
+  fn test_record_serialization() {
+    let mut fields = HashMap::new();
+    fields.insert("name".to_string(), "Bob".to_string());
+    fields.insert("age".to_string(), "25".to_string());
+
+    let mut column_versions = HashMap::new();
+    column_versions.insert("name".to_string(), ColumnVersion::new(1, 10, 1, 10));
+    column_versions.insert("age".to_string(), ColumnVersion::new(1, 11, 1, 11));
+
+    #[allow(unused_variables)]
+    let record = Record::from_parts(fields, column_versions);
+
+    // Test JSON serialization
+    #[cfg(feature = "json")]
+    {
+      let json = serde_json::to_string(&record).unwrap();
+      let deserialized: Record<String> = serde_json::from_str(&json).unwrap();
+      assert_eq!(record, deserialized);
+    }
+
+    // Test binary serialization
+    #[cfg(feature = "binary")]
+    {
+      let bytes = bincode::serialize(&record).unwrap();
+      let deserialized: Record<String> = bincode::deserialize(&bytes).unwrap();
+      assert_eq!(record, deserialized);
+    }
+  }
+
+  #[test]
+  #[cfg(feature = "json")]
+  fn test_crdt_json_serialization() {
+    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+
+    // Add some data
+    let fields = vec![
+      ("name".to_string(), "Alice".to_string()),
+      ("age".to_string(), "30".to_string()),
+    ];
+    let _ = crdt.insert_or_update(&"user1".to_string(), fields);
+
+    let fields2 = vec![("name".to_string(), "Bob".to_string())];
+    let _ = crdt.insert_or_update(&"user2".to_string(), fields2);
+
+    // Delete one record
+    let _ = crdt.delete_record(&"user2".to_string());
+
+    // Serialize to JSON
+    let json = crdt.to_json().unwrap();
+
+    // Deserialize
+    let deserialized: CRDT<String, String> = CRDT::from_json(&json).unwrap();
+
+    // Verify data is preserved
+    assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
+    assert_eq!(
+      crdt.get_record(&"user1".to_string()).unwrap().fields,
+      deserialized.get_record(&"user1".to_string()).unwrap().fields
+    );
+
+    // Verify tombstones are preserved
+    assert_eq!(crdt.tombstone_count(), deserialized.tombstone_count());
+    assert!(deserialized.is_tombstoned(&"user2".to_string()));
+
+    // Verify clock is preserved
+    assert_eq!(
+      crdt.get_clock().current_time(),
+      deserialized.get_clock().current_time()
+    );
+
+    // Verify parent is None after deserialization
+    let has_parent = deserialized.parent.is_some();
+    assert!(!has_parent);
+  }
+
+  #[test]
+  #[cfg(feature = "binary")]
+  fn test_crdt_binary_serialization() {
+    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+
+    // Add some data
+    let fields = vec![
+      ("name".to_string(), "Alice".to_string()),
+      ("age".to_string(), "30".to_string()),
+    ];
+    let _ = crdt.insert_or_update(&"user1".to_string(), fields);
+
+    // Serialize to bytes
+    let bytes = crdt.to_bytes().unwrap();
+
+    // Deserialize
+    let deserialized: CRDT<String, String> = CRDT::from_bytes(&bytes).unwrap();
+
+    // Verify data is preserved
+    assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
+    assert_eq!(
+      crdt.get_record(&"user1".to_string()).unwrap().fields,
+      deserialized.get_record(&"user1".to_string()).unwrap().fields
+    );
+
+    // Verify clock is preserved
+    assert_eq!(
+      crdt.get_clock().current_time(),
+      deserialized.get_clock().current_time()
+    );
+  }
+
+  #[test]
+  #[cfg(feature = "serde")]
+  fn test_parent_not_serialized() {
+    // Create a parent CRDT
+    let mut parent: CRDT<String, String> = CRDT::new(1, None);
+    let fields = vec![("parent_field".to_string(), "parent_value".to_string())];
+    let _ = parent.insert_or_update(&"parent_record".to_string(), fields);
+
+    // Create a child CRDT with parent
+    let parent_arc = Arc::new(parent);
+    let mut child = CRDT::new(2, Some(parent_arc.clone()));
+    let child_fields = vec![("child_field".to_string(), "child_value".to_string())];
+    let _ = child.insert_or_update(&"child_record".to_string(), child_fields);
+
+    // Serialize and deserialize the child
+    #[cfg(feature = "json")]
+    {
+      let json = serde_json::to_string(&child).unwrap();
+      let deserialized: CRDT<String, String> = serde_json::from_str(&json).unwrap();
+
+      // Verify parent is None
+      assert!(deserialized.parent.is_none());
+
+      // Verify child's own data is preserved
+      assert!(deserialized.get_record(&"child_record".to_string()).is_some());
+
+      // Verify parent's data is NOT in deserialized child
+      assert!(deserialized.get_record(&"parent_record".to_string()).is_none());
+    }
   }
 }
