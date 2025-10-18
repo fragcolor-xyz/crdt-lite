@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 /// Type alias for node IDs
 pub type NodeId = u64;
@@ -392,6 +392,7 @@ pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
     data: HashMap<K, Record<V>>,
     tombstones: TombstoneStorage<K>,
     parent: Option<Arc<CRDT<K, V>>>,
+    #[allow(dead_code)]
     base_version: u64,
 }
 
