@@ -1151,12 +1151,12 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// Returns an error if serialization fails.
   #[cfg(feature = "binary")]
-  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error>
+  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError>
   where
     K: serde::Serialize,
     V: serde::Serialize,
   {
-    bincode::serialize(self)
+    bincode::serde::encode_to_vec(self, bincode::config::standard())
   }
 
   /// Deserializes a CRDT from bytes using bincode.
@@ -1168,12 +1168,13 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// Returns an error if deserialization fails.
   #[cfg(feature = "binary")]
-  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error>
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError>
   where
     K: serde::de::DeserializeOwned + Hash + Eq + Clone,
     V: serde::de::DeserializeOwned + Clone,
   {
-    bincode::deserialize(bytes)
+    let (result, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+    Ok(result)
   }
 
   // Helper methods
@@ -1355,8 +1356,9 @@ mod tests {
     // Test binary serialization
     #[cfg(feature = "binary")]
     {
-      let bytes = bincode::serialize(&change).unwrap();
-      let deserialized: Change<String, String> = bincode::deserialize(&bytes).unwrap();
+      let bytes = bincode::serde::encode_to_vec(&change, bincode::config::standard()).unwrap();
+      let (deserialized, _): (Change<String, String>, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(change, deserialized);
     }
   }
@@ -1386,8 +1388,9 @@ mod tests {
     // Test binary serialization
     #[cfg(feature = "binary")]
     {
-      let bytes = bincode::serialize(&record).unwrap();
-      let deserialized: Record<String> = bincode::deserialize(&bytes).unwrap();
+      let bytes = bincode::serde::encode_to_vec(&record, bincode::config::standard()).unwrap();
+      let (deserialized, _): (Record<String>, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(record, deserialized);
     }
   }

@@ -58,3 +58,15 @@ jobs:
 
     - name: Build no_std + all features
       run: cargo build --no-default-features --features serde,json,binary --verbose
+
+    - name: Install embedded target
+      run: rustup target add thumbv7em-none-eabihf
+
+    - name: Test actual no_std compilation (embedded target - no features)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --verbose
+
+    - name: Test actual no_std compilation (embedded target + json)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features json --verbose
+
+    - name: Test actual no_std compilation (embedded target + binary)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features binary --verbose
