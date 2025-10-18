@@ -17,3 +17,7 @@ path = "src/lib.rs"
 [[test]]
 name = "integration_tests"
 path = "tests/integration_tests.rs"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
