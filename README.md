@@ -498,7 +498,6 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 ## Documentation
 
 - **`CLAUDE.md`** - Comprehensive technical documentation for developers (and Claude!)
-- **`README_RUST.md`** - Rust-specific API details and examples (being phased out)
 - See inline documentation in source files
 
 ## Future Enhancements
@@ -512,9 +511,11 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 
 ### Rust-Specific Possibilities
 - [ ] `async` support for network operations
-- [ ] `serde` integration for serialization
-- [ ] WebAssembly support
 - [ ] Optional resource limits (max records, max tombstones)
+
+### Completed
+- [x] `serde` integration for serialization (v0.2.0)
+- [x] WebAssembly support via `no_std` + `alloc` (v0.2.0)
 
 ## Testing
 
