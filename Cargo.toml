@@ -1,10 +1,16 @@
 [package]
 name = "crdt-lite"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["CRDT Contributors"]
 description = "A lightweight, column-based CRDT implementation in Rust"
 license = "MIT"
+repository = "https://github.com/sinkingsugar/crdt-lite"
+homepage = "https://github.com/sinkingsugar/crdt-lite"
+documentation = "https://docs.rs/crdt-lite"
+readme = "README.md"
+keywords = ["crdt", "distributed", "replication", "collaboration", "conflict-resolution"]
+categories = ["data-structures", "algorithms", "concurrency"]
 
 [dependencies]
 serde = { version = "1.0", optional = true, features = ["derive"] }
