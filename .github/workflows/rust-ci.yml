@@ -57,29 +57,29 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Build no_std (no features)
-      run: cargo build --no-default-features --verbose
+    - name: Build no_std + alloc (minimal)
+      run: cargo build --no-default-features --features alloc --verbose
 
-    - name: Build no_std + serde
-      run: cargo build --no-default-features --features serde --verbose
+    - name: Build no_std + alloc + serde
+      run: cargo build --no-default-features --features alloc,serde --verbose
 
-    - name: Build no_std + json
-      run: cargo build --no-default-features --features json --verbose
+    - name: Build no_std + alloc + json
+      run: cargo build --no-default-features --features alloc,json --verbose
 
-    - name: Build no_std + binary
-      run: cargo build --no-default-features --features binary --verbose
+    - name: Build no_std + alloc + binary
+      run: cargo build --no-default-features --features alloc,binary --verbose
 
     - name: Build no_std + all features
-      run: cargo build --no-default-features --features serde,json,binary --verbose
+      run: cargo build --no-default-features --features alloc,serde,json,binary --verbose
 
     - name: Install embedded target
       run: rustup target add thumbv7em-none-eabihf
 
-    - name: Test actual no_std compilation (embedded target - no features)
-      run: cargo build --target thumbv7em-none-eabihf --no-default-features --verbose
+    - name: Test actual no_std compilation (embedded target + alloc)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc --verbose
 
-    - name: Test actual no_std compilation (embedded target + json)
-      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features json --verbose
+    - name: Test actual no_std compilation (embedded target + alloc + json)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc,json --verbose
 
-    - name: Test actual no_std compilation (embedded target + binary)
-      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features binary --verbose
+    - name: Test actual no_std compilation (embedded target + alloc + binary)
+      run: cargo build --target thumbv7em-none-eabihf --no-default-features --features alloc,binary --verbose

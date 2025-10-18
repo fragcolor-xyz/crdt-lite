@@ -13,11 +13,22 @@
 //!
 //! ## Features
 //!
-//! This crate provides optional serialization support through feature flags:
+//! This crate provides optional features through feature flags:
 //!
+//! - `std` - Enables standard library support (enabled by default)
+//! - `alloc` - Enables allocator support for no_std environments (pulls in hashbrown for HashMap)
 //! - `serde` - Enables Serde support for all CRDT types
 //! - `json` - Enables JSON serialization (includes `serde` + `serde_json`)
 //! - `binary` - Enables binary serialization (includes `serde` + `bincode`)
+//!
+//! ### no_std Support
+//!
+//! For no_std environments, disable default features and enable the `alloc` feature:
+//!
+//! ```toml
+//! [dependencies]
+//! crdt-lite = { version = "0.2", default-features = false, features = ["alloc"] }
+//! ```
 //!
 //! ### Usage Example with Serialization
 //!
@@ -72,6 +83,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Ensure valid feature combination: either std or alloc must be enabled
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!("Either 'std' (default) or 'alloc' feature must be enabled. For no_std environments, use: cargo build --no-default-features --features alloc");
+
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
@@ -91,7 +106,7 @@ use alloc::{
 };
 #[cfg(not(feature = "std"))]
 use core::{cmp::Ordering, hash::Hash};
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
 use hashbrown::{HashMap, HashSet};
 
 /// Type alias for node IDs
@@ -1200,7 +1215,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ) -> &mut Record<V> {
     #[cfg(feature = "std")]
     use std::collections::hash_map::Entry;
-    #[cfg(not(feature = "std"))]
+    #[cfg(all(not(feature = "std"), feature = "alloc"))]
     use hashbrown::hash_map::Entry;
 
     match self.data.entry(record_id.clone()) {

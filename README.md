@@ -63,14 +63,14 @@ The Rust implementation supports `no_std` environments with allocator support.
 
 ```toml
 [dependencies]
-# For no_std with basic CRDT functionality
-crdt-lite = { version = "0.2", default-features = false }
+# For no_std with basic CRDT functionality (requires alloc feature)
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc"] }
 
 # For no_std with JSON serialization
-crdt-lite = { version = "0.2", default-features = false, features = ["json"] }
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "json"] }
 
 # For no_std with binary serialization (bincode)
-crdt-lite = { version = "0.2", default-features = false, features = ["binary"] }
+crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "binary"] }
 
 # For standard environments (default, uses std::collections::HashMap)
 crdt-lite = { version = "0.2", features = ["json"] }
@@ -79,6 +79,8 @@ crdt-lite = { version = "0.2", features = ["json"] }
 **Implementation Notes:**
 - `no_std` mode uses `hashbrown::HashMap`, which is the same underlying implementation that `std::collections::HashMap` uses (identical performance)
 - The `std` feature is enabled by default for backwards compatibility
+- The `alloc` feature is required for `no_std` environments and pulls in `hashbrown` only when needed
+- When using std (default), `hashbrown` is not compiled, reducing dependency bloat
 - Binary serialization uses `bincode` 2.0 which has full `no_std` support
 
 ## Quick Start
