@@ -431,7 +431,7 @@ pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
   base_version: u64,
 }
 
-impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
+impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   /// Creates a new empty CRDT.
   ///
   /// # Arguments
@@ -716,13 +716,17 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
     }
 
     for change in changes {
-      let record_id = change.record_id.clone();
-      let col_name = change.col_name.clone();
-      let remote_col_version = change.col_version;
-      let remote_db_version = change.db_version;
-      let remote_node_id = change.node_id;
-      let remote_value = change.value.clone();
-      let flags = change.flags;
+      // Move values from change to avoid unnecessary clones
+      let Change {
+        record_id,
+        col_name,
+        value: remote_value,
+        col_version: remote_col_version,
+        db_version: remote_db_version,
+        node_id: remote_node_id,
+        flags,
+        ..
+      } = change;
 
       // Always update the logical clock to maintain causal consistency
       let new_local_db_version = self.clock.update(remote_db_version);
@@ -787,11 +791,12 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
           // Handle insertion or update
           let record = self.get_or_create_record_unchecked(&record_id, ignore_parent);
 
-          let col_key = col_name.clone().unwrap();
+          // Extract col_name value to avoid multiple unwraps/clones
+          let col_key = col_name.as_ref().unwrap().clone();
 
           // Update field value
-          if let Some(ref value) = remote_value {
-            record.fields.insert(col_key.clone(), value.clone());
+          if let Some(value) = remote_value.clone() {
+            record.fields.insert(col_key.clone(), value);
           } else {
             // If remote_value is None, remove the field
             record.fields.remove(&col_key);
@@ -799,7 +804,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
 
           // Update the column version info and record version boundaries
           record.column_versions.insert(
-            col_key.clone(),
+            col_key,
             ColumnVersion::new(
               remote_col_version,
               remote_db_version,
@@ -916,6 +921,12 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// Compresses a vector of changes in-place by removing redundant changes.
   ///
   /// Changes are sorted and then compressed using a two-pointer technique.
+  ///
+  /// # Performance
+  ///
+  /// This method uses `sort_unstable_by` which provides O(n log n) average time complexity
+  /// but does not preserve the relative order of equal elements. Since the comparator
+  /// provides a total ordering, stability is not required.
   pub fn compress_changes(changes: &mut Vec<Change<K, V>>)
   where
     K: Ord,
@@ -925,8 +936,9 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
     }
 
     // Sort changes using the DefaultChangeComparator
+    // Use sort_unstable for better performance since we don't need stable sorting
     let comparator = DefaultChangeComparator;
-    changes.sort_by(|a, b| comparator.compare(a, b));
+    changes.sort_unstable_by(|a, b| comparator.compare(a, b));
 
     // Use two-pointer technique to compress in-place
     let mut write = 0;

@@ -498,3 +498,112 @@ fn test_tombstone_compaction() {
   assert_eq!(removed, 1);
   assert_eq!(crdt.tombstone_count(), 0);
 }
+
+#[test]
+fn test_empty_changes_merge() {
+  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let merge_rule = DefaultMergeRule;
+
+  // Merging empty changes should not panic
+  let accepted = crdt.merge_changes(vec![], &merge_rule);
+  assert!(accepted.is_empty());
+}
+
+#[test]
+fn test_inserting_after_tombstone() {
+  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+
+  let record_id = generate_uuid();
+  crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
+  crdt.delete_record(&record_id);
+
+  // Attempting to insert into a tombstoned record should fail silently
+  let changes = crdt.insert_or_update(&record_id, vec![("new".to_string(), "data".to_string())]);
+  assert!(changes.is_empty());
+  assert!(crdt.is_tombstoned(&record_id));
+}
+
+#[test]
+fn test_multiple_deletes_same_record() {
+  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+
+  let record_id = generate_uuid();
+  crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
+
+  // First delete
+  let delete1 = crdt.delete_record(&record_id);
+  assert!(delete1.is_some());
+
+  // Second delete should return None
+  let delete2 = crdt.delete_record(&record_id);
+  assert!(delete2.is_none());
+}
+
+#[test]
+fn test_large_version_numbers() {
+  // Create a CRDT from changes with very large version numbers
+  let record_id = generate_uuid();
+  let changes = vec![Change::new(
+    record_id.clone(),
+    Some("field".to_string()),
+    Some("initial".to_string()),
+    1,
+    u64::MAX - 100, // Very large db_version
+    1,
+    u64::MAX - 100,
+    0,
+  )];
+
+  let mut crdt: CRDT<String, String> = CRDT::from_changes(1, changes);
+
+  // This should not panic even with very large version numbers
+  let new_changes = crdt.insert_or_update(&record_id, vec![("field2".to_string(), "value".to_string())]);
+
+  assert_eq!(new_changes.len(), 1);
+  assert!(new_changes[0].db_version > u64::MAX - 100);
+}
+
+#[test]
+fn test_compress_changes_with_deletion() {
+  let record_id = "record1".to_string();
+
+  // Create changes: update field1, update field2, then delete record
+  let mut changes = vec![
+    Change::new(
+      record_id.clone(),
+      Some("field1".to_string()),
+      Some("value1".to_string()),
+      1,
+      1,
+      1,
+      1,
+      0,
+    ),
+    Change::new(
+      record_id.clone(),
+      Some("field2".to_string()),
+      Some("value2".to_string()),
+      1,
+      2,
+      1,
+      2,
+      0,
+    ),
+    Change::new(record_id.clone(), None, None, u64::MAX, 3, 1, 3, 0),
+  ];
+
+  CRDT::<String, String>::compress_changes(&mut changes);
+
+  // After compression, only the deletion should remain (it supersedes all field updates)
+  assert_eq!(changes.len(), 1);
+  assert!(changes[0].col_name.is_none());
+}
+
+#[test]
+fn test_get_changes_since_with_no_changes() {
+  let crdt: CRDT<String, String> = CRDT::new(1, None);
+
+  // Getting changes when nothing has changed should return empty vec
+  let changes = crdt.get_changes_since(0);
+  assert!(changes.is_empty());
+}

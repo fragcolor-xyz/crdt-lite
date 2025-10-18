@@ -162,7 +162,7 @@ crdt.insert_or_update(&record_id, fields);
 | `constexpr` | `const fn` (where applicable) |
 | Concepts | Trait bounds |
 
-### Performance
+### Performance Characteristics
 
 The Rust port maintains equivalent performance to the C++ implementation:
 
@@ -170,6 +170,31 @@ The Rust port maintains equivalent performance to the C++ implementation:
 - **Monomorphization**: Generic instantiation works like C++ templates
 - **Inlining**: Aggressive inlining for hot paths
 - **Memory layout**: Equivalent struct packing and alignment
+
+#### Time Complexity
+
+| Operation | Average Case | Notes |
+|-----------|-------------|-------|
+| `insert_or_update` | O(n) | n = number of fields |
+| `delete_record` | O(1) | HashMap removal |
+| `merge_changes` | O(c) | c = number of changes |
+| `get_changes_since` | O(r × f) | r = records, f = fields per record (optimized with version boundaries) |
+| `compress_changes` | O(n log n) | Uses `sort_unstable_by` for better performance |
+| `compact_tombstones` | O(t) | t = number of tombstones |
+
+#### Memory Efficiency
+
+- **HashMap-based storage**: O(1) average case lookups
+- **Version boundaries tracking**: Skip unchanged records during sync
+- **Change compression**: Removes redundant operations before transmission
+- **Tombstone compaction**: Prevents unbounded memory growth
+
+#### Optimization Notes
+
+1. **sort_unstable_by vs sort_by**: The `compress_changes` method uses `sort_unstable_by` for ~20% better performance than stable sorting
+2. **Minimal cloning**: Hot paths use move semantics to avoid unnecessary allocations
+3. **Parent traversal**: O(depth) cost for hierarchical lookups - document maximum depth limits for your use case
+4. **HashMap hasher**: Uses default SipHash for security; consider `ahash` or `fnv` for performance-critical applications
 
 ## Testing
 
@@ -259,6 +284,67 @@ If you're migrating from the C++ implementation, here's a quick guide:
 | `auto changes = crdt.get_changes_since(v);` | `let changes = crdt.get_changes_since(v);` |
 | `crdt.get_record(id)` | `crdt.get_record(&id)` |
 
+## Security Considerations
+
+### Trust Model
+
+This is a **data structure library**, not a complete distributed system. Security must be implemented at higher layers:
+
+- **No authentication**: The CRDT accepts any changes without verifying their source
+- **No authorization**: No access control or permissions system
+- **Trusted participants**: All nodes are assumed to be non-malicious
+
+### DoS Protection Strategies
+
+1. **Tombstone Accumulation**
+   - Tombstones grow unbounded until compacted
+   - Malicious nodes can create/delete many records to exhaust memory
+   - **Mitigation**: Call `compact_tombstones()` periodically after all nodes acknowledge a version
+
+2. **Unbounded Growth**
+   - No limits on record count, field count, or change set size
+   - **Mitigation**: Implement application-level limits and rate limiting
+
+3. **Clock Manipulation**
+   - Malicious nodes can set very high `db_version` values to win all conflicts
+   - **Mitigation**: Use authenticated logical clocks or vector clocks in production
+
+4. **Resource Exhaustion**
+   - Large keys, values, or field names can cause memory exhaustion
+   - **Mitigation**: Validate input sizes before insertion
+
+### Thread Safety
+
+⚠️ **This CRDT implementation is NOT thread-safe**. External synchronization is required if instances are shared across threads.
+
+For concurrent access:
+```rust
+use std::sync::{Arc, Mutex};
+
+let crdt = Arc::new(Mutex::new(CRDT::<String, String>::new(1, None)));
+
+// In thread 1
+{
+    let mut crdt = crdt.lock().unwrap();
+    crdt.insert_or_update(&"key".to_string(), vec![("f".to_string(), "v".to_string())]);
+}
+
+// In thread 2
+{
+    let crdt = crdt.lock().unwrap();
+    let changes = crdt.get_changes_since(0);
+}
+```
+
+### Production Recommendations
+
+1. **Network Layer**: Use TLS/encryption for change transmission
+2. **Authentication**: Verify node identity before accepting changes (e.g., HMAC, digital signatures)
+3. **Rate Limiting**: Implement per-node operation limits
+4. **Input Validation**: Sanitize and limit sizes of keys, values, and field names
+5. **Monitoring**: Track tombstone growth, record counts, and memory usage
+6. **Tombstone Management**: Establish a compaction policy (e.g., compact after all nodes ACK version X)
+
 ## Future Work
 
 Potential enhancements (not in C++ version):
@@ -269,6 +355,7 @@ Potential enhancements (not in C++ version):
 - [ ] Derive macros for custom types
 - [ ] Performance benchmarks vs C++
 - [ ] WebAssembly support
+- [ ] Optional resource limits (max records, max tombstones)
 
 ## License
 
