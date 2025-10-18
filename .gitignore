@@ -1,7 +1,8 @@
 /target
 .aider*
 crdt
-tests
+/tests.cpp.bin
+/crdt
 crdt.dSYM
 .DS_Store
 list-crdt*
