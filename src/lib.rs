@@ -9,6 +9,23 @@
 //! - Parent-child CRDT hierarchies
 //! - Custom merge rules and comparators
 //! - Change compression
+//!
+//! ## Security and Resource Management
+//!
+//! ### Logical Clock Overflow
+//! The logical clock uses `u64` for version numbers. While overflow is theoretically possible
+//! after 2^64 operations (extremely unlikely in practice), applications with extreme longevity
+//! should be aware of this limitation.
+//!
+//! ### DoS Protection and Tombstone Management
+//! Tombstones accumulate indefinitely unless manually compacted. To prevent memory exhaustion:
+//! - Call `compact_tombstones()` periodically after all nodes have acknowledged a version
+//! - Implement application-level rate limiting for operations
+//! - Consider setting resource limits on the number of records and tombstones
+//!
+//! **Important**: Only compact tombstones when ALL participating nodes have acknowledged
+//! the minimum version. Compacting too early may cause deleted records to reappear on
+//! nodes that haven't received the deletion yet.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -20,6 +37,10 @@ pub type NodeId = u64;
 
 /// Type alias for column keys (field names)
 pub type ColumnKey = String;
+
+/// Column version used for tombstone changes
+/// Using u64::MAX ensures tombstones are treated as having the highest possible version
+const TOMBSTONE_COL_VERSION: u64 = u64::MAX;
 
 /// Represents a single change in the CRDT.
 ///
@@ -43,8 +64,11 @@ pub struct Change<K, V> {
   pub flags: u32,
 }
 
+impl<K: Eq, V: Eq> Eq for Change<K, V> {}
+
 impl<K, V> Change<K, V> {
   /// Creates a new Change with all parameters
+  #[allow(clippy::too_many_arguments)]
   pub fn new(
     record_id: K,
     col_name: Option<ColumnKey>,
@@ -112,7 +136,7 @@ impl TombstoneInfo {
   /// Helper to create a ColumnVersion for comparison with regular columns
   pub fn as_column_version(&self) -> ColumnVersion {
     ColumnVersion::new(
-      u64::MAX,
+      TOMBSTONE_COL_VERSION,
       self.db_version,
       self.node_id,
       self.local_db_version,
@@ -197,8 +221,12 @@ impl<K: Hash + Eq> TombstoneStorage<K> {
     self.entries.iter()
   }
 
-  pub fn size(&self) -> usize {
+  pub fn len(&self) -> usize {
     self.entries.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.entries.is_empty()
   }
 
   /// Compact tombstones older than the specified version.
@@ -392,6 +420,7 @@ impl<K: Ord, V> ChangeComparator<K, V> for DefaultChangeComparator {
 /// Main CRDT structure, generic over key (K) and value (V) types.
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
+#[derive(Debug)]
 pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
@@ -483,31 +512,32 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
           record_id,
           TombstoneInfo::new(remote_db_version, remote_node_id, remote_local_db_version),
         );
-      } else if !self.is_record_tombstoned(&record_id, false) {
+      } else if let Some(col_key) = col_name {
         // Handle insertion or update
-        let record = self.get_or_create_record_unchecked(&record_id, false);
+        if !self.is_record_tombstoned(&record_id, false) {
+          let record = self.get_or_create_record_unchecked(&record_id, false);
 
-        // Insert or update the field value
-        let col_key = col_name.unwrap();
-        if let Some(value) = remote_value {
-          record.fields.insert(col_key.clone(), value);
-        }
+          // Insert or update the field value
+          if let Some(value) = remote_value {
+            record.fields.insert(col_key.clone(), value);
+          }
 
-        // Update the column version info
-        let col_ver = ColumnVersion::new(
-          remote_col_version,
-          remote_db_version,
-          remote_node_id,
-          remote_local_db_version,
-        );
-        record.column_versions.insert(col_key, col_ver);
+          // Update the column version info
+          let col_ver = ColumnVersion::new(
+            remote_col_version,
+            remote_db_version,
+            remote_node_id,
+            remote_local_db_version,
+          );
+          record.column_versions.insert(col_key, col_ver);
 
-        // Update version boundaries
-        if remote_local_db_version < record.lowest_local_db_version {
-          record.lowest_local_db_version = remote_local_db_version;
-        }
-        if remote_local_db_version > record.highest_local_db_version {
-          record.highest_local_db_version = remote_local_db_version;
+          // Update version boundaries
+          if remote_local_db_version < record.lowest_local_db_version {
+            record.lowest_local_db_version = remote_local_db_version;
+          }
+          if remote_local_db_version > record.highest_local_db_version {
+            record.highest_local_db_version = remote_local_db_version;
+          }
         }
       }
     }
@@ -523,6 +553,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// A vector of changes created by this operation
+  #[must_use = "changes should be propagated to other nodes"]
   pub fn insert_or_update<I>(&mut self, record_id: &K, fields: I) -> Vec<Change<K, V>>
   where
     I: IntoIterator<Item = (ColumnKey, V)>,
@@ -541,6 +572,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// A vector of changes created by this operation
+  #[must_use = "changes should be propagated to other nodes"]
   pub fn insert_or_update_with_flags<I>(
     &mut self,
     record_id: &K,
@@ -609,6 +641,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// An optional Change representing the deletion
+  #[must_use = "changes should be propagated to other nodes"]
   pub fn delete_record(&mut self, record_id: &K) -> Option<Change<K, V>> {
     self.delete_record_with_flags(record_id, 0)
   }
@@ -623,6 +656,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// An optional Change representing the deletion
+  #[must_use = "changes should be propagated to other nodes"]
   pub fn delete_record_with_flags(&mut self, record_id: &K, flags: u32) -> Option<Change<K, V>> {
     if self.is_record_tombstoned(record_id, false) {
       return None;
@@ -643,7 +677,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
       record_id.clone(),
       None,
       None,
-      1,
+      TOMBSTONE_COL_VERSION,
       db_version,
       self.node_id,
       db_version,
@@ -808,6 +842,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// A vector of changes
+  #[must_use]
   pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>> {
     self.get_changes_since_excluding(last_db_version, &std::collections::HashSet::new())
   }
@@ -861,7 +896,7 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
           record_id.clone(),
           None,
           None,
-          1,
+          TOMBSTONE_COL_VERSION,
           tombstone_info.db_version,
           tombstone_info.node_id,
           tombstone_info.local_db_version,
@@ -945,14 +980,31 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
 
   /// Removes tombstones older than the specified version.
   ///
-  /// Returns the number of tombstones removed.
+  /// # Safety and DoS Mitigation
+  ///
+  /// **IMPORTANT**: Only call this method when ALL participating nodes have acknowledged
+  /// the `min_acknowledged_version`. Compacting too early may cause deleted records to
+  /// reappear on nodes that haven't received the deletion yet.
+  ///
+  /// To prevent DoS via tombstone accumulation:
+  /// - Call this method periodically as part of your sync protocol
+  /// - Track which versions have been acknowledged by all nodes
+  /// - Consider implementing a tombstone limit and rejecting operations when exceeded
+  ///
+  /// # Arguments
+  ///
+  /// * `min_acknowledged_version` - Tombstones with db_version < this value will be removed
+  ///
+  /// # Returns
+  ///
+  /// The number of tombstones removed
   pub fn compact_tombstones(&mut self, min_acknowledged_version: u64) -> usize {
     self.tombstones.compact(min_acknowledged_version)
   }
 
   /// Gets the number of tombstones currently stored.
   pub fn tombstone_count(&self) -> usize {
-    self.tombstones.size()
+    self.tombstones.len()
   }
 
   /// Gets the current logical clock.
@@ -986,23 +1038,24 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
     record_id: &K,
     ignore_parent: bool,
   ) -> &mut Record<V> {
-    if !self.data.contains_key(record_id) {
-      if !ignore_parent {
-        if let Some(ref parent) = self.parent {
-          if let Some(parent_record) = parent.get_record_ptr(record_id, false) {
-            self.data.insert(record_id.clone(), parent_record.clone());
-          } else {
-            self.data.insert(record_id.clone(), Record::new());
-          }
+    use std::collections::hash_map::Entry;
+
+    match self.data.entry(record_id.clone()) {
+      Entry::Occupied(e) => e.into_mut(),
+      Entry::Vacant(e) => {
+        let record = if !ignore_parent {
+          self
+            .parent
+            .as_ref()
+            .and_then(|p| p.get_record_ptr(record_id, false))
+            .cloned()
+            .unwrap_or_else(Record::new)
         } else {
-          self.data.insert(record_id.clone(), Record::new());
-        }
-      } else {
-        self.data.insert(record_id.clone(), Record::new());
+          Record::new()
+        };
+        e.insert(record)
       }
     }
-
-    self.data.get_mut(record_id).unwrap()
   }
 
   fn get_record_ptr(&self, record_id: &K, ignore_parent: bool) -> Option<&Record<V>> {
@@ -1044,14 +1097,14 @@ mod tests {
     let info = TombstoneInfo::new(10, 1, 10);
 
     storage.insert_or_assign("key1".to_string(), info);
-    assert_eq!(storage.size(), 1);
+    assert_eq!(storage.len(), 1);
 
     assert_eq!(storage.find(&"key1".to_string()), Some(info));
     assert_eq!(storage.find(&"key2".to_string()), None);
 
     let removed = storage.compact(15);
     assert_eq!(removed, 1);
-    assert_eq!(storage.size(), 0);
+    assert_eq!(storage.len(), 0);
   }
 
   #[test]
