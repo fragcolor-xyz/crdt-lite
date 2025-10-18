@@ -1,7 +1,8 @@
 /target
 .aider*
 crdt
-tests
+/tests.cpp.bin
+/crdt
 crdt.dSYM
 .DS_Store
 list-crdt*
@@ -11,3 +12,8 @@ TestResult.xml
 .vscode/
 *.diff
 build*/
+test_auto_merge_debug
+test_auto_merge_debug.cpp
+test_diff_debug
+test_diff_debug.cpp
+test-text-crdt

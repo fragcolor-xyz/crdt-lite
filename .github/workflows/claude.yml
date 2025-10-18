@@ -64,5 +64,6 @@ jobs:
           # Optional: Add claude_args to customize behavior and configuration
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://docs.claude.com/en/docs/claude-code/cli-reference for available options
-          # claude_args: '--allowed-tools Bash(gh pr:*)'
+          claude_args: |
+            --allowedTools "Edit,Read,Write,Bash(just:*),Bash(gh issue:*),Bash(gh pr:*),Bash(gh ci:*),Bash(gh search:*),Bash(cargo:*),Bash(clang:*)"
 

@@ -1,0 +1,23 @@
+[package]
+name = "crdt-lite"
+version = "0.1.0"
+edition = "2021"
+authors = ["CRDT Contributors"]
+description = "A lightweight, column-based CRDT implementation in Rust"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lib]
+name = "crdt_lite"
+path = "src/lib.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
