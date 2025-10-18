@@ -18,8 +18,8 @@ serde_json = { version = "1.0", optional = true, default-features = false, featu
 # bincode 2.0 has proper no_std support - serde feature is needed for bincode::serde module
 bincode = { version = "2.0.1", optional = true, default-features = false, features = ["alloc", "derive", "serde"] }
 # hashbrown provides HashMap for no_std environments (it's the same implementation std uses)
-# Only needed when std is disabled
-hashbrown = { version = "0.15", optional = true }
+# Always included but only used when std is disabled
+hashbrown = { version = "0.15", features = ["serde"] }
 
 [dev-dependencies]
 serde_json = "1.0"
@@ -27,16 +27,11 @@ bincode = "2.0.1"
 
 [features]
 default = ["std"]
-std = []
-# When std is disabled, we need hashbrown for HashMap
-# When serde is enabled without std, we need hashbrown/serde
+# When std is enabled, enable std feature on serde dependencies for HashMap serialization
+std = ["serde?/std", "serde_json?/std", "bincode?/std"]
 serde = ["dep:serde"]
 json = ["serde", "dep:serde_json"]
 binary = ["serde", "dep:bincode"]
-
-# Automatically enable hashbrown when not using std
-[target.'cfg(not(feature = "std"))'.dependencies]
-hashbrown = { version = "0.15", features = ["serde"] }
 
 [lib]
 name = "crdt_lite"

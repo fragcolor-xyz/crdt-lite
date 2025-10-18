@@ -27,6 +27,19 @@ jobs:
     - name: Run Rust Tests (Release)
       run: cargo test --release --verbose
 
+    # Test with serialization features enabled
+    - name: Test with serde feature
+      run: cargo test --features serde --verbose
+
+    - name: Test with json feature
+      run: cargo test --features json --verbose
+
+    - name: Test with binary feature
+      run: cargo test --features binary --verbose
+
+    - name: Test with all features
+      run: cargo test --all-features --verbose
+
     # - name: Check formatting
     #   run: cargo fmt --check
 
