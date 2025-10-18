@@ -48,7 +48,12 @@ fn test_basic_insert_and_merge() {
     // Both nodes should resolve the conflict and have the same data
     assert_eq!(node1.get_data(), node2.get_data());
     assert_eq!(
-        node1.get_record(&record_id).unwrap().fields.get("tag").unwrap(),
+        node1
+            .get_record(&record_id)
+            .unwrap()
+            .fields
+            .get("tag")
+            .unwrap(),
         "Node2Tag"
     );
     assert_eq!(
@@ -107,7 +112,12 @@ fn test_updates_with_conflicts() {
 
     // Conflict resolved based on node_id (Node2 has higher node_id)
     assert_eq!(
-        node1.get_record(&record_id).unwrap().fields.get("tag").unwrap(),
+        node1
+            .get_record(&record_id)
+            .unwrap()
+            .fields
+            .get("tag")
+            .unwrap(),
         "Node2UpdatedTag"
     );
     assert_eq!(node1.get_data(), node2.get_data());
@@ -211,10 +221,22 @@ fn test_conflict_resolution_with_node_id() {
     node2.merge_changes(changes1.clone(), &merge_rule);
 
     // Both nodes update the 'tag' field multiple times
-    let changes_update1 = node1.insert_or_update(&record_id, vec![("tag".to_string(), "Node1Tag1".to_string())]);
-    let changes_update2 = node1.insert_or_update(&record_id, vec![("tag".to_string(), "Node1Tag2".to_string())]);
-    let changes_update3 = node2.insert_or_update(&record_id, vec![("tag".to_string(), "Node2Tag1".to_string())]);
-    let changes_update4 = node2.insert_or_update(&record_id, vec![("tag".to_string(), "Node2Tag2".to_string())]);
+    let changes_update1 = node1.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "Node1Tag1".to_string())],
+    );
+    let changes_update2 = node1.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "Node1Tag2".to_string())],
+    );
+    let changes_update3 = node2.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "Node2Tag1".to_string())],
+    );
+    let changes_update4 = node2.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "Node2Tag2".to_string())],
+    );
 
     // Merge changes
     node1.merge_changes(changes_update4, &merge_rule);
@@ -226,7 +248,12 @@ fn test_conflict_resolution_with_node_id() {
     let expected_tag = "Node2Tag2";
 
     assert_eq!(
-        node1.get_record(&record_id).unwrap().fields.get("tag").unwrap(),
+        node1
+            .get_record(&record_id)
+            .unwrap()
+            .fields
+            .get("tag")
+            .unwrap(),
         expected_tag
     );
     assert_eq!(node1.get_data(), node2.get_data());
@@ -314,12 +341,16 @@ fn test_multiple_merges() {
     node2.merge_changes(changes_init, &merge_rule);
 
     // Node2 updates the record
-    let changes_update2 =
-        node2.insert_or_update(&record_id, vec![("tag".to_string(), "UpdatedByNode2".to_string())]);
+    let changes_update2 = node2.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "UpdatedByNode2".to_string())],
+    );
 
     // Node1 updates the record
-    let changes_update1 =
-        node1.insert_or_update(&record_id, vec![("tag".to_string(), "UpdatedByNode1".to_string())]);
+    let changes_update1 = node1.insert_or_update(
+        &record_id,
+        vec![("tag".to_string(), "UpdatedByNode1".to_string())],
+    );
 
     // Merge changes
     node1.merge_changes(changes_update2, &merge_rule);
@@ -329,7 +360,12 @@ fn test_multiple_merges() {
     let expected_tag = "UpdatedByNode2";
 
     assert_eq!(
-        node1.get_record(&record_id).unwrap().fields.get("tag").unwrap(),
+        node1
+            .get_record(&record_id)
+            .unwrap()
+            .fields
+            .get("tag")
+            .unwrap(),
         expected_tag
     );
     assert_eq!(node1.get_data(), node2.get_data());
@@ -380,10 +416,7 @@ fn test_get_changes_since() {
     let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
     let record_id = generate_uuid();
-    crdt.insert_or_update(
-        &record_id,
-        vec![("field1".to_string(), "value1".to_string())],
-    );
+    crdt.insert_or_update(&record_id, vec![("field1".to_string(), "value1".to_string())]);
 
     // Make additional changes
     crdt.insert_or_update(
@@ -451,10 +484,7 @@ fn test_tombstone_compaction() {
     let mut crdt: CRDT<String, String> = CRDT::new(1, None);
 
     let record_id = generate_uuid();
-    crdt.insert_or_update(
-        &record_id,
-        vec![("tag".to_string(), "test".to_string())],
-    );
+    crdt.insert_or_update(&record_id, vec![("tag".to_string(), "test".to_string())]);
 
     crdt.delete_record(&record_id);
 

@@ -1,4 +1,4 @@
-use crdt_lite::{CRDT, DefaultMergeRule};
+use crdt_lite::{DefaultMergeRule, CRDT};
 
 fn main() {
     println!("=== CRDT Rust Port - Basic Usage Example ===\n");
@@ -85,8 +85,14 @@ fn main() {
         node2.merge_changes(vec![delete_change], &merge_rule);
     }
 
-    println!("\nIs 'alice' tombstoned on Node 1? {}", node1.is_tombstoned(&"alice".to_string()));
-    println!("Is 'alice' tombstoned on Node 2? {}", node2.is_tombstoned(&"alice".to_string()));
+    println!(
+        "\nIs 'alice' tombstoned on Node 1? {}",
+        node1.is_tombstoned(&"alice".to_string())
+    );
+    println!(
+        "Is 'alice' tombstoned on Node 2? {}",
+        node2.is_tombstoned(&"alice".to_string())
+    );
 
     // Demonstrate that tombstoned records cannot be re-inserted
     println!("\n--- Attempting to re-insert tombstoned record ---");
@@ -94,7 +100,10 @@ fn main() {
         &"alice".to_string(),
         vec![("name".to_string(), "Alice Reborn".to_string())],
     );
-    println!("Changes created: {} (tombstone prevents insertion)", reinsert_attempt.len());
+    println!(
+        "Changes created: {} (tombstone prevents insertion)",
+        reinsert_attempt.len()
+    );
 
     // Show change tracking
     println!("\n--- Change Tracking ---");
@@ -118,9 +127,16 @@ fn main() {
     );
 
     let changes_since_v1 = node3.get_changes_since(version_1);
-    println!("Changes since version {}: {}", version_1, changes_since_v1.len());
+    println!(
+        "Changes since version {}: {}",
+        version_1,
+        changes_since_v1.len()
+    );
     for change in &changes_since_v1 {
-        println!("  - {:?}: {:?} = {:?}", change.record_id, change.col_name, change.value);
+        println!(
+            "  - {:?}: {:?} = {:?}",
+            change.record_id, change.col_name, change.value
+        );
     }
 
     println!("\n=== Example Complete ===");

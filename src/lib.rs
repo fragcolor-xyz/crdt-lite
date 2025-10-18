@@ -111,7 +111,12 @@ impl TombstoneInfo {
 
     /// Helper to create a ColumnVersion for comparison with regular columns
     pub fn as_column_version(&self) -> ColumnVersion {
-        ColumnVersion::new(u64::MAX, self.db_version, self.node_id, self.local_db_version)
+        ColumnVersion::new(
+            u64::MAX,
+            self.db_version,
+            self.node_id,
+            self.local_db_version,
+        )
     }
 }
 
@@ -974,7 +979,11 @@ impl<K: Hash + Eq + Clone + Ord, V: Clone> CRDT<K, V> {
         false
     }
 
-    fn get_or_create_record_unchecked(&mut self, record_id: &K, ignore_parent: bool) -> &mut Record<V> {
+    fn get_or_create_record_unchecked(
+        &mut self,
+        record_id: &K,
+        ignore_parent: bool,
+    ) -> &mut Record<V> {
         if !self.data.contains_key(record_id) {
             if !ignore_parent {
                 if let Some(ref parent) = self.parent {
