@@ -127,10 +127,12 @@ const TOMBSTONE_COL_VERSION: u64 = u64::MAX;
 /// - A deletion of an entire record (when `col_name` is `None`)
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Change<K, V> {
+#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned, V: serde::de::DeserializeOwned")))]
+pub struct Change<K, C, V> {
   pub record_id: K,
   /// `None` represents tombstone of the record
-  pub col_name: Option<ColumnKey>,
+  pub col_name: Option<C>,
   /// `None` represents deletion of the column (not the record)
   pub value: Option<V>,
   pub col_version: u64,
@@ -142,14 +144,14 @@ pub struct Change<K, V> {
   pub flags: u32,
 }
 
-impl<K: Eq, V: Eq> Eq for Change<K, V> {}
+impl<K: Eq, C: Eq, V: Eq> Eq for Change<K, C, V> {}
 
-impl<K, V> Change<K, V> {
+impl<K, C, V> Change<K, C, V> {
   /// Creates a new Change with all parameters
   #[allow(clippy::too_many_arguments)]
   pub fn new(
     record_id: K,
-    col_name: Option<ColumnKey>,
+    col_name: Option<C>,
     value: Option<V>,
     col_version: u64,
     db_version: u64,
@@ -332,15 +334,17 @@ impl<K: Hash + Eq> Default for TombstoneStorage<K> {
 /// Represents a record in the CRDT.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Record<V> {
-  pub fields: HashMap<ColumnKey, V>,
-  pub column_versions: HashMap<ColumnKey, ColumnVersion>,
+#[cfg_attr(feature = "serde", serde(bound(serialize = "C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "C: serde::de::DeserializeOwned + Hash + Eq, V: serde::de::DeserializeOwned")))]
+pub struct Record<C, V> {
+  pub fields: HashMap<C, V>,
+  pub column_versions: HashMap<C, ColumnVersion>,
   /// Track version boundaries for efficient filtering
   pub lowest_local_db_version: u64,
   pub highest_local_db_version: u64,
 }
 
-impl<V> Record<V> {
+impl<C: Hash + Eq, V> Record<C, V> {
   pub fn new() -> Self {
     Self {
       fields: HashMap::new(),
@@ -352,8 +356,8 @@ impl<V> Record<V> {
 
   /// Creates a record from existing fields and column versions
   pub fn from_parts(
-    fields: HashMap<ColumnKey, V>,
-    column_versions: HashMap<ColumnKey, ColumnVersion>,
+    fields: HashMap<C, V>,
+    column_versions: HashMap<C, ColumnVersion>,
   ) -> Self {
     let mut lowest = u64::MAX;
     let mut highest = 0;
@@ -376,14 +380,14 @@ impl<V> Record<V> {
   }
 }
 
-impl<V: PartialEq> PartialEq for Record<V> {
+impl<C: Hash + Eq + PartialEq, V: PartialEq> PartialEq for Record<C, V> {
   fn eq(&self, other: &Self) -> bool {
     // Compare only fields, not column_versions (those will differ per node)
     self.fields == other.fields
   }
 }
 
-impl<V> Default for Record<V> {
+impl<C: Hash + Eq, V> Default for Record<C, V> {
   fn default() -> Self {
     Self::new()
   }
@@ -393,7 +397,7 @@ impl<V> Default for Record<V> {
 ///
 /// Implementations should return `true` if the remote change should be accepted,
 /// `false` otherwise.
-pub trait MergeRule<K, V> {
+pub trait MergeRule<K, C, V> {
   /// Determines whether to accept a remote change over a local one
   fn should_accept(
     &self,
@@ -406,7 +410,7 @@ pub trait MergeRule<K, V> {
   ) -> bool;
 
   /// Convenience method for Change objects
-  fn should_accept_change(&self, local: &Change<K, V>, remote: &Change<K, V>) -> bool {
+  fn should_accept_change(&self, local: &Change<K, C, V>, remote: &Change<K, C, V>) -> bool {
     self.should_accept(
       local.col_version,
       local.db_version,
@@ -427,7 +431,7 @@ pub trait MergeRule<K, V> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultMergeRule;
 
-impl<K, V> MergeRule<K, V> for DefaultMergeRule {
+impl<K, C, V> MergeRule<K, C, V> for DefaultMergeRule {
   fn should_accept(
     &self,
     local_col: u64,
@@ -450,8 +454,8 @@ impl<K, V> MergeRule<K, V> for DefaultMergeRule {
 }
 
 /// Trait for change comparators used in sorting and compression.
-pub trait ChangeComparator<K, V> {
-  fn compare(&self, a: &Change<K, V>, b: &Change<K, V>) -> Ordering;
+pub trait ChangeComparator<K, C, V> {
+  fn compare(&self, a: &Change<K, C, V>, b: &Change<K, C, V>) -> Ordering;
 }
 
 /// Default change comparator.
@@ -466,8 +470,8 @@ pub trait ChangeComparator<K, V> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultChangeComparator;
 
-impl<K: Ord, V> ChangeComparator<K, V> for DefaultChangeComparator {
-  fn compare(&self, a: &Change<K, V>, b: &Change<K, V>) -> Ordering {
+impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
+  fn compare(&self, a: &Change<K, C, V>, b: &Change<K, C, V>) -> Ordering {
     // Compare record IDs
     match a.record_id.cmp(&b.record_id) {
       Ordering::Equal => {}
@@ -500,32 +504,32 @@ impl<K: Ord, V> ChangeComparator<K, V> for DefaultChangeComparator {
   }
 }
 
-/// Main CRDT structure, generic over key (K) and value (V) types.
+/// Main CRDT structure, generic over key (K), column (C), and value (V) types.
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-pub struct CRDT<K: Hash + Eq + Clone, V: Clone> {
+#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
-  data: HashMap<K, Record<V>>,
+  data: HashMap<K, Record<C, V>>,
   tombstones: TombstoneStorage<K>,
   #[cfg_attr(feature = "serde", serde(skip, default))]
-  parent: Option<Arc<CRDT<K, V>>>,
+  parent: Option<Arc<CRDT<K, C, V>>>,
   #[allow(dead_code)]
   base_version: u64,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
+impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Creates a new empty CRDT.
   ///
   /// # Arguments
   ///
   /// * `node_id` - Unique identifier for this CRDT node
   /// * `parent` - Optional parent CRDT for hierarchical structures
-  pub fn new(node_id: NodeId, parent: Option<Arc<CRDT<K, V>>>) -> Self {
+  pub fn new(node_id: NodeId, parent: Option<Arc<CRDT<K, C, V>>>) -> Self {
     let (clock, base_version) = if let Some(ref p) = parent {
       let parent_clock = p.clock;
       let base = parent_clock.current_time();
@@ -550,7 +554,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// * `node_id` - The unique identifier for this CRDT node
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state
-  pub fn from_changes(node_id: NodeId, changes: Vec<Change<K, V>>) -> Self {
+  pub fn from_changes(node_id: NodeId, changes: Vec<Change<K, C, V>>) -> Self {
     let mut crdt = Self::new(node_id, None);
     crdt.apply_changes(changes);
     crdt
@@ -561,7 +565,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   /// # Arguments
   ///
   /// * `changes` - A list of changes to apply to reconstruct the CRDT state
-  pub fn reset(&mut self, changes: Vec<Change<K, V>>) {
+  pub fn reset(&mut self, changes: Vec<Change<K, C, V>>) {
     self.data.clear();
     self.tombstones.clear();
     self.clock = LogicalClock::new();
@@ -569,7 +573,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   }
 
   /// Applies a list of changes to reconstruct the CRDT state.
-  fn apply_changes(&mut self, changes: Vec<Change<K, V>>) {
+  fn apply_changes(&mut self, changes: Vec<Change<K, C, V>>) {
     // Determine the maximum db_version from the changes
     let max_db_version = changes
       .iter()
@@ -641,9 +645,9 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// A vector of changes created by this operation
   #[must_use = "changes should be propagated to other nodes"]
-  pub fn insert_or_update<I>(&mut self, record_id: &K, fields: I) -> Vec<Change<K, V>>
+  pub fn insert_or_update<I>(&mut self, record_id: &K, fields: I) -> Vec<Change<K, C, V>>
   where
-    I: IntoIterator<Item = (ColumnKey, V)>,
+    I: IntoIterator<Item = (C, V)>,
   {
     self.insert_or_update_with_flags(record_id, 0, fields)
   }
@@ -665,9 +669,9 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     record_id: &K,
     flags: u32,
     fields: I,
-  ) -> Vec<Change<K, V>>
+  ) -> Vec<Change<K, C, V>>
   where
-    I: IntoIterator<Item = (ColumnKey, V)>,
+    I: IntoIterator<Item = (C, V)>,
   {
     let db_version = self.clock.tick();
 
@@ -729,7 +733,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// An optional Change representing the deletion
   #[must_use = "changes should be propagated to other nodes"]
-  pub fn delete_record(&mut self, record_id: &K) -> Option<Change<K, V>> {
+  pub fn delete_record(&mut self, record_id: &K) -> Option<Change<K, C, V>> {
     self.delete_record_with_flags(record_id, 0)
   }
 
@@ -744,7 +748,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// An optional Change representing the deletion
   #[must_use = "changes should be propagated to other nodes"]
-  pub fn delete_record_with_flags(&mut self, record_id: &K, flags: u32) -> Option<Change<K, V>> {
+  pub fn delete_record_with_flags(&mut self, record_id: &K, flags: u32) -> Option<Change<K, C, V>> {
     if self.is_record_tombstoned(record_id, false) {
       return None;
     }
@@ -782,20 +786,20 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   /// # Returns
   ///
   /// Vector of accepted changes (if requested)
-  pub fn merge_changes<R: MergeRule<K, V>>(
+  pub fn merge_changes<R: MergeRule<K, C, V>>(
     &mut self,
-    changes: Vec<Change<K, V>>,
+    changes: Vec<Change<K, C, V>>,
     merge_rule: &R,
-  ) -> Vec<Change<K, V>> {
+  ) -> Vec<Change<K, C, V>> {
     self.merge_changes_impl(changes, false, merge_rule)
   }
 
-  fn merge_changes_impl<R: MergeRule<K, V>>(
+  fn merge_changes_impl<R: MergeRule<K, C, V>>(
     &mut self,
-    changes: Vec<Change<K, V>>,
+    changes: Vec<Change<K, C, V>>,
     ignore_parent: bool,
     merge_rule: &R,
-  ) -> Vec<Change<K, V>> {
+  ) -> Vec<Change<K, C, V>> {
     let mut accepted_changes = Vec::new();
 
     if changes.is_empty() {
@@ -932,9 +936,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   ///
   /// A vector of changes
   #[must_use]
-  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, V>>
+  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, C, V>>
   where
     K: Ord,
+    C: Ord,
   {
     self.get_changes_since_excluding(last_db_version, &HashSet::new())
   }
@@ -944,9 +949,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     &self,
     last_db_version: u64,
     excluding: &HashSet<NodeId>,
-  ) -> Vec<Change<K, V>>
+  ) -> Vec<Change<K, C, V>>
   where
     K: Ord,
+    C: Ord,
   {
     let mut changes = Vec::new();
 
@@ -1017,9 +1023,10 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   /// This method uses `sort_unstable_by` which provides O(n log n) average time complexity
   /// but does not preserve the relative order of equal elements. Since the comparator
   /// provides a total ordering, stability is not required.
-  pub fn compress_changes(changes: &mut Vec<Change<K, V>>)
+  pub fn compress_changes(changes: &mut Vec<Change<K, C, V>>)
   where
     K: Ord,
+    C: Ord,
   {
     if changes.is_empty() {
       return;
@@ -1064,7 +1071,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   }
 
   /// Retrieves a reference to a record if it exists.
-  pub fn get_record(&self, record_id: &K) -> Option<&Record<V>> {
+  pub fn get_record(&self, record_id: &K) -> Option<&Record<C, V>> {
     self.get_record_ptr(record_id, false)
   }
 
@@ -1121,7 +1128,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   }
 
   /// Gets a reference to the internal data map.
-  pub fn get_data(&self) -> &HashMap<K, Record<V>> {
+  pub fn get_data(&self) -> &HashMap<K, Record<C, V>> {
     &self.data
   }
 
@@ -1136,6 +1143,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   pub fn to_json(&self) -> Result<String, serde_json::Error>
   where
     K: serde::Serialize,
+    C: serde::Serialize,
     V: serde::Serialize,
   {
     serde_json::to_string(self)
@@ -1153,6 +1161,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   pub fn from_json(json: &str) -> Result<Self, serde_json::Error>
   where
     K: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
     V: serde::de::DeserializeOwned + Clone,
   {
     serde_json::from_str(json)
@@ -1169,6 +1178,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError>
   where
     K: serde::Serialize,
+    C: serde::Serialize,
     V: serde::Serialize,
   {
     bincode::serde::encode_to_vec(self, bincode::config::standard())
@@ -1186,6 +1196,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError>
   where
     K: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
     V: serde::de::DeserializeOwned + Clone,
   {
     let (result, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
@@ -1212,7 +1223,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     &mut self,
     record_id: &K,
     ignore_parent: bool,
-  ) -> &mut Record<V> {
+  ) -> &mut Record<C, V> {
     #[cfg(feature = "std")]
     use std::collections::hash_map::Entry;
     #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -1236,7 +1247,7 @@ impl<K: Hash + Eq + Clone, V: Clone> CRDT<K, V> {
     }
   }
 
-  fn get_record_ptr(&self, record_id: &K, ignore_parent: bool) -> Option<&Record<V>> {
+  fn get_record_ptr(&self, record_id: &K, ignore_parent: bool) -> Option<&Record<C, V>> {
     if let Some(record) = self.data.get(record_id) {
       return Some(record);
     }
@@ -1287,7 +1298,7 @@ mod tests {
 
   #[test]
   fn test_basic_insert() {
-    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
     let fields = vec![
       ("name".to_string(), "Alice".to_string()),
@@ -1306,7 +1317,7 @@ mod tests {
 
   #[test]
   fn test_delete_record() {
-    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
     let fields = vec![("name".to_string(), "Bob".to_string())];
     let _ = crdt.insert_or_update(&"user2".to_string(), fields);
@@ -1319,8 +1330,8 @@ mod tests {
 
   #[test]
   fn test_merge_changes() {
-    let mut crdt1: CRDT<String, String> = CRDT::new(1, None);
-    let mut crdt2: CRDT<String, String> = CRDT::new(2, None);
+    let mut crdt1: CRDT<String, String, String> = CRDT::new(1, None);
+    let mut crdt2: CRDT<String, String, String> = CRDT::new(2, None);
 
     let fields1 = vec![("tag".to_string(), "Node1".to_string())];
     let changes1 = crdt1.insert_or_update(&"record1".to_string(), fields1);
@@ -1364,7 +1375,7 @@ mod tests {
     #[cfg(feature = "json")]
     {
       let json = serde_json::to_string(&change).unwrap();
-      let deserialized: Change<String, String> = serde_json::from_str(&json).unwrap();
+      let deserialized: Change<String, String, String> = serde_json::from_str(&json).unwrap();
       assert_eq!(change, deserialized);
     }
 
@@ -1372,7 +1383,7 @@ mod tests {
     #[cfg(feature = "binary")]
     {
       let bytes = bincode::serde::encode_to_vec(&change, bincode::config::standard()).unwrap();
-      let (deserialized, _): (Change<String, String>, _) =
+      let (deserialized, _): (Change<String, String, String>, _) =
         bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(change, deserialized);
     }
@@ -1413,7 +1424,7 @@ mod tests {
   #[test]
   #[cfg(feature = "json")]
   fn test_crdt_json_serialization() {
-    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
     // Add some data
     let fields = vec![
@@ -1432,7 +1443,7 @@ mod tests {
     let json = crdt.to_json().unwrap();
 
     // Deserialize
-    let deserialized: CRDT<String, String> = CRDT::from_json(&json).unwrap();
+    let deserialized: CRDT<String, String, String> = CRDT::from_json(&json).unwrap();
 
     // Verify data is preserved
     assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
@@ -1459,7 +1470,7 @@ mod tests {
   #[test]
   #[cfg(feature = "binary")]
   fn test_crdt_binary_serialization() {
-    let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
     // Add some data
     let fields = vec![
@@ -1472,7 +1483,7 @@ mod tests {
     let bytes = crdt.to_bytes().unwrap();
 
     // Deserialize
-    let deserialized: CRDT<String, String> = CRDT::from_bytes(&bytes).unwrap();
+    let deserialized: CRDT<String, String, String> = CRDT::from_bytes(&bytes).unwrap();
 
     // Verify data is preserved
     assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
@@ -1492,7 +1503,7 @@ mod tests {
   #[cfg(feature = "serde")]
   fn test_parent_not_serialized() {
     // Create a parent CRDT
-    let mut parent: CRDT<String, String> = CRDT::new(1, None);
+    let mut parent: CRDT<String, String, String> = CRDT::new(1, None);
     let fields = vec![("parent_field".to_string(), "parent_value".to_string())];
     let _ = parent.insert_or_update(&"parent_record".to_string(), fields);
 
@@ -1506,7 +1517,7 @@ mod tests {
     #[cfg(feature = "json")]
     {
       let json = serde_json::to_string(&child).unwrap();
-      let deserialized: CRDT<String, String> = serde_json::from_str(&json).unwrap();
+      let deserialized: CRDT<String, String, String> = serde_json::from_str(&json).unwrap();
 
       // Verify parent is None
       assert!(deserialized.parent.is_none());

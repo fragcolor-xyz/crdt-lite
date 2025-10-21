@@ -4,8 +4,8 @@ fn main() {
   println!("=== CRDT Rust Port - Basic Usage Example ===\n");
 
   // Create two distributed nodes
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   println!("Created two CRDT nodes with IDs 1 and 2\n");
 
@@ -107,7 +107,7 @@ fn main() {
 
   // Show change tracking
   println!("\n--- Change Tracking ---");
-  let mut node3: CRDT<String, String> = CRDT::new(3, None);
+  let mut node3: CRDT<String, String, String> = CRDT::new(3, None);
 
   let _ = node3.insert_or_update(
     &"bob".to_string(),

@@ -9,8 +9,8 @@ fn generate_uuid() -> String {
 
 #[test]
 fn test_basic_insert_and_merge() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Node1 inserts a record
   let record_id = generate_uuid();
@@ -69,8 +69,8 @@ fn test_basic_insert_and_merge() {
 
 #[test]
 fn test_updates_with_conflicts() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Insert a shared record
   let record_id = generate_uuid();
@@ -125,8 +125,8 @@ fn test_updates_with_conflicts() {
 
 #[test]
 fn test_delete_and_merge() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Insert and sync a record
   let record_id = generate_uuid();
@@ -157,8 +157,8 @@ fn test_delete_and_merge() {
 
 #[test]
 fn test_tombstone_handling() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Insert a record and delete it on node1
   let record_id = generate_uuid();
@@ -195,8 +195,8 @@ fn test_tombstone_handling() {
 
 #[test]
 fn test_conflict_resolution_with_node_id() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Both nodes insert a record with the same id
   let record_id = generate_uuid();
@@ -261,8 +261,8 @@ fn test_conflict_resolution_with_node_id() {
 
 #[test]
 fn test_logical_clock_update() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Node1 inserts a record
   let record_id = generate_uuid();
@@ -285,8 +285,8 @@ fn test_logical_clock_update() {
 
 #[test]
 fn test_merge_without_conflicts() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Node1 inserts a record
   let record_id1 = generate_uuid();
@@ -323,8 +323,8 @@ fn test_merge_without_conflicts() {
 
 #[test]
 fn test_multiple_merges() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Node1 inserts a record
   let record_id = generate_uuid();
@@ -373,8 +373,8 @@ fn test_multiple_merges() {
 
 #[test]
 fn test_inserting_after_deletion() {
-  let mut node1: CRDT<String, String> = CRDT::new(1, None);
-  let mut node2: CRDT<String, String> = CRDT::new(2, None);
+  let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
   // Node1 inserts and deletes a record
   let record_id = generate_uuid();
@@ -413,7 +413,7 @@ fn test_inserting_after_deletion() {
 
 #[test]
 fn test_get_changes_since() {
-  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
   let _ = crdt.insert_or_update(
@@ -474,7 +474,7 @@ fn test_change_compression() {
     ),
   ];
 
-  CRDT::<String, String>::compress_changes(&mut changes);
+  CRDT::<String, String, String>::compress_changes(&mut changes);
 
   // Should only keep the most recent change
   assert_eq!(changes.len(), 1);
@@ -484,7 +484,7 @@ fn test_change_compression() {
 
 #[test]
 fn test_tombstone_compaction() {
-  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
   let _ = crdt.insert_or_update(&record_id, vec![("tag".to_string(), "test".to_string())]);
@@ -501,7 +501,7 @@ fn test_tombstone_compaction() {
 
 #[test]
 fn test_empty_changes_merge() {
-  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
   let merge_rule = DefaultMergeRule;
 
   // Merging empty changes should not panic
@@ -511,7 +511,7 @@ fn test_empty_changes_merge() {
 
 #[test]
 fn test_inserting_after_tombstone() {
-  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
   let _ = crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
@@ -525,7 +525,7 @@ fn test_inserting_after_tombstone() {
 
 #[test]
 fn test_multiple_deletes_same_record() {
-  let mut crdt: CRDT<String, String> = CRDT::new(1, None);
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
   let record_id = generate_uuid();
   let _ = crdt.insert_or_update(&record_id, vec![("field".to_string(), "value".to_string())]);
@@ -554,7 +554,7 @@ fn test_large_version_numbers() {
     0,
   )];
 
-  let mut crdt: CRDT<String, String> = CRDT::from_changes(1, changes);
+  let mut crdt: CRDT<String, String, String> = CRDT::from_changes(1, changes);
 
   // This should not panic even with very large version numbers
   let new_changes = crdt.insert_or_update(&record_id, vec![("field2".to_string(), "value".to_string())]);
@@ -592,7 +592,7 @@ fn test_compress_changes_with_deletion() {
     Change::new(record_id.clone(), None, None, u64::MAX, 3, 1, 3, 0),
   ];
 
-  CRDT::<String, String>::compress_changes(&mut changes);
+  CRDT::<String, String, String>::compress_changes(&mut changes);
 
   // After compression, only the deletion should remain (it supersedes all field updates)
   assert_eq!(changes.len(), 1);
@@ -601,9 +601,49 @@ fn test_compress_changes_with_deletion() {
 
 #[test]
 fn test_get_changes_since_with_no_changes() {
-  let crdt: CRDT<String, String> = CRDT::new(1, None);
+  let crdt: CRDT<String, String, String> = CRDT::new(1, None);
 
   // Getting changes when nothing has changed should return empty vec
   let changes = crdt.get_changes_since(0);
   assert!(changes.is_empty());
+}
+
+#[test]
+fn test_partial_field_updates() {
+  let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
+  let record_id = generate_uuid();
+
+  // Insert a record with multiple fields
+  let _ = crdt.insert_or_update(
+    &record_id,
+    vec![
+      ("name".to_string(), "Alice".to_string()),
+      ("email".to_string(), "alice@example.com".to_string()),
+      ("role".to_string(), "user".to_string()),
+      ("status".to_string(), "active".to_string()),
+    ],
+  );
+
+  // Verify all fields are present
+  let record = crdt.get_record(&record_id).unwrap();
+  assert_eq!(record.fields.get("name").unwrap(), "Alice");
+  assert_eq!(record.fields.get("email").unwrap(), "alice@example.com");
+  assert_eq!(record.fields.get("role").unwrap(), "user");
+  assert_eq!(record.fields.get("status").unwrap(), "active");
+
+  // Update ONLY the role field
+  let _ = crdt.insert_or_update(&record_id, vec![("role".to_string(), "admin".to_string())]);
+
+  // Verify that ONLY the role field changed, other fields remain unchanged
+  let record_after = crdt.get_record(&record_id).unwrap();
+  assert_eq!(record_after.fields.get("name").unwrap(), "Alice"); // Unchanged
+  assert_eq!(record_after.fields.get("email").unwrap(), "alice@example.com"); // Unchanged
+  assert_eq!(record_after.fields.get("role").unwrap(), "admin"); // Changed
+  assert_eq!(record_after.fields.get("status").unwrap(), "active"); // Unchanged
+
+  // Verify that the column version increased only for the updated field
+  let role_version = record_after.column_versions.get("role").unwrap();
+  let name_version = record_after.column_versions.get("name").unwrap();
+  assert_eq!(role_version.col_version, 2); // Incremented from 1 to 2
+  assert_eq!(name_version.col_version, 1); // Still at 1
 }

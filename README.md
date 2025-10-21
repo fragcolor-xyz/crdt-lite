@@ -64,16 +64,16 @@ The Rust implementation supports `no_std` environments with allocator support.
 ```toml
 [dependencies]
 # For no_std with basic CRDT functionality (requires alloc feature)
-crdt-lite = { version = "0.2", default-features = false, features = ["alloc"] }
+crdt-lite = { version = "0.3", default-features = false, features = ["alloc"] }
 
 # For no_std with JSON serialization
-crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "json"] }
+crdt-lite = { version = "0.3", default-features = false, features = ["alloc", "json"] }
 
 # For no_std with binary serialization (bincode)
-crdt-lite = { version = "0.2", default-features = false, features = ["alloc", "binary"] }
+crdt-lite = { version = "0.3", default-features = false, features = ["alloc", "binary"] }
 
 # For standard environments (default, uses std::collections::HashMap)
-crdt-lite = { version = "0.2", features = ["json"] }
+crdt-lite = { version = "0.3", features = ["json"] }
 ```
 
 **Implementation Notes:**
@@ -89,15 +89,15 @@ crdt-lite = { version = "0.2", features = ["json"] }
 
 ```bash
 cargo add crdt-lite  # (when published)
-# or add to Cargo.toml: crdt-lite = "0.1"
+# or add to Cargo.toml: crdt-lite = "0.3"
 ```
 
 ```rust
 use crdt_lite::{CRDT, DefaultMergeRule};
 
 // Create two CRDT nodes
-let mut node1: CRDT<String, String> = CRDT::new(1, None);
-let mut node2: CRDT<String, String> = CRDT::new(2, None);
+let mut node1: CRDT<String, String, String> = CRDT::new(1, None);
+let mut node2: CRDT<String, String, String> = CRDT::new(2, None);
 
 // Node 1: Insert data
 let changes1 = node1.insert_or_update(
@@ -203,9 +203,9 @@ Records are stored as maps of columns (field names) to values. Each column has i
 
 ```rust
 // Rust
-pub struct Record<V> {
-  pub fields: HashMap<ColumnKey, V>,
-  pub column_versions: HashMap<ColumnKey, ColumnVersion>,
+pub struct Record<C, V> {
+  pub fields: HashMap<C, V>,
+  pub column_versions: HashMap<C, ColumnVersion>,
   // Version boundaries for efficient sync
   pub lowest_local_db_version: u64,
   pub highest_local_db_version: u64,
@@ -323,7 +323,7 @@ When syncing with parent-child CRDTs or after accumulating many changes:
 
 ```rust
 // Rust
-CRDT::<String, String>::compress_changes(&mut changes);
+CRDT::<String, String, String>::compress_changes(&mut changes);
 ```
 
 ```cpp
@@ -345,7 +345,7 @@ Create temporary overlays or transaction isolation:
 // Rust
 use std::sync::Arc;
 
-let parent = Arc::new(CRDT::<String, String>::new(1, None));
+let parent = Arc::new(CRDT::<String, String, String>::new(1, None));
 let child = CRDT::new(2, Some(parent.clone()));
 
 // Child sees parent data but maintains separate modifications
@@ -369,7 +369,7 @@ auto diff = child.diff(other_crdt);
 // Rust
 struct CustomMergeRule;
 
-impl<K, V> MergeRule<K, V> for CustomMergeRule {
+impl<K, C, V> MergeRule<K, C, V> for CustomMergeRule {
     fn should_accept(
         &self,
         local_col: u64, local_db: u64, local_node: NodeId,
@@ -489,7 +489,7 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 
 | C++ | Rust |
 |-----|------|
-| `CRDT<K, V> crdt(node_id);` | `let mut crdt = CRDT::<K, V>::new(node_id, None);` |
+| `CRDT<K, V> crdt(node_id);` | `let mut crdt = CRDT::<K, C, V>::new(node_id, None);` |
 | `crdt.insert_or_update(id, changes, pair1, pair2);` | `let changes = crdt.insert_or_update(&id, vec![pair1, pair2]);` |
 | `crdt.delete_record(id, changes);` | `if let Some(change) = crdt.delete_record(&id) { ... }` |
 | `crdt.merge_changes(std::move(changes));` | `crdt.merge_changes(changes, &DefaultMergeRule);` |
