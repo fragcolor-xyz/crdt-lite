@@ -20,6 +20,7 @@
 //! - `serde` - Enables Serde support for all CRDT types
 //! - `json` - Enables JSON serialization (includes `serde` + `serde_json`)
 //! - `binary` - Enables binary serialization (includes `serde` + `bincode`)
+//! - `node-id-u128` - Uses u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 //!
 //! ### no_std Support
 //!
@@ -110,6 +111,15 @@ use core::{cmp::Ordering, hash::Hash};
 use hashbrown::{HashMap, HashSet};
 
 /// Type alias for node IDs
+///
+/// By default, NodeId is u64. Use the `node-id-u128` feature to enable u128 for UUID-based IDs:
+/// ```toml
+/// crdt-lite = { version = "0.4", features = ["node-id-u128"] }
+/// ```
+#[cfg(feature = "node-id-u128")]
+pub type NodeId = u128;
+
+#[cfg(not(feature = "node-id-u128"))]
 pub type NodeId = u64;
 
 /// Type alias for column keys (field names)

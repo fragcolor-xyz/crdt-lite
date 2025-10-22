@@ -1,6 +1,6 @@
 [package]
 name = "crdt-lite"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["CRDT Contributors"]
 description = "A lightweight, column-based CRDT implementation in Rust"
@@ -34,6 +34,8 @@ alloc = ["dep:hashbrown"]
 serde = ["dep:serde"]
 json = ["serde", "dep:serde_json"]
 binary = ["serde", "dep:bincode"]
+# Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
+node-id-u128 = []
 
 [lib]
 name = "crdt_lite"

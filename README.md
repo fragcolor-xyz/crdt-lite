@@ -83,6 +83,21 @@ crdt-lite = { version = "0.3", features = ["json"] }
 - When using std (default), `hashbrown` is not compiled, reducing dependency bloat
 - Binary serialization uses `bincode` 2.0 which has full `no_std` support
 
+### NodeId Type Configuration
+
+By default, `NodeId` is `u64`. For applications using UUID-based node identifiers, enable the `node-id-u128` feature:
+
+```toml
+[dependencies]
+crdt-lite = { version = "0.4", features = ["node-id-u128"] }
+```
+
+**Why u128?**
+- `u64` provides 2^64 (~18 quintillion) unique IDs
+- With random UUID generation, birthday paradox makes collisions likely after ~4 billion IDs
+- `u128` provides 2^128 unique IDs, eliminating collision concerns for UUID-based systems
+- C++ implementation allows customizing `CrdtNodeId` via preprocessor (see `crdt.hpp`)
+
 ## Quick Start
 
 ### Rust Implementation
