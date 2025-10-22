@@ -334,7 +334,7 @@ impl<K: Hash + Eq> Default for TombstoneStorage<K> {
 /// Represents a record in the CRDT.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "C: serde::Serialize + Hash + Eq, V: serde::Serialize")))]
 #[cfg_attr(feature = "serde", serde(bound(deserialize = "C: serde::de::DeserializeOwned + Hash + Eq, V: serde::de::DeserializeOwned")))]
 pub struct Record<C, V> {
   pub fields: HashMap<C, V>,
@@ -1407,7 +1407,7 @@ mod tests {
     #[cfg(feature = "json")]
     {
       let json = serde_json::to_string(&record).unwrap();
-      let deserialized: Record<String> = serde_json::from_str(&json).unwrap();
+      let deserialized: Record<String, String> = serde_json::from_str(&json).unwrap();
       assert_eq!(record, deserialized);
     }
 
@@ -1415,7 +1415,7 @@ mod tests {
     #[cfg(feature = "binary")]
     {
       let bytes = bincode::serde::encode_to_vec(&record, bincode::config::standard()).unwrap();
-      let (deserialized, _): (Record<String>, _) =
+      let (deserialized, _): (Record<String, String>, _) =
         bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
       assert_eq!(record, deserialized);
     }
