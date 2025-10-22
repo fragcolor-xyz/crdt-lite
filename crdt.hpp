@@ -589,6 +589,48 @@ public:
     delete_record_impl(record_id, flags, &changes);
   }
 
+  /// Deletes a specific field from a record.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `field_name` - The name of the field to delete.
+  /// * `flags` - Flags to indicate the type of change (default: 0).
+  ///
+  /// # Returns
+  ///
+  /// Returns false if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  ///
+  /// Complexity: O(1)
+  virtual bool delete_field(const K &record_id, const CrdtKey &field_name, uint32_t flags = 0) {
+    return delete_field_impl<CrdtVector<Change<K, V>>>(record_id, field_name, flags, nullptr);
+  }
+
+  /// Deletes a specific field from a record, and stores the change.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record.
+  /// * `field_name` - The name of the field to delete.
+  /// * `changes` - A reference to a container to store the change.
+  /// * `flags` - Flags to indicate the type of change (default: 0).
+  ///
+  /// # Returns
+  ///
+  /// Returns false if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  ///
+  /// Complexity: O(1)
+  template <typename ChangeContainer>
+  bool delete_field(const K &record_id, const CrdtKey &field_name, ChangeContainer &changes, uint32_t flags = 0) {
+    return delete_field_impl(record_id, field_name, flags, &changes);
+  }
+
   /// Retrieves all changes since a given `last_db_version`.
   ///
   /// # Arguments
@@ -1399,6 +1441,61 @@ protected:
     if (changes) {
       add_to_container(*changes, Change<K, V>(record_id, std::nullopt, std::nullopt, 1, db_version, node_id_, db_version, flags));
     }
+  }
+
+  /// Implementation of delete_field
+  template <typename ChangeContainer>
+  bool delete_field_impl(const K &record_id, const CrdtKey &field_name, uint32_t flags, ChangeContainer *changes) {
+    // Check if the record is tombstoned
+    if (is_record_tombstoned(record_id)) {
+      return false;
+    }
+
+    // Get the record (return false if it doesn't exist)
+    auto it = data_.find(record_id);
+    if (it == data_.end()) {
+      return false;
+    }
+
+    Record<V> &record = it->second;
+
+    // Check if the field exists
+    if (record.fields.find(field_name) == record.fields.end()) {
+      return false;
+    }
+
+    uint64_t db_version = clock_.tick();
+
+    // Get or create column version and increment it
+    uint64_t col_version;
+    auto col_it = record.column_versions.find(field_name);
+    if (col_it != record.column_versions.end()) {
+      col_version = ++col_it->second.col_version;
+      col_it->second.db_version = db_version;
+      col_it->second.node_id = node_id_;
+      col_it->second.local_db_version = db_version;
+    } else {
+      // This shouldn't happen if the field exists, but handle it gracefully
+      col_version = 1;
+      record.column_versions.emplace(field_name, ColumnVersion(col_version, db_version, node_id_, db_version));
+    }
+
+    // Update record version boundaries
+    if (db_version < record.lowest_local_db_version) {
+      record.lowest_local_db_version = db_version;
+    }
+    if (db_version > record.highest_local_db_version) {
+      record.highest_local_db_version = db_version;
+    }
+
+    // Remove the field from the record (but keep the ColumnVersion as field tombstone)
+    record.fields.erase(field_name);
+
+    if (changes) {
+      add_to_container(*changes, Change<K, V>(record_id, field_name, std::nullopt, col_version, db_version, node_id_, db_version, flags));
+    }
+
+    return true;
   }
 };
 

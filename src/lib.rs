@@ -776,6 +776,99 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     ))
   }
 
+  /// Deletes a specific field from a record.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `field_name` - The name of the field to delete
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the field deletion. Returns None if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_field(&mut self, record_id: &K, field_name: &C) -> Option<Change<K, C, V>> {
+    self.delete_field_with_flags(record_id, field_name, 0)
+  }
+
+  /// Deletes a specific field from a record with flags.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `field_name` - The name of the field to delete
+  /// * `flags` - Flags to indicate the type of change
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the field deletion. Returns None if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_field_with_flags(
+    &mut self,
+    record_id: &K,
+    field_name: &C,
+    flags: u32,
+  ) -> Option<Change<K, C, V>> {
+    // Check if the record is tombstoned
+    if self.is_record_tombstoned(record_id, false) {
+      return None;
+    }
+
+    // Get the record (return None if it doesn't exist)
+    let record = self.data.get_mut(record_id)?;
+
+    // Check if the field exists
+    if !record.fields.contains_key(field_name) {
+      return None;
+    }
+
+    let db_version = self.clock.tick();
+
+    // Get or create column version and increment it
+    let col_version = if let Some(col_info) = record.column_versions.get_mut(field_name) {
+      col_info.col_version += 1;
+      col_info.db_version = db_version;
+      col_info.node_id = self.node_id;
+      col_info.local_db_version = db_version;
+      col_info.col_version
+    } else {
+      // This shouldn't happen if the field exists, but handle it gracefully
+      record.column_versions.insert(
+        field_name.clone(),
+        ColumnVersion::new(1, db_version, self.node_id, db_version),
+      );
+      1
+    };
+
+    // Update record version boundaries
+    if db_version < record.lowest_local_db_version {
+      record.lowest_local_db_version = db_version;
+    }
+    if db_version > record.highest_local_db_version {
+      record.highest_local_db_version = db_version;
+    }
+
+    // Remove the field from the record (but keep the ColumnVersion as field tombstone)
+    record.fields.remove(field_name);
+
+    Some(Change::new(
+      record_id.clone(),
+      Some(field_name.clone()),
+      None, // None value indicates field deletion
+      col_version,
+      db_version,
+      self.node_id,
+      db_version,
+      flags,
+    ))
+  }
+
   /// Merges incoming changes into the CRDT.
   ///
   /// # Arguments

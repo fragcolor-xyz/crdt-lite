@@ -273,6 +273,31 @@ Tombstones accumulate indefinitely unless compacted. To prevent memory exhaustio
 2. Call `compact_tombstones(min_acknowledged_version)` periodically
 3. **Never compact early** - deleted records will reappear on nodes that haven't seen the deletion yet (zombie records)
 
+### Field Deletion
+
+Individual fields can be deleted from records without removing the entire record:
+
+```rust
+// Rust
+let change = crdt.delete_field(&record_id, &"email".to_string());
+```
+
+```cpp
+// C++
+std::vector<Change<std::string, std::string>> changes;
+bool success = crdt.delete_field(record_id, "email", changes);
+```
+
+**How it works:**
+- Field is removed from `record.fields` map
+- `ColumnVersion` entry **remains** in `record.column_versions` (acts as implicit field tombstone)
+- Syncs to other nodes as `Change { col_name: Some("field"), value: None }`
+- Field deletion is versioned like field updates (increments `col_version`)
+
+**Distinguished from null values:**
+- **Field deletion**: Field removed entirely from map
+- **Null value**: Field exists in map with null/None value (if V = Option<T>)
+
 ### Fractional Positioning (Text CRDT)
 
 Each line in the text CRDT has a position defined by a path of integers:
@@ -465,7 +490,8 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 | Operation | Average Case | Notes |
 |-----------|-------------|-------|
 | `insert_or_update` | O(n) | n = number of fields |
-| `delete_record` | O(1) | HashMap removal |
+| `delete_field` | O(1) | HashMap field removal |
+| `delete_record` | O(1) | HashMap record removal |
 | `merge_changes` | O(c) | c = number of changes |
 | `get_changes_since` | O(r × f) | r = records, f = fields (optimized with version bounds) |
 | `compress_changes` | O(n log n) | Uses unstable sort for better performance |
@@ -491,6 +517,7 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 |-----|------|
 | `CRDT<K, V> crdt(node_id);` | `let mut crdt = CRDT::<K, C, V>::new(node_id, None);` |
 | `crdt.insert_or_update(id, changes, pair1, pair2);` | `let changes = crdt.insert_or_update(&id, vec![pair1, pair2]);` |
+| `crdt.delete_field(id, "field", changes);` | `if let Some(change) = crdt.delete_field(&id, &"field") { ... }` |
 | `crdt.delete_record(id, changes);` | `if let Some(change) = crdt.delete_record(&id) { ... }` |
 | `crdt.merge_changes(std::move(changes));` | `crdt.merge_changes(changes, &DefaultMergeRule);` |
 | `auto* record = crdt.get_record(id);` | `let record = crdt.get_record(&id);` |

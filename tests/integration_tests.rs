@@ -647,3 +647,65 @@ fn test_partial_field_updates() {
   assert_eq!(role_version.col_version, 2); // Incremented from 1 to 2
   assert_eq!(name_version.col_version, 1); // Still at 1
 }
+
+#[test]
+fn test_delete_field() {
+  let mut crdt1: CRDT<String, String, String> = CRDT::new(1, None);
+  let mut crdt2: CRDT<String, String, String> = CRDT::new(2, None);
+  let record_id = generate_uuid();
+
+  // Insert a record with multiple fields
+  let _ = crdt1.insert_or_update(
+    &record_id,
+    vec![
+      ("name".to_string(), "Alice".to_string()),
+      ("email".to_string(), "alice@example.com".to_string()),
+      ("role".to_string(), "admin".to_string()),
+      ("status".to_string(), "active".to_string()),
+    ],
+  );
+
+  // Verify all fields exist
+  let record = crdt1.get_record(&record_id).unwrap();
+  assert_eq!(record.fields.len(), 4);
+  assert!(record.fields.contains_key("email"));
+
+  // Delete the email field
+  let delete_change = crdt1.delete_field(&record_id, &"email".to_string());
+  assert!(delete_change.is_some());
+
+  let change = delete_change.unwrap();
+  assert_eq!(change.col_name, Some("email".to_string()));
+  assert_eq!(change.value, None); // None indicates field deletion
+  assert_eq!(change.col_version, 2); // Incremented from 1
+
+  // Verify field is deleted but ColumnVersion remains (field tombstone)
+  let record_after = crdt1.get_record(&record_id).unwrap();
+  assert_eq!(record_after.fields.len(), 3); // One less field
+  assert!(!record_after.fields.contains_key("email")); // Field is gone
+  assert!(record_after.column_versions.contains_key("email")); // But version info remains
+
+  // Sync full state from crdt1 to crdt2 (including the deletion)
+  let merge_rule = DefaultMergeRule;
+  let all_changes = crdt1.get_changes_since(0);
+  crdt2.merge_changes(all_changes, &merge_rule);
+
+  let record2 = crdt2.get_record(&record_id).unwrap();
+  assert_eq!(record2.fields.len(), 3);
+  assert!(!record2.fields.contains_key("email"));
+  assert!(record2.column_versions.contains_key("email"));
+
+  // Test edge cases
+  // 1. Deleting non-existent field
+  let result = crdt1.delete_field(&record_id, &"nonexistent".to_string());
+  assert!(result.is_none());
+
+  // 2. Deleting field from non-existent record
+  let result = crdt1.delete_field(&"nonexistent_record".to_string(), &"name".to_string());
+  assert!(result.is_none());
+
+  // 3. Deleting field from tombstoned record
+  let _ = crdt1.delete_record(&record_id);
+  let result = crdt1.delete_field(&record_id, &"name".to_string());
+  assert!(result.is_none());
+}
