@@ -92,6 +92,13 @@ public:
   /// Creates shadow tables to track column versions and tombstones.
   /// After calling this, all modifications to the table will be tracked.
   ///
+  /// Schema migration support:
+  /// - ✅ ALTER TABLE ADD COLUMN - fully automatic
+  /// - ❌ DROP TABLE - blocked (would leave orphaned shadow tables)
+  /// - ⚠️  RENAME TABLE - not blocked but WILL BREAK shadow tables
+  /// - ⚠️  DROP COLUMN - not supported (causes metadata corruption)
+  /// - ⚠️  RENAME COLUMN - not supported (causes metadata corruption)
+  ///
   /// @param table_name Name of the table to enable CRDT for
   /// @throws CRDTSQLiteException if table doesn't exist or shadow tables cannot be created
   void enable_crdt(const std::string &table_name);

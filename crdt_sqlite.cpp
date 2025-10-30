@@ -983,25 +983,25 @@ int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
   if (action_code == SQLITE_ALTER_TABLE) {
     if (arg2 && self->tracked_table_ == arg2) {
       // Flag that schema needs refresh after this statement executes
-      // This handles ADD COLUMN automatically
+      // SUPPORTED: ALTER TABLE ADD COLUMN (auto-refreshes schema)
+      // NOT SUPPORTED: DROP COLUMN, RENAME COLUMN (will cause metadata corruption)
+      // User must only use ADD COLUMN on CRDT-tracked tables
       self->pending_schema_refresh_ = true;
     }
-    return SQLITE_OK;  // Allow ALTER TABLE (ADD COLUMN supported)
+    return SQLITE_OK;  // Allow ALTER TABLE (but only ADD COLUMN is safe)
   }
 
-  // SQLITE_UPDATE on sqlite_master for RENAME TABLE detection
-  // When renaming table, SQLite updates sqlite_master.tbl_name
-  // ONLY block if it's the tracked table being renamed
-  if (action_code == SQLITE_UPDATE && arg1 && std::string(arg1) == "sqlite_master") {
-    if (arg2 && std::string(arg2) == "tbl_name") {
-      // Check if this is renaming our tracked table
-      // arg3 is the trigger/view name (null for table), arg4 is unused
-      // We can't easily determine which table is being renamed here
-      // So we'll be conservative and only block if we detect issues
-      // For now, allow but add a note that RENAME is not supported
-      return SQLITE_OK;  // Allow for now (RENAME not well supported anyway)
+  // Block DROP TABLE on tracked table
+  if (action_code == SQLITE_DROP_TABLE) {
+    if (arg2 && self->tracked_table_ == arg2) {
+      // Would leave orphaned shadow tables - block it
+      return SQLITE_DENY;  // BLOCKED: DROP TABLE not supported
     }
   }
+
+  // Note: RENAME TABLE cannot be easily blocked at authorizer level because
+  // we can't determine which table is being renamed. Users must not rename
+  // CRDT-tracked tables (would break shadow table references).
 
   return SQLITE_OK;  // Allow by default
 }
