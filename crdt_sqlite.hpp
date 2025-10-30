@@ -174,20 +174,18 @@ public:
 private:
   sqlite3 *db_;
   std::string tracked_table_;
-  CRDT<CrdtRecordId, std::string> crdt_;
+  CrdtNodeId node_id_;
 
   // Pending changes within current transaction
   std::vector<PendingChange> pending_changes_;
   bool in_transaction_;
+  bool flushing_changes_;  // Prevent re-entry into flush_changes()
 
   // Column type cache (column_name -> Type)
   std::unordered_map<std::string, SQLiteValue::Type> column_types_;
 
   /// Creates shadow tables for CRDT metadata
   void create_shadow_tables(const std::string &table_name);
-
-  /// Loads existing CRDT state from shadow tables
-  void load_crdt_state(const std::string &table_name);
 
   /// Caches column types for the tracked table
   void cache_column_types();
@@ -203,9 +201,6 @@ private:
 
   /// Applies accepted changes to SQLite table
   void apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes);
-
-  /// Updates shadow tables with change information
-  void update_shadow_tables(const Change<CrdtRecordId, std::string> &change);
 
   /// SQLite callback for update hook
   static void update_callback(void *ctx, int operation,
