@@ -110,8 +110,7 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
   exec_or_throw("PRAGMA foreign_keys = ON");
 
   // Install hooks
-  sqlite3_preupdate_hook(db_, preupdate_callback, this);  // Fires BEFORE changes
-  sqlite3_update_hook(db_, update_callback, this);         // Fires AFTER changes
+  sqlite3_update_hook(db_, update_callback, this);
   sqlite3_commit_hook(db_, commit_callback, this);
   sqlite3_rollback_hook(db_, rollback_callback, this);
 }
@@ -155,11 +154,14 @@ void CRDTSQLite::enable_crdt(const std::string &table_name) {
 }
 
 void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
+  // Determine record_id SQL type
+  std::string record_id_type = RecordIdTraits<CrdtRecordId>::sql_type();
+
   // Create versions table
   std::string versions_table = "_crdt_" + table_name + "_versions";
   std::string create_versions = R"(
     CREATE TABLE IF NOT EXISTS )" + versions_table + R"( (
-      record_id INTEGER NOT NULL,
+      record_id )" + record_id_type + R"( NOT NULL,
       col_name TEXT NOT NULL,
       col_version INTEGER NOT NULL,
       db_version INTEGER NOT NULL,
@@ -179,7 +181,7 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   std::string tombstones_table = "_crdt_" + table_name + "_tombstones";
   std::string create_tombstones = R"(
     CREATE TABLE IF NOT EXISTS )" + tombstones_table + R"( (
-      record_id INTEGER PRIMARY KEY,
+      record_id )" + record_id_type + R"( PRIMARY KEY,
       db_version INTEGER NOT NULL,
       node_id INTEGER NOT NULL,
       local_db_version INTEGER NOT NULL
@@ -234,6 +236,20 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     sqlite3_bind_int(stmt, 2, static_cast<int>(col_type));
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+  }
+
+  // For non-auto-increment types (e.g., uint128_t), create lookaside table
+  // This maps SQLite rowid → CRDT ID for deletion handling
+  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    std::string lookaside_table = "_crdt_" + table_name + "_lookaside";
+    std::string id_type = RecordIdTraits<CrdtRecordId>::sql_type();
+    std::string create_lookaside = R"(
+      CREATE TABLE IF NOT EXISTS )" + lookaside_table + R"( (
+        rowid INTEGER PRIMARY KEY,
+        id )" + id_type + R"( NOT NULL UNIQUE
+      )
+    )";
+    exec_or_throw(create_lookaside.c_str());
   }
 }
 
@@ -631,7 +647,7 @@ uint64_t CRDTSQLite::get_clock() const {
 }
 
 void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId record_id) {
-  if (table != tracked_table_) {
+  if (!table || tracked_table_ != table) {
     return;
   }
 
@@ -641,15 +657,22 @@ void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId rec
   // For non-auto-increment types (e.g., uint128_t), we need to get the actual ID
   if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
     if (operation == SQLITE_DELETE) {
-      // For DELETE: use the id captured in preupdate_hook
-      auto it = pending_delete_ids_.find(static_cast<int64_t>(record_id));
-      if (it != pending_delete_ids_.end()) {
-        change.record_id = it->second;
-        pending_delete_ids_.erase(it);  // Clean up
+      // For DELETE: query lookaside table to get CRDT ID
+      // (main table row is already deleted, but lookaside persists the mapping)
+      std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
+      std::string query = "SELECT id FROM " + lookaside_table + " WHERE rowid = ?";
+      sqlite3_stmt *stmt = prepare(query.c_str());
+      sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid
+
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+        sqlite3_finalize(stmt);
       } else {
-        // No captured id - this shouldn't happen if preupdate_hook worked
+        // No lookaside entry - record was never inserted with proper ID
+        sqlite3_finalize(stmt);
         return;
       }
+      // NOTE: We DON'T delete from lookaside - keep the mapping for sync
     } else {
       // For INSERT/UPDATE: query the id column using the rowid
       std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
@@ -658,12 +681,22 @@ void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId rec
 
       if (sqlite3_step(stmt) == SQLITE_ROW) {
         change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        // Populate lookaside table: rowid → CRDT ID
+        std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
+        std::string insert_lookaside = "INSERT OR REPLACE INTO " + lookaside_table +
+                                       " (rowid, id) VALUES (?, ?)";
+        stmt = prepare(insert_lookaside.c_str());
+        sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, change.record_id);  // CRDT ID
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
       } else {
         // Record not found or doesn't have id column - skip
         sqlite3_finalize(stmt);
         return;
       }
-      sqlite3_finalize(stmt);
     }
   } else {
     // For int64_t, rowid IS the record_id
@@ -906,40 +939,6 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
   sqlite3_update_hook(db_, update_callback, this);
 }
 
-void CRDTSQLite::preupdate_callback(void *ctx, sqlite3 *db, int operation,
-                                    const char *db_name, const char *table,
-                                    sqlite3_int64 old_rowid, sqlite3_int64 new_rowid) {
-  auto *self = static_cast<CRDTSQLite *>(ctx);
-
-  // Only care about DELETE operations for uint128_t
-  if (operation != SQLITE_DELETE) {
-    return;
-  }
-
-  if (table != self->tracked_table_) {
-    return;
-  }
-
-  // For uint128_t, we need to capture the id value BEFORE deletion
-  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
-    // Find the column index for "id"
-    int col_count = sqlite3_preupdate_count(db);
-    for (int i = 0; i < col_count; i++) {
-      const char *col_name = sqlite3_column_name(sqlite3_preupdate_stmt(db), i);
-      if (col_name && std::string(col_name) == "id") {
-        // Read the id value from the OLD row (before deletion)
-        sqlite3_value *val = sqlite3_preupdate_old(db, i);
-        if (val) {
-          CrdtRecordId id = RecordIdTraits<CrdtRecordId>::from_sqlite_value(val);
-          // Store it for later use in update_callback
-          self->pending_delete_ids_[old_rowid] = id;
-        }
-        break;
-      }
-    }
-  }
-}
-
 void CRDTSQLite::update_callback(void *ctx, int operation,
                                  const char *db_name, const char *table,
                                  sqlite3_int64 rowid) {
@@ -961,7 +960,6 @@ int CRDTSQLite::commit_callback(void *ctx) {
 void CRDTSQLite::rollback_callback(void *ctx) {
   auto *self = static_cast<CRDTSQLite *>(ctx);
   self->pending_changes_.clear();
-  self->pending_delete_ids_.clear();  // Clean up captured delete IDs
 }
 
 void CRDTSQLite::exec_or_throw(const char *sql) {

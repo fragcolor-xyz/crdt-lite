@@ -175,9 +175,6 @@ private:
   // Column type cache (column_name -> Type)
   std::unordered_map<std::string, SQLiteValue::Type> column_types_;
 
-  // For uint128_t: stores id values captured BEFORE deletion
-  std::unordered_map<int64_t, CrdtRecordId> pending_delete_ids_;
-
   /// Creates shadow tables for CRDT metadata
   void create_shadow_tables(const std::string &table_name);
 
@@ -195,11 +192,6 @@ private:
 
   /// Applies accepted changes to SQLite table
   void apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes);
-
-  /// SQLite callback for preupdate hook (captures data BEFORE changes)
-  static void preupdate_callback(void *ctx, sqlite3 *db, int operation,
-                                 const char *db_name, const char *table,
-                                 sqlite3_int64 old_rowid, sqlite3_int64 new_rowid);
 
   /// SQLite callback for update hook
   static void update_callback(void *ctx, int operation,
