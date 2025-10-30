@@ -11,6 +11,9 @@ A lightweight wrapper that adds CRDT (Conflict-free Replicated Data Type) synchr
 - ✅ **Tombstone-based deletion** - Proper deletion tracking and synchronization
 - ✅ **Transaction support** - ACID guarantees with automatic rollback
 - ✅ **Type preservation** - Maintains SQLite type affinity (INTEGER, REAL, TEXT, BLOB)
+- ✅ **Custom PRIMARY KEY support** - uint128_t IDs via lookaside table (distributed UUIDs)
+- ✅ **Automatic schema migrations** - ALTER TABLE ADD COLUMN auto-detected and tracked
+- ✅ **Security hardened** - SQL injection prevention, safe table name validation
 - ✅ **Header-only CRDT core** - Easy to integrate
 
 ## Quick Start
@@ -59,18 +62,110 @@ auto changes = db.get_changes_since(0);
 db.merge_changes(remote_changes);
 ```
 
+## Advanced Features
+
+### Distributed UUIDs with uint128_t
+
+For globally unique IDs across nodes without coordination, use `uint128_t` instead of auto-increment:
+
+```cpp
+// Define ID type before including header
+#define CRDT_RECORD_ID_TYPE __uint128_t
+#include "crdt_sqlite.hpp"
+#include "record_id_types.hpp"
+
+CRDTSQLite db("myapp.db", 1);
+
+// Create table with BLOB primary key
+db.execute("CREATE TABLE users (id BLOB PRIMARY KEY, name TEXT, email TEXT)");
+db.enable_crdt("users");
+
+// Generate distributed UUID (node_id in high 64 bits, timestamp in low 64 bits)
+uint128_t user_id = RecordIdTraits<uint128_t>::generate_with_node(1);
+
+// Insert with explicit ID
+sqlite3_stmt *stmt = db.prepare("INSERT INTO users (id, name, email) VALUES (?, ?, ?)");
+RecordIdTraits<uint128_t>::bind_to_sqlite(stmt, 1, user_id);
+sqlite3_bind_text(stmt, 2, "Alice", -1, SQLITE_STATIC);
+sqlite3_bind_text(stmt, 3, "alice@example.com", -1, SQLITE_STATIC);
+sqlite3_step(stmt);
+sqlite3_finalize(stmt);
+
+// Updates and deletes work automatically!
+db.execute("UPDATE users SET email = 'new@email.com' WHERE id = ?");  // Bind uint128_t
+db.execute("DELETE FROM users WHERE id = ?");  // Tracked via lookaside table
+```
+
+**How it works:**
+- Shadow tables use `BLOB` type for `record_id` column
+- Lookaside table (`_crdt_users_lookaside`) maps SQLite `rowid` → `uint128_t` ID
+- DELETE operations query lookaside (main table row is already gone)
+- Fully portable - no special SQLite compilation flags needed
+
+**ID Format:**
+```
+[64 bits: node_id][64 bits: timestamp + random]
+```
+
+### Automatic Schema Migrations
+
+ALTER TABLE ADD COLUMN is automatically detected and tracked:
+
+```cpp
+CRDTSQLite db("myapp.db", 1);
+db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+db.enable_crdt("users");
+
+// Insert some data
+db.execute("INSERT INTO users (name) VALUES ('Alice')");
+
+// Later... add a new column
+db.execute("ALTER TABLE users ADD COLUMN age INTEGER");
+// ✅ Schema automatically refreshed!
+// ✅ Column types updated in _crdt_users_types
+// ✅ New column tracked immediately
+
+// Insert with new column
+db.execute("INSERT INTO users (name, age) VALUES ('Bob', 30)");
+
+// Sync to other nodes
+auto changes = db.get_changes_since(0);
+// ✅ Both 'name' and 'age' changes included
+remote_db.merge_changes(changes);
+// ✅ Works even if remote node already has 'age' column
+```
+
+**How it works:**
+- `sqlite3_set_authorizer()` detects `SQLITE_ALTER_TABLE` operations
+- `refresh_schema()` called automatically after ALTER TABLE executes
+- Column types re-scanned via `PRAGMA table_info()`
+- Metadata tables updated with new columns
+
+**Supported:**
+- ✅ `ALTER TABLE ADD COLUMN` - Fully automatic
+
+**Not supported:**
+- ❌ `ALTER TABLE DROP COLUMN` - Breaks existing sync data
+- ❌ `ALTER TABLE RENAME COLUMN` - Would need versions table migration
+- ❌ `ALTER TABLE RENAME TABLE` - Would need all shadow tables renamed
+
+For unsupported operations, handle manually or use `refresh_schema()` after migration.
+
 ## Architecture
 
 ### Shadow Tables
 
-For each CRDT-enabled table `foo`, three shadow tables are created:
+For each CRDT-enabled table `foo`, shadow tables are created:
 
 ```
 _crdt_foo_versions    - Column version tracking
 _crdt_foo_tombstones  - Deletion tracking
 _crdt_foo_clock       - Logical clock
 _crdt_foo_types       - Column type information
+_crdt_foo_lookaside   - rowid → ID mapping (only for uint128_t)
 ```
+
+**Note:** Lookaside table only created when using `uint128_t` record IDs.
 
 ### How It Works
 
@@ -210,6 +305,22 @@ Removes tombstones older than specified version.
 - `min_acknowledged_version`: Minimum version acknowledged by all nodes
 
 **Returns:** Number of tombstones removed
+
+#### refresh_schema
+
+```cpp
+void refresh_schema()
+```
+
+Manually refresh schema metadata after ALTER TABLE operations.
+
+**When to use:**
+- If you execute ALTER TABLE via raw SQLite API (bypassing `CRDTSQLite::execute()`)
+- Normally called automatically by `execute()` when ALTER TABLE is detected
+
+**What it does:**
+- Re-scans column types via `PRAGMA table_info()`
+- Updates `_crdt_<table>_types` with current schema
 
 #### Other Methods
 
@@ -427,14 +538,16 @@ For a table with 10 columns and 1000 rows:
 3. **No foreign keys across CRDT-enabled tables** - Referential integrity not synchronized
    - **Workaround:** Enforce at application level
 
-4. **Schema changes not tracked** - ALTER TABLE after enable_crdt requires manual migration
-   - **Workaround:** Disable CRDT, migrate, re-enable
+4. **Limited ALTER TABLE support** - Only ADD COLUMN is automatically tracked
+   - ✅ **ADD COLUMN:** Fully supported with automatic schema refresh
+   - ❌ **DROP COLUMN:** Not supported (no clean way to handle in CRDT)
+   - ❌ **RENAME COLUMN:** Not supported (would need to update versions table)
+   - ❌ **RENAME TABLE:** Not supported (would need to rename all shadow tables)
+   - **Note:** ADD COLUMN is the most common migration operation
 
-5. **No custom PRIMARY KEY** - Uses SQLite's rowid
-   - **Note:** Most SQLite tables have rowid by default
-
-6. **No WITHOUT ROWID tables** - These lack rowid
-   - **Workaround:** Use regular tables
+5. **WITHOUT ROWID tables not supported** - These lack SQLite's internal rowid
+   - **Workaround:** Use regular tables (most tables have rowid by default)
+   - **Note:** For distributed UUIDs, use uint128_t ID with lookaside table (see below)
 
 ### Eventual Consistency vs. Strong Consistency
 
@@ -506,6 +619,8 @@ ctest --output-on-failure
 ### Test Coverage
 
 The test suite includes:
+
+**int64_t tests (16 tests):**
 - ✅ Basic initialization
 - ✅ INSERT/UPDATE/DELETE operations
 - ✅ Two-node synchronization
@@ -518,6 +633,13 @@ The test suite includes:
 - ✅ Node exclusion in sync
 - ✅ NULL value handling
 - ✅ Integer type preservation
+- ✅ ALTER TABLE ADD COLUMN with sync
+
+**uint128_t tests (4 tests):**
+- ✅ Basic uint128_t ID operations
+- ✅ Two-node sync with distributed IDs
+- ✅ Collision resistance (20,000 IDs)
+- ✅ DELETE sync with lookaside table
 
 ### Example Test
 
@@ -559,13 +681,18 @@ assert(get_value(db2, "users", "name", 1) == "Bob");
 
 ## Roadmap
 
+### Recently Completed ✅
+
+- ✅ **Schema migration helpers** - ALTER TABLE ADD COLUMN auto-detected
+- ✅ **Distributed UUID support** - uint128_t with lookaside table
+- ✅ **Security hardening** - SQL injection prevention, table name validation
+
 ### Planned Features
 
 - [ ] Multiple table support
 - [ ] JSON serialization for changes
 - [ ] Wire protocol for efficient sync
-- [ ] Custom merge rules
-- [ ] Schema migration helpers
+- [ ] Custom merge rules (already available in core CRDT, needs SQLite wrapper)
 - [ ] Replication monitoring/metrics
 - [ ] Delta compression for sync
 - [ ] Partial replica (filter by predicates)
