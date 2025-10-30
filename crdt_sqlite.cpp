@@ -110,7 +110,8 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
   exec_or_throw("PRAGMA foreign_keys = ON");
 
   // Install hooks
-  sqlite3_update_hook(db_, update_callback, this);
+  sqlite3_preupdate_hook(db_, preupdate_callback, this);  // Fires BEFORE changes
+  sqlite3_update_hook(db_, update_callback, this);         // Fires AFTER changes
   sqlite3_commit_hook(db_, commit_callback, this);
   sqlite3_rollback_hook(db_, rollback_callback, this);
 }
@@ -637,22 +638,33 @@ void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId rec
   PendingChange change;
   change.operation = operation;
 
-  // For non-auto-increment types (e.g., uint128_t), we need to query the actual ID
-  // from the id column instead of using rowid
+  // For non-auto-increment types (e.g., uint128_t), we need to get the actual ID
   if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
-    // Query the id column using the rowid
-    std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
-    sqlite3_stmt *stmt = prepare(query.c_str());
-    sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid is always int64
-
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+    if (operation == SQLITE_DELETE) {
+      // For DELETE: use the id captured in preupdate_hook
+      auto it = pending_delete_ids_.find(static_cast<int64_t>(record_id));
+      if (it != pending_delete_ids_.end()) {
+        change.record_id = it->second;
+        pending_delete_ids_.erase(it);  // Clean up
+      } else {
+        // No captured id - this shouldn't happen if preupdate_hook worked
+        return;
+      }
     } else {
-      // Record not found or doesn't have id column - skip
+      // For INSERT/UPDATE: query the id column using the rowid
+      std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
+      sqlite3_stmt *stmt = prepare(query.c_str());
+      sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid is always int64
+
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+      } else {
+        // Record not found or doesn't have id column - skip
+        sqlite3_finalize(stmt);
+        return;
+      }
       sqlite3_finalize(stmt);
-      return;
     }
-    sqlite3_finalize(stmt);
   } else {
     // For int64_t, rowid IS the record_id
     change.record_id = record_id;
@@ -894,6 +906,40 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
   sqlite3_update_hook(db_, update_callback, this);
 }
 
+void CRDTSQLite::preupdate_callback(void *ctx, sqlite3 *db, int operation,
+                                    const char *db_name, const char *table,
+                                    sqlite3_int64 old_rowid, sqlite3_int64 new_rowid) {
+  auto *self = static_cast<CRDTSQLite *>(ctx);
+
+  // Only care about DELETE operations for uint128_t
+  if (operation != SQLITE_DELETE) {
+    return;
+  }
+
+  if (table != self->tracked_table_) {
+    return;
+  }
+
+  // For uint128_t, we need to capture the id value BEFORE deletion
+  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    // Find the column index for "id"
+    int col_count = sqlite3_preupdate_count(db);
+    for (int i = 0; i < col_count; i++) {
+      const char *col_name = sqlite3_column_name(sqlite3_preupdate_stmt(db), i);
+      if (col_name && std::string(col_name) == "id") {
+        // Read the id value from the OLD row (before deletion)
+        sqlite3_value *val = sqlite3_preupdate_old(db, i);
+        if (val) {
+          CrdtRecordId id = RecordIdTraits<CrdtRecordId>::from_sqlite_value(val);
+          // Store it for later use in update_callback
+          self->pending_delete_ids_[old_rowid] = id;
+        }
+        break;
+      }
+    }
+  }
+}
+
 void CRDTSQLite::update_callback(void *ctx, int operation,
                                  const char *db_name, const char *table,
                                  sqlite3_int64 rowid) {
@@ -915,6 +961,7 @@ int CRDTSQLite::commit_callback(void *ctx) {
 void CRDTSQLite::rollback_callback(void *ctx) {
   auto *self = static_cast<CRDTSQLite *>(ctx);
   self->pending_changes_.clear();
+  self->pending_delete_ids_.clear();  // Clean up captured delete IDs
 }
 
 void CRDTSQLite::exec_or_throw(const char *sql) {

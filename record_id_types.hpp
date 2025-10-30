@@ -37,6 +37,10 @@ struct RecordIdTraits<int64_t> {
     return sqlite3_column_int64(stmt, index);
   }
 
+  static int64_t from_sqlite_value(sqlite3_value *val) {
+    return sqlite3_value_int64(val);
+  }
+
   static constexpr const char* sql_type() {
     return "INTEGER";
   }
@@ -94,6 +98,23 @@ struct RecordIdTraits<uint128_t> {
       sqlite3_column_blob(stmt, index)
     );
     int size = sqlite3_column_bytes(stmt, index);
+
+    if (size != 16) {
+      return 0;  // Invalid blob
+    }
+
+    uint128_t result = 0;
+    for (int i = 0; i < 16; i++) {
+      result = (result << 8) | blob[i];
+    }
+    return result;
+  }
+
+  static uint128_t from_sqlite_value(sqlite3_value *val) {
+    const unsigned char *blob = static_cast<const unsigned char*>(
+      sqlite3_value_blob(val)
+    );
+    int size = sqlite3_value_bytes(val);
 
     if (size != 16) {
       return 0;  // Invalid blob
