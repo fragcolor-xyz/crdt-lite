@@ -526,6 +526,69 @@ TEST(integer_types) {
   ASSERT_TRUE(found_zero);
 }
 
+TEST(alter_table_add_column) {
+  TestDB db1_file("alter_table1");
+  TestDB db2_file("alter_table2");
+
+  // Create first node
+  CRDTSQLite db1(db1_file.path(), 1);
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)");
+  db1.enable_crdt("users");
+
+  // Insert a record
+  db1.execute("INSERT INTO users (name) VALUES ('Alice')");
+
+  // Get initial changes (includes the INSERT)
+  auto changes1 = db1.get_changes_since(0);
+  // May include id and name columns
+  ASSERT_TRUE(changes1.size() >= 1);
+
+  // Find the name change
+  bool found_name = false;
+  for (const auto &change : changes1) {
+    if (change.col_name.has_value() && change.col_name.value() == "name") {
+      found_name = true;
+      ASSERT_EQ(change.value.value(), "Alice");
+    }
+  }
+  ASSERT_TRUE(found_name);
+
+  // ALTER TABLE ADD COLUMN (should auto-refresh schema)
+  db1.execute("ALTER TABLE users ADD COLUMN age INTEGER");
+
+  // Insert a new record with the new column
+  db1.execute("INSERT INTO users (name, age) VALUES ('Bob', 30)");
+
+  // Verify the new column is tracked
+  uint64_t last_version = changes1.back().local_db_version;
+  auto changes2 = db1.get_changes_since(last_version);
+  ASSERT_TRUE(changes2.size() >= 2);  // At least name + age for Bob
+
+  // Find the age change
+  bool found_age = false;
+  for (const auto &change : changes2) {
+    if (change.col_name.has_value() && change.col_name.value() == "age") {
+      found_age = true;
+      ASSERT_EQ(change.value.value(), "30");
+    }
+  }
+  ASSERT_TRUE(found_age);
+
+  // Sync to another node (with schema already including age column)
+  CRDTSQLite db2(db2_file.path(), 2);
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)");
+  db2.enable_crdt("users");
+
+  db2.merge_changes(db1.get_changes_since(0));
+
+  // Verify both records synced
+  ASSERT_EQ(count_rows(db2.get_db(), "users"), 2);
+
+  // Verify Bob's age synced
+  std::string age_val = get_value(db2.get_db(), "users", "age", 2);
+  ASSERT_EQ(age_val, "30");
+}
+
 int main() {
   std::cout << "Running CRDT-SQLite tests..." << std::endl << std::endl;
 
@@ -544,6 +607,7 @@ int main() {
   RUN_TEST(exclude_nodes);
   RUN_TEST(null_values);
   RUN_TEST(integer_types);
+  RUN_TEST(alter_table_add_column);
 
   std::cout << std::endl << "All tests passed!" << std::endl;
   return 0;

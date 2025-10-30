@@ -98,7 +98,8 @@ SQLiteValue SQLiteValue::from_string(const std::string &str, Type type) {
 // CRDTSQLite implementation
 
 CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
-    : db_(nullptr), node_id_(node_id), in_transaction_(false), flushing_changes_(false) {
+    : db_(nullptr), node_id_(node_id), in_transaction_(false), flushing_changes_(false),
+      pending_schema_refresh_(false) {
   int rc = sqlite3_open(path, &db_);
   if (rc != SQLITE_OK) {
     std::string error = "Failed to open database: " + std::string(sqlite3_errmsg(db_));
@@ -110,6 +111,7 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
   exec_or_throw("PRAGMA foreign_keys = ON");
 
   // Install hooks
+  sqlite3_set_authorizer(db_, authorizer_callback, this);
   sqlite3_update_hook(db_, update_callback, this);
   sqlite3_commit_hook(db_, commit_callback, this);
   sqlite3_rollback_hook(db_, rollback_callback, this);
@@ -279,6 +281,28 @@ void CRDTSQLite::cache_column_types() {
   sqlite3_finalize(stmt);
 }
 
+void CRDTSQLite::refresh_schema() {
+  if (tracked_table_.empty()) {
+    return;  // No table being tracked
+  }
+
+  // Re-scan column types from table
+  cache_column_types();
+
+  // Update _crdt_<table>_types table with current columns
+  std::string types_table = "_crdt_" + tracked_table_ + "_types";
+  for (const auto &[col_name, col_type] : column_types_) {
+    std::string insert_type = "INSERT OR REPLACE INTO " + types_table +
+                             " (col_name, col_type) VALUES (?, ?)";
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db_, insert_type.c_str(), -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, col_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, static_cast<int>(col_type));
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+}
+
 void CRDTSQLite::execute(const char *sql) {
   char *err_msg = nullptr;
   int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
@@ -289,6 +313,12 @@ void CRDTSQLite::execute(const char *sql) {
       sqlite3_free(err_msg);
     }
     throw CRDTSQLiteException(error);
+  }
+
+  // If ALTER TABLE was detected, refresh schema metadata
+  if (pending_schema_refresh_) {
+    refresh_schema();
+    pending_schema_refresh_ = false;
   }
 }
 
@@ -937,6 +967,43 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
 
   // Re-enable hooks
   sqlite3_update_hook(db_, update_callback, this);
+}
+
+int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
+                                    const char *arg1, const char *arg2,
+                                    const char *arg3, const char *arg4) {
+  auto *self = static_cast<CRDTSQLite *>(ctx);
+
+  // Only monitor operations on CRDT-enabled table
+  if (self->tracked_table_.empty()) {
+    return SQLITE_OK;  // No table being tracked yet
+  }
+
+  // SQLITE_ALTER_TABLE: arg1=database, arg2=table
+  if (action_code == SQLITE_ALTER_TABLE) {
+    if (arg2 && self->tracked_table_ == arg2) {
+      // Flag that schema needs refresh after this statement executes
+      // This handles ADD COLUMN automatically
+      self->pending_schema_refresh_ = true;
+    }
+    return SQLITE_OK;  // Allow ALTER TABLE (ADD COLUMN supported)
+  }
+
+  // SQLITE_UPDATE on sqlite_master for RENAME TABLE detection
+  // When renaming table, SQLite updates sqlite_master.tbl_name
+  // ONLY block if it's the tracked table being renamed
+  if (action_code == SQLITE_UPDATE && arg1 && std::string(arg1) == "sqlite_master") {
+    if (arg2 && std::string(arg2) == "tbl_name") {
+      // Check if this is renaming our tracked table
+      // arg3 is the trigger/view name (null for table), arg4 is unused
+      // We can't easily determine which table is being renamed here
+      // So we'll be conservative and only block if we detect issues
+      // For now, allow but add a note that RENAME is not supported
+      return SQLITE_OK;  // Allow for now (RENAME not well supported anyway)
+    }
+  }
+
+  return SQLITE_OK;  // Allow by default
 }
 
 void CRDTSQLite::update_callback(void *ctx, int operation,

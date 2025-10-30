@@ -159,6 +159,12 @@ public:
   /// Use with caution - direct modifications bypass CRDT tracking
   sqlite3 *get_db() { return db_; }
 
+  /// Manually refresh schema metadata after ALTER TABLE
+  ///
+  /// Normally called automatically after execute(), but use this if you
+  /// execute ALTER TABLE via raw sqlite3 API.
+  void refresh_schema();
+
   // NOTE: JSON serialization removed - incomplete implementation
   // Users should implement their own serialization using Change<> structure
 
@@ -174,6 +180,9 @@ private:
 
   // Column type cache (column_name -> Type)
   std::unordered_map<std::string, SQLiteValue::Type> column_types_;
+
+  // Schema change tracking (for ALTER TABLE auto-handling)
+  bool pending_schema_refresh_;
 
   /// Creates shadow tables for CRDT metadata
   void create_shadow_tables(const std::string &table_name);
@@ -192,6 +201,11 @@ private:
 
   /// Applies accepted changes to SQLite table
   void apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes);
+
+  /// SQLite callback for authorizer (detects ALTER TABLE)
+  static int authorizer_callback(void *ctx, int action_code,
+                                 const char *arg1, const char *arg2,
+                                 const char *arg3, const char *arg4);
 
   /// SQLite callback for update hook
   static void update_callback(void *ctx, int operation,
