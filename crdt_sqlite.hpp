@@ -159,17 +159,8 @@ public:
   /// Use with caution - direct modifications bypass CRDT tracking
   sqlite3 *get_db() { return db_; }
 
-  /// Serializes changes to JSON
-  ///
-  /// @param changes Changes to serialize
-  /// @return JSON string
-  static std::string changes_to_json(const std::vector<Change<CrdtRecordId, std::string>> &changes);
-
-  /// Deserializes changes from JSON
-  ///
-  /// @param json JSON string
-  /// @return Vector of changes
-  static std::vector<Change<CrdtRecordId, std::string>> changes_from_json(const std::string &json);
+  // NOTE: JSON serialization removed - incomplete implementation
+  // Users should implement their own serialization using Change<> structure
 
 private:
   sqlite3 *db_;
@@ -218,6 +209,9 @@ private:
 
   /// Helper to get error message
   std::string get_error() const;
+
+  /// Validates and sanitizes table name to prevent SQL injection
+  static bool is_valid_table_name(const std::string &name);
 };
 
 #endif // CRDT_SQLITE_HPP

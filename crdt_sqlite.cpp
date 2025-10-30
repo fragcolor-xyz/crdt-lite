@@ -126,14 +126,20 @@ void CRDTSQLite::enable_crdt(const std::string &table_name) {
     throw CRDTSQLiteException("CRDT is already enabled for table: " + tracked_table_);
   }
 
-  // Check if table exists
-  std::string check_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='" + table_name + "'";
+  // SECURITY: Validate table name to prevent SQL injection
+  if (!is_valid_table_name(table_name)) {
+    throw CRDTSQLiteException("Invalid table name: must contain only alphanumeric characters and underscores");
+  }
+
+  // Check if table exists using parameterized query
+  std::string check_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(db_, check_sql.c_str(), -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
     throw CRDTSQLiteException("Failed to check table existence: " + get_error());
   }
 
+  sqlite3_bind_text(stmt, 1, table_name.c_str(), -1, SQLITE_TRANSIENT);
   bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
   sqlite3_finalize(stmt);
 
@@ -163,6 +169,11 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   )";
   exec_or_throw(create_versions.c_str());
 
+  // PERFORMANCE: Create index on local_db_version for efficient sync queries
+  std::string create_versions_idx = "CREATE INDEX IF NOT EXISTS " + versions_table +
+                                    "_local_db_version_idx ON " + versions_table + "(local_db_version)";
+  exec_or_throw(create_versions_idx.c_str());
+
   // Create tombstones table
   std::string tombstones_table = "_crdt_" + table_name + "_tombstones";
   std::string create_tombstones = R"(
@@ -174,6 +185,11 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     )
   )";
   exec_or_throw(create_tombstones.c_str());
+
+  // PERFORMANCE: Create index on local_db_version for efficient sync queries
+  std::string create_tombstones_idx = "CREATE INDEX IF NOT EXISTS " + tombstones_table +
+                                      "_local_db_version_idx ON " + tombstones_table + "(local_db_version)";
+  exec_or_throw(create_tombstones_idx.c_str());
 
   // Create clock table
   std::string clock_table = "_crdt_" + table_name + "_clock";
@@ -311,7 +327,7 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version) {
     int num_cols = sqlite3_column_count(stmt);
     for (int i = 7; i < num_cols; i++) {  // Start at 7 (after actual_id)
       const char *name = sqlite3_column_name(stmt, i);
-      if (name && name == col_name) {
+      if (name && col_name == name) {  // FIX: Compare string contents, not pointers
         sqlite3_value *val = sqlite3_column_value(stmt, i);
         SQLiteValue sql_val = SQLiteValue::from_sqlite(val);
         value = sql_val.to_string();
@@ -401,7 +417,7 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
     int num_cols = sqlite3_column_count(stmt);
     for (int i = 7; i < num_cols; i++) {
       const char *name = sqlite3_column_name(stmt, i);
-      if (name && name == col_name) {
+      if (name && col_name == name) {  // FIX: Compare string contents, not pointers
         sqlite3_value *val = sqlite3_column_value(stmt, i);
         SQLiteValue sql_val = SQLiteValue::from_sqlite(val);
         value = sql_val.to_string();
@@ -887,8 +903,13 @@ void CRDTSQLite::update_callback(void *ctx, int operation,
 
 int CRDTSQLite::commit_callback(void *ctx) {
   auto *self = static_cast<CRDTSQLite *>(ctx);
-  self->flush_changes();
-  return 0; // Allow commit
+  try {
+    self->flush_changes();
+    return 0; // Allow commit
+  } catch (const std::exception &e) {
+    // If flush fails, abort the transaction to maintain consistency
+    return 1; // Abort commit
+  }
 }
 
 void CRDTSQLite::rollback_callback(void *ctx) {
@@ -913,53 +934,43 @@ std::string CRDTSQLite::get_error() const {
   return sqlite3_errmsg(db_);
 }
 
-// Simple JSON serialization (for demo purposes - production should use a proper JSON library)
-std::string CRDTSQLite::changes_to_json(const std::vector<Change<CrdtRecordId, std::string>> &changes) {
-  std::ostringstream oss;
-  oss << "[";
-  bool first = true;
-  for (const auto &change : changes) {
-    if (!first) oss << ",";
-    first = false;
-
-    oss << "{\"record_id\":\"" << RecordIdTraits<CrdtRecordId>::to_string(change.record_id) << "\",";
-
-    if (change.col_name.has_value()) {
-      oss << "\"col_name\":\"" << *change.col_name << "\",";
-    } else {
-      oss << "\"col_name\":null,";
-    }
-
-    if (change.value.has_value()) {
-      // Escape quotes in value
-      std::string escaped = *change.value;
-      size_t pos = 0;
-      while ((pos = escaped.find('"', pos)) != std::string::npos) {
-        escaped.insert(pos, "\\");
-        pos += 2;
-      }
-      oss << "\"value\":\"" << escaped << "\",";
-    } else {
-      oss << "\"value\":null,";
-    }
-
-    oss << "\"col_version\":" << change.col_version << ",";
-    oss << "\"db_version\":" << change.db_version << ",";
-    oss << "\"node_id\":" << change.node_id << ",";
-    oss << "\"local_db_version\":" << change.local_db_version << "}";
+bool CRDTSQLite::is_valid_table_name(const std::string &name) {
+  // Table name must:
+  // 1. Not be empty
+  // 2. Start with letter or underscore
+  // 3. Contain only alphanumeric characters and underscores
+  // 4. Not be too long (SQLite limit is 1024 bytes, we use 128 for safety)
+  if (name.empty() || name.length() > 128) {
+    return false;
   }
-  oss << "]";
-  return oss.str();
+
+  // First character must be letter or underscore
+  char first = name[0];
+  if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_')) {
+    return false;
+  }
+
+  // Remaining characters must be alphanumeric or underscore
+  for (char c : name) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_')) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
-std::vector<Change<CrdtRecordId, std::string>>
-CRDTSQLite::changes_from_json(const std::string &json) {
-  // Simple JSON parser for demo purposes
-  // Production code should use a proper JSON library
-  std::vector<Change<CrdtRecordId, std::string>> changes;
-
-  // This is a very basic parser - just for demonstration
-  // In production, use nlohmann/json or similar
-
-  return changes;
-}
+// NOTE: JSON serialization removed from public API due to incomplete implementation
+// Users should implement their own serialization based on the Change<> structure
+//
+// Example incomplete implementation (DO NOT USE):
+//
+// std::string CRDTSQLite::changes_to_json(...) {
+//   // Incomplete - missing proper escaping, uint128_t handling, etc.
+// }
+//
+// std::vector<Change<...>> CRDTSQLite::changes_from_json(...) {
+//   // Incomplete - always returns empty vector
+//   return {};
+// }
