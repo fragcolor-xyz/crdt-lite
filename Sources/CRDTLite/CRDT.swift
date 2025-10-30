@@ -375,7 +375,7 @@ public struct DefaultChangeComparator<K: Hashable & Comparable, C: Hashable & Co
 /// Main CRDT structure, generic over key (K), column (C), and value (V) types.
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
-public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> where K: Equatable, C: Equatable {
+public final class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> where K: Equatable, C: Equatable {
     private var nodeId: NodeId
     private var clock: LogicalClock
     private var data: [K: Record<C, V>]
@@ -409,7 +409,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     /// - Parameters:
     ///   - nodeId: The unique identifier for this CRDT node
     ///   - changes: A list of changes to apply to reconstruct the CRDT state
-    public convenience init(nodeId: NodeId, changes: [Change<K, C, V>]) {
+    public convenience init(nodeId: NodeId, changes: [Change<K, C, V>]) where V: Equatable {
         self.init(nodeId: nodeId, parent: nil)
         self.applyChanges(changes)
     }
@@ -417,7 +417,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     /// Resets the CRDT to a state as if it was constructed with the given changes.
     ///
     /// - Parameter changes: A list of changes to apply to reconstruct the CRDT state
-    public func reset(changes: [Change<K, C, V>]) {
+    public func reset(changes: [Change<K, C, V>]) where V: Equatable {
         data.removeAll()
         tombstones.clear()
         clock = LogicalClock()
@@ -433,7 +433,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     ///   - fields: A dictionary of (column_name, value) pairs
     /// - Returns: An array of changes created by this operation
     @discardableResult
-    public func insertOrUpdate(_ recordId: K, fields: [(C, V)]) -> [Change<K, C, V>] {
+    public func insertOrUpdate(_ recordId: K, fields: [(C, V)]) -> [Change<K, C, V>] where V: Equatable {
         return insertOrUpdateWithFlags(recordId, flags: 0, fields: fields)
     }
 
@@ -445,7 +445,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     ///   - fields: A dictionary of (column_name, value) pairs
     /// - Returns: An array of changes created by this operation
     @discardableResult
-    public func insertOrUpdateWithFlags(_ recordId: K, flags: UInt32, fields: [(C, V)]) -> [Change<K, C, V>] {
+    public func insertOrUpdateWithFlags(_ recordId: K, flags: UInt32, fields: [(C, V)]) -> [Change<K, C, V>] where V: Equatable {
         let dbVersion = clock.tick()
 
         // Check if the record is tombstoned
@@ -455,7 +455,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
 
         var changes: [Change<K, C, V>] = []
         let currentNodeId = nodeId
-        let record = getOrCreateRecordUnchecked(recordId, ignoreParent: false)
+        var record = getOrCreateRecordUnchecked(recordId, ignoreParent: false)
 
         for (colName, value) in fields {
             let colVersion: UInt64
@@ -497,6 +497,9 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
                 flags: flags
             ))
         }
+
+        // Persist the modified record back to the data dictionary
+        data[recordId] = record
 
         return changes
     }
@@ -557,7 +560,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     ///   - The record doesn't exist
     ///   - The field doesn't exist in the record
     @discardableResult
-    public func deleteField(_ recordId: K, fieldName: C) -> Change<K, C, V>? {
+    public func deleteField(_ recordId: K, fieldName: C) -> Change<K, C, V>? where V: Equatable {
         return deleteFieldWithFlags(recordId, fieldName: fieldName, flags: 0)
     }
 
@@ -569,14 +572,14 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     ///   - flags: Flags to indicate the type of change
     /// - Returns: An optional Change representing the field deletion
     @discardableResult
-    public func deleteFieldWithFlags(_ recordId: K, fieldName: C, flags: UInt32) -> Change<K, C, V>? {
+    public func deleteFieldWithFlags(_ recordId: K, fieldName: C, flags: UInt32) -> Change<K, C, V>? where V: Equatable {
         // Check if the record is tombstoned
         if isRecordTombstoned(recordId, ignoreParent: false) {
             return nil
         }
 
         // Get the record (return nil if it doesn't exist)
-        guard let record = data[recordId] else {
+        guard var record = data[recordId] else {
             return nil
         }
 
@@ -619,6 +622,9 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
         // Remove the field from the record (but keep the ColumnVersion as field tombstone)
         record.fields.removeValue(forKey: fieldName)
 
+        // Persist the modified record back to the data dictionary
+        data[recordId] = record
+
         return Change(
             recordId: recordId,
             colName: fieldName,
@@ -640,7 +646,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
     ///   - mergeRule: The merge rule to use for conflict resolution
     /// - Returns: Array of accepted changes
     @discardableResult
-    public func mergeChanges<R: MergeRule>(_ changes: [Change<K, C, V>], mergeRule: R) -> [Change<K, C, V>] {
+    public func mergeChanges<R: MergeRule>(_ changes: [Change<K, C, V>], mergeRule: R) -> [Change<K, C, V>] where V: Equatable {
         return mergeChangesImpl(changes, ignoreParent: false, mergeRule: mergeRule)
     }
 
@@ -648,7 +654,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
         _ changes: [Change<K, C, V>],
         ignoreParent: Bool,
         mergeRule: R
-    ) -> [Change<K, C, V>] {
+    ) -> [Change<K, C, V>] where V: Equatable {
         var acceptedChanges: [Change<K, C, V>] = []
 
         if changes.isEmpty {
@@ -704,7 +710,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
             if shouldAccept {
                 if let colKey = colName {
                     // Handle insertion or update
-                    let record = getOrCreateRecordUnchecked(recordId, ignoreParent: ignoreParent)
+                    var record = getOrCreateRecordUnchecked(recordId, ignoreParent: ignoreParent)
 
                     // Update field value
                     if let value = remoteValue {
@@ -729,6 +735,9 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
                     if newLocalDbVersion > record.highestLocalDbVersion {
                         record.highestLocalDbVersion = newLocalDbVersion
                     }
+
+                    // Persist the modified record back to the data dictionary
+                    data[recordId] = record
 
                     acceptedChanges.append(Change(
                         recordId: recordId,
@@ -959,7 +968,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
 
     // MARK: - Helper Methods
 
-    private func applyChanges(_ changes: [Change<K, C, V>]) {
+    private func applyChanges(_ changes: [Change<K, C, V>]) where V: Equatable {
         // Determine the maximum dbVersion from the changes
         let maxDbVersion = changes.reduce(0) { max($0, max($1.dbVersion, $1.localDbVersion)) }
 
@@ -992,7 +1001,7 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
             } else if let colKey = colName {
                 // Handle insertion or update
                 if !isRecordTombstoned(recordId, ignoreParent: false) {
-                    let record = getOrCreateRecordUnchecked(recordId, ignoreParent: false)
+                    var record = getOrCreateRecordUnchecked(recordId, ignoreParent: false)
 
                     // Insert or update the field value
                     if let value = remoteValue {
@@ -1014,6 +1023,9 @@ public class CRDT<K: Hashable & Codable, C: Hashable & Codable, V: Codable> wher
                     if remoteLocalDbVersion > record.highestLocalDbVersion {
                         record.highestLocalDbVersion = remoteLocalDbVersion
                     }
+
+                    // Persist the mutated record to the data dictionary
+                    data[recordId] = record
                 }
             }
         }
