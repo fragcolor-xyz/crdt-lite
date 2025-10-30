@@ -226,8 +226,8 @@ void CRDTSQLite::load_crdt_state(const std::string &table_name) {
 
   // Load regular changes
   std::string versions_table = "_crdt_" + table_name + "_versions";
-  std::string load_versions = "SELECT v.record_id, v.col_name, v.col_version, v.db_version, "
-                             "v.node_id, v.local_db_version, t." + table_name + ".*" +
+  std::string load_versions = std::string("SELECT v.record_id, v.col_name, v.col_version, v.db_version, ") +
+                             "v.node_id, v.local_db_version, t.* " +
                              " FROM " + versions_table + " v" +
                              " LEFT JOIN " + table_name + " t ON v.record_id = t.rowid";
 
