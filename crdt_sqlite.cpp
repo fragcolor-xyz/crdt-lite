@@ -222,7 +222,7 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
 
 void CRDTSQLite::load_crdt_state(const std::string &table_name) {
   // Load all changes from shadow tables to reconstruct CRDT state
-  std::vector<Change<int64_t, std::string>> changes;
+  std::vector<Change<CrdtRecordId, std::string>> changes;
 
   // Load regular changes
   std::string versions_table = "_crdt_" + table_name + "_versions";
@@ -235,7 +235,7 @@ void CRDTSQLite::load_crdt_state(const std::string &table_name) {
   sqlite3_prepare_v2(db_, load_versions.c_str(), -1, &stmt, nullptr);
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
-    int64_t record_id = sqlite3_column_int64(stmt, 0);
+    CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
     std::string col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
     uint64_t col_version = sqlite3_column_int64(stmt, 2);
     uint64_t db_version = sqlite3_column_int64(stmt, 3);
@@ -268,7 +268,7 @@ void CRDTSQLite::load_crdt_state(const std::string &table_name) {
   sqlite3_prepare_v2(db_, load_tombstones.c_str(), -1, &stmt, nullptr);
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
-    int64_t record_id = sqlite3_column_int64(stmt, 0);
+    CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
     uint64_t db_version = sqlite3_column_int64(stmt, 1);
     CrdtNodeId node_id = sqlite3_column_int64(stmt, 2);
     uint64_t local_db_version = sqlite3_column_int64(stmt, 3);
@@ -330,20 +330,20 @@ sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
   return stmt;
 }
 
-std::vector<Change<int64_t, std::string>>
+std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since(uint64_t last_db_version) {
   return crdt_.get_changes_since(last_db_version);
 }
 
-std::vector<Change<int64_t, std::string>>
+std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
                                        const CrdtSet<CrdtNodeId> &excluding) {
   return crdt_.get_changes_since(last_db_version, excluding);
 }
 
-std::vector<Change<int64_t, std::string>>
-CRDTSQLite::merge_changes(std::vector<Change<int64_t, std::string>> changes) {
-  DefaultMergeRule<int64_t, std::string> rule;
+std::vector<Change<CrdtRecordId, std::string>>
+CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes) {
+  DefaultMergeRule<CrdtRecordId, std::string> rule;
   auto accepted = crdt_.merge_changes<true>(std::move(changes), false, rule);
 
   // Apply accepted changes to SQLite
@@ -388,32 +388,59 @@ uint64_t CRDTSQLite::get_clock() const {
   return crdt_.get_clock().current_time();
 }
 
-void CRDTSQLite::track_change(int operation, const char *table, int64_t rowid) {
+void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId record_id) {
   if (table != tracked_table_) {
     return;
   }
 
   PendingChange change;
   change.operation = operation;
-  change.rowid = rowid;
+
+  // For non-auto-increment types (e.g., uint128_t), we need to query the actual ID
+  // from the id column instead of using rowid
+  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    // Query the id column using the rowid
+    std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
+    sqlite3_stmt *stmt = prepare(query.c_str());
+    sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid is always int64
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+    } else {
+      // Record not found or doesn't have id column - skip
+      sqlite3_finalize(stmt);
+      return;
+    }
+    sqlite3_finalize(stmt);
+  } else {
+    // For int64_t, rowid IS the record_id
+    change.record_id = record_id;
+  }
 
   if (operation == SQLITE_DELETE) {
     // For deletes, we don't need values
   } else {
     // For inserts and updates, query current values
-    change.values = query_row_values(rowid);
+    change.values = query_row_values(change.record_id);
   }
 
   pending_changes_.push_back(std::move(change));
 }
 
 std::unordered_map<std::string, SQLiteValue>
-CRDTSQLite::query_row_values(int64_t rowid) {
+CRDTSQLite::query_row_values(CrdtRecordId record_id) {
   std::unordered_map<std::string, SQLiteValue> values;
 
-  std::string query = "SELECT * FROM " + tracked_table_ + " WHERE rowid = ?";
+  // For uint128_t, query by id column; for int64_t, query by rowid
+  std::string query;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    query = "SELECT * FROM " + tracked_table_ + " WHERE rowid = ?";
+  } else {
+    query = "SELECT * FROM " + tracked_table_ + " WHERE id = ?";
+  }
+
   sqlite3_stmt *stmt = prepare(query.c_str());
-  sqlite3_bind_int64(stmt, 1, rowid);
+  RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, record_id);
 
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     int num_cols = sqlite3_column_count(stmt);
@@ -439,8 +466,8 @@ void CRDTSQLite::flush_changes() {
   for (const auto &change : pending_changes_) {
     if (change.operation == SQLITE_DELETE) {
       // Handle delete
-      std::vector<Change<int64_t, std::string>> delete_changes;
-      crdt_.delete_record(change.rowid, delete_changes);
+      std::vector<Change<CrdtRecordId, std::string>> delete_changes;
+      crdt_.delete_record(change.record_id, delete_changes);
       for (const auto &crdt_change : delete_changes) {
         update_shadow_tables(crdt_change);
       }
@@ -451,8 +478,8 @@ void CRDTSQLite::flush_changes() {
         fields.emplace_back(col_name, value.to_string());
       }
 
-      std::vector<Change<int64_t, std::string>> changes;
-      crdt_.insert_or_update_from_container(change.rowid, std::move(fields), changes);
+      std::vector<Change<CrdtRecordId, std::string>> changes;
+      crdt_.insert_or_update_from_container(change.record_id, std::move(fields), changes);
 
       for (const auto &crdt_change : changes) {
         update_shadow_tables(crdt_change);
@@ -471,23 +498,31 @@ void CRDTSQLite::flush_changes() {
   pending_changes_.clear();
 }
 
-void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>> &changes) {
+void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes) {
   // Temporarily disable hooks to avoid recursion
   sqlite3_update_hook(db_, nullptr, nullptr);
+
+  // Determine which column to use for WHERE clauses
+  std::string id_column;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    id_column = "rowid";
+  } else {
+    id_column = "id";
+  }
 
   for (const auto &change : changes) {
     if (!change.col_name.has_value()) {
       // Delete record
-      std::string delete_sql = "DELETE FROM " + tracked_table_ + " WHERE rowid = ?";
+      std::string delete_sql = "DELETE FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
       sqlite3_stmt *stmt = prepare(delete_sql.c_str());
-      sqlite3_bind_int64(stmt, 1, change.record_id);
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
       sqlite3_step(stmt);
       sqlite3_finalize(stmt);
     } else {
       // Check if record exists
-      std::string check_sql = "SELECT COUNT(*) FROM " + tracked_table_ + " WHERE rowid = ?";
+      std::string check_sql = "SELECT COUNT(*) FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
       sqlite3_stmt *stmt = prepare(check_sql.c_str());
-      sqlite3_bind_int64(stmt, 1, change.record_id);
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
       sqlite3_step(stmt);
       int count = sqlite3_column_int(stmt, 0);
       sqlite3_finalize(stmt);
@@ -496,9 +531,9 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>>
         // Field deletion - set to NULL or remove
         if (count > 0) {
           std::string update_sql = "UPDATE " + tracked_table_ + " SET " +
-                                  *change.col_name + " = NULL WHERE rowid = ?";
+                                  *change.col_name + " = NULL WHERE " + id_column + " = ?";
           stmt = prepare(update_sql.c_str());
-          sqlite3_bind_int64(stmt, 1, change.record_id);
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
           sqlite3_step(stmt);
           sqlite3_finalize(stmt);
         }
@@ -516,9 +551,9 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>>
         if (count == 0) {
           // Insert new record
           std::string insert_sql = "INSERT INTO " + tracked_table_ +
-                                  " (rowid, " + *change.col_name + ") VALUES (?, ?)";
+                                  " (" + id_column + ", " + *change.col_name + ") VALUES (?, ?)";
           stmt = prepare(insert_sql.c_str());
-          sqlite3_bind_int64(stmt, 1, change.record_id);
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
 
           switch (value.type) {
           case SQLiteValue::NULL_TYPE:
@@ -543,7 +578,7 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>>
         } else {
           // Update existing record
           std::string update_sql = "UPDATE " + tracked_table_ + " SET " +
-                                  *change.col_name + " = ? WHERE rowid = ?";
+                                  *change.col_name + " = ? WHERE " + id_column + " = ?";
           stmt = prepare(update_sql.c_str());
 
           switch (value.type) {
@@ -564,7 +599,7 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>>
             break;
           }
 
-          sqlite3_bind_int64(stmt, 2, change.record_id);
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, change.record_id);
           sqlite3_step(stmt);
           sqlite3_finalize(stmt);
         }
@@ -576,7 +611,7 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<int64_t, std::string>>
   sqlite3_update_hook(db_, update_callback, this);
 }
 
-void CRDTSQLite::update_shadow_tables(const Change<int64_t, std::string> &change) {
+void CRDTSQLite::update_shadow_tables(const Change<CrdtRecordId, std::string> &change) {
   if (!change.col_name.has_value()) {
     // Tombstone - update tombstones table
     std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
@@ -584,7 +619,7 @@ void CRDTSQLite::update_shadow_tables(const Change<int64_t, std::string> &change
                             " (record_id, db_version, node_id, local_db_version) "
                             "VALUES (?, ?, ?, ?)";
     sqlite3_stmt *stmt = prepare(insert_sql.c_str());
-    sqlite3_bind_int64(stmt, 1, change.record_id);
+    RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
     sqlite3_bind_int64(stmt, 2, change.db_version);
     sqlite3_bind_int64(stmt, 3, change.node_id);
     sqlite3_bind_int64(stmt, 4, change.local_db_version);
@@ -595,7 +630,7 @@ void CRDTSQLite::update_shadow_tables(const Change<int64_t, std::string> &change
     std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
     std::string delete_sql = "DELETE FROM " + versions_table + " WHERE record_id = ?";
     stmt = prepare(delete_sql.c_str());
-    sqlite3_bind_int64(stmt, 1, change.record_id);
+    RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
   } else {
@@ -605,7 +640,7 @@ void CRDTSQLite::update_shadow_tables(const Change<int64_t, std::string> &change
                             " (record_id, col_name, col_version, db_version, node_id, local_db_version) "
                             "VALUES (?, ?, ?, ?, ?, ?)";
     sqlite3_stmt *stmt = prepare(insert_sql.c_str());
-    sqlite3_bind_int64(stmt, 1, change.record_id);
+    RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
     sqlite3_bind_text(stmt, 2, change.col_name->c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 3, change.col_version);
     sqlite3_bind_int64(stmt, 4, change.db_version);
@@ -652,7 +687,7 @@ std::string CRDTSQLite::get_error() const {
 }
 
 // Simple JSON serialization (for demo purposes - production should use a proper JSON library)
-std::string CRDTSQLite::changes_to_json(const std::vector<Change<int64_t, std::string>> &changes) {
+std::string CRDTSQLite::changes_to_json(const std::vector<Change<CrdtRecordId, std::string>> &changes) {
   std::ostringstream oss;
   oss << "[";
   bool first = true;
@@ -660,7 +695,7 @@ std::string CRDTSQLite::changes_to_json(const std::vector<Change<int64_t, std::s
     if (!first) oss << ",";
     first = false;
 
-    oss << "{\"record_id\":" << change.record_id << ",";
+    oss << "{\"record_id\":\"" << RecordIdTraits<CrdtRecordId>::to_string(change.record_id) << "\",";
 
     if (change.col_name.has_value()) {
       oss << "\"col_name\":\"" << *change.col_name << "\",";
@@ -690,11 +725,11 @@ std::string CRDTSQLite::changes_to_json(const std::vector<Change<int64_t, std::s
   return oss.str();
 }
 
-std::vector<Change<int64_t, std::string>>
+std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::changes_from_json(const std::string &json) {
   // Simple JSON parser for demo purposes
   // Production code should use a proper JSON library
-  std::vector<Change<int64_t, std::string>> changes;
+  std::vector<Change<CrdtRecordId, std::string>> changes;
 
   // This is a very basic parser - just for demonstration
   // In production, use nlohmann/json or similar

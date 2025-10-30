@@ -3,6 +3,7 @@
 #define CRDT_SQLITE_HPP
 
 #include "crdt.hpp"
+#include "record_id_types.hpp"
 #include <sqlite3.h>
 #include <string>
 #include <vector>
@@ -10,6 +11,14 @@
 #include <unordered_map>
 #include <optional>
 #include <stdexcept>
+
+// Allow users to override the record ID type
+// Usage: #define CRDT_RECORD_ID_TYPE uint128_t before including this header
+#ifndef CRDT_RECORD_ID_TYPE
+using CrdtRecordId = int64_t;
+#else
+using CrdtRecordId = CRDT_RECORD_ID_TYPE;
+#endif
 
 /// Exception thrown for CRDT-SQLite specific errors
 class CRDTSQLiteException : public std::runtime_error {
@@ -37,7 +46,7 @@ struct SQLiteValue {
 /// Pending change during a transaction
 struct PendingChange {
   int operation; // SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE
-  int64_t rowid;
+  CrdtRecordId record_id;
   std::unordered_map<std::string, SQLiteValue> values;
 };
 
@@ -109,14 +118,14 @@ public:
   ///
   /// @param last_db_version Version to get changes since (0 for all changes)
   /// @return Vector of changes that occurred after last_db_version
-  std::vector<Change<int64_t, std::string>> get_changes_since(uint64_t last_db_version);
+  std::vector<Change<CrdtRecordId, std::string>> get_changes_since(uint64_t last_db_version);
 
   /// Gets changes since a version, excluding specific nodes
   ///
   /// @param last_db_version Version to get changes since
   /// @param excluding Set of node IDs to exclude
   /// @return Vector of changes
-  std::vector<Change<int64_t, std::string>> get_changes_since_excluding(
+  std::vector<Change<CrdtRecordId, std::string>> get_changes_since_excluding(
     uint64_t last_db_version,
     const CrdtSet<CrdtNodeId> &excluding);
 
@@ -127,8 +136,8 @@ public:
   ///
   /// @param changes Vector of changes to merge
   /// @return Vector of accepted changes (those that won conflict resolution)
-  std::vector<Change<int64_t, std::string>> merge_changes(
-    std::vector<Change<int64_t, std::string>> changes);
+  std::vector<Change<CrdtRecordId, std::string>> merge_changes(
+    std::vector<Change<CrdtRecordId, std::string>> changes);
 
   /// Compacts tombstones older than the specified version
   ///
@@ -154,18 +163,18 @@ public:
   ///
   /// @param changes Changes to serialize
   /// @return JSON string
-  static std::string changes_to_json(const std::vector<Change<int64_t, std::string>> &changes);
+  static std::string changes_to_json(const std::vector<Change<CrdtRecordId, std::string>> &changes);
 
   /// Deserializes changes from JSON
   ///
   /// @param json JSON string
   /// @return Vector of changes
-  static std::vector<Change<int64_t, std::string>> changes_from_json(const std::string &json);
+  static std::vector<Change<CrdtRecordId, std::string>> changes_from_json(const std::string &json);
 
 private:
   sqlite3 *db_;
   std::string tracked_table_;
-  CRDT<int64_t, std::string> crdt_;
+  CRDT<CrdtRecordId, std::string> crdt_;
 
   // Pending changes within current transaction
   std::vector<PendingChange> pending_changes_;
@@ -184,19 +193,19 @@ private:
   void cache_column_types();
 
   /// Tracks a change from the update hook
-  void track_change(int operation, const char *table, int64_t rowid);
+  void track_change(int operation, const char *table, CrdtRecordId record_id);
 
   /// Queries the current values of a row
-  std::unordered_map<std::string, SQLiteValue> query_row_values(int64_t rowid);
+  std::unordered_map<std::string, SQLiteValue> query_row_values(CrdtRecordId record_id);
 
   /// Flushes pending changes to CRDT and shadow tables
   void flush_changes();
 
   /// Applies accepted changes to SQLite table
-  void apply_to_sqlite(const std::vector<Change<int64_t, std::string>> &changes);
+  void apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes);
 
   /// Updates shadow tables with change information
-  void update_shadow_tables(const Change<int64_t, std::string> &change);
+  void update_shadow_tables(const Change<CrdtRecordId, std::string> &change);
 
   /// SQLite callback for update hook
   static void update_callback(void *ctx, int operation,

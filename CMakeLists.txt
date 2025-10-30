@@ -79,6 +79,26 @@ if(BUILD_TESTS)
     add_executable(test_crdt_sqlite test_crdt_sqlite.cpp)
     target_link_libraries(test_crdt_sqlite PRIVATE crdt_sqlite)
     add_test(NAME crdt_sqlite_tests COMMAND test_crdt_sqlite)
+
+    # SQLite CRDT uint128 tests (if __uint128_t is supported)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+      int main() {
+        __uint128_t x = 0;
+        return 0;
+      }
+    " HAVE_UINT128)
+
+    if(HAVE_UINT128)
+      add_library(crdt_sqlite_uint128 STATIC crdt_sqlite.cpp crdt_sqlite.hpp crdt.hpp record_id_types.hpp)
+      target_compile_definitions(crdt_sqlite_uint128 PRIVATE CRDT_RECORD_ID_TYPE=__uint128_t)
+      target_link_libraries(crdt_sqlite_uint128 PUBLIC SQLite::SQLite3)
+
+      add_executable(test_crdt_sqlite_uint128 test_crdt_sqlite_uint128.cpp)
+      target_compile_definitions(test_crdt_sqlite_uint128 PRIVATE CRDT_RECORD_ID_TYPE=__uint128_t)
+      target_link_libraries(test_crdt_sqlite_uint128 PRIVATE crdt_sqlite_uint128)
+      add_test(NAME crdt_sqlite_uint128_tests COMMAND test_crdt_sqlite_uint128)
+    endif()
   endif()
 endif()
 
