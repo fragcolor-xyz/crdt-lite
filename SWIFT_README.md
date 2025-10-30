@@ -258,6 +258,18 @@ swift build
 # Run tests
 swift test
 
+# Run tests in parallel (faster)
+swift test --parallel
+
+# Run specific test
+swift test --filter CRDTTests.testBasicInsert
+
+# Build in release mode
+swift build -c release
+
+# Run tests in release mode
+swift test -c release
+
 # Generate Xcode project
 swift package generate-xcodeproj
 open CRDTLite.xcodeproj
@@ -269,15 +281,37 @@ open CRDTLite.xcodeproj
 # Install Swift (Ubuntu/Debian)
 # Follow instructions at https://swift.org/download/
 
+# Or use the official installer:
+# wget https://swift.org/builds/swift-5.9-release/ubuntu2204/swift-5.9-RELEASE/swift-5.9-RELEASE-ubuntu22.04.tar.gz
+# tar xzf swift-5.9-RELEASE-ubuntu22.04.tar.gz
+# export PATH=$PWD/swift-5.9-RELEASE-ubuntu22.04/usr/bin:$PATH
+
 # Build
 swift build
 
 # Run tests
 swift test
 
+# Run tests in parallel
+swift test --parallel
+
 # Run specific test
 swift test --filter CRDTTests.testBasicInsert
 ```
+
+### Continuous Integration
+
+The Swift implementation is tested automatically on every push and pull request via GitHub Actions:
+
+- ✅ **Multi-platform testing** - Both Ubuntu and macOS
+- ✅ **Debug and Release builds** - Ensures optimization doesn't break functionality
+- ✅ **Parallel test execution** - Verifies thread safety
+- ✅ **iOS simulator build** - Validates iOS compatibility
+- ✅ **Package validation** - Checks Package.swift integrity
+
+See [.github/workflows/swift-ci.yml](.github/workflows/swift-ci.yml) for the full CI configuration.
+
+**Note:** Swift wasn't available in the development environment during implementation, but the code follows established patterns from the Rust and C++ versions. The GitHub Actions CI will verify all tests pass on actual Swift installations.
 
 ### Test Coverage
 

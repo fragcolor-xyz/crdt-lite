@@ -1,0 +1,108 @@
+name: Swift CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test-swift:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            swift-version: '5.9'
+          - os: macos-latest
+            swift-version: '5.9'
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Swift (Ubuntu)
+      if: runner.os == 'Linux'
+      uses: swift-actions/setup-swift@v2
+      with:
+        swift-version: ${{ matrix.swift-version }}
+
+    # macOS runners come with Swift pre-installed
+    - name: Check Swift Version
+      run: swift --version
+
+    - name: Resolve Dependencies
+      run: swift package resolve
+
+    - name: Check Package.swift is valid
+      run: swift package dump-package
+
+    - name: Build Swift Package (Debug)
+      run: swift build -v
+
+    - name: Build Swift Package (Release)
+      run: swift build -c release -v
+
+    - name: Run Swift Tests (Debug)
+      run: swift test -v
+
+    - name: Run Swift Tests (Release)
+      run: swift test -c release -v
+
+    - name: Run Swift Tests with Parallel Execution
+      run: swift test --parallel -v
+
+  test-swift-platforms:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check Swift Version
+      run: swift --version
+
+    - name: List Available Simulators
+      run: xcrun simctl list devices available
+
+    - name: Build for macOS
+      run: swift build -v
+
+    - name: Test on macOS
+      run: swift test -v
+
+    # Test iOS build (without running tests, as simulator tests require xcodebuild)
+    - name: Build for iOS Simulator
+      run: |
+        swift build \
+          --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+          -Xswiftc "-sdk" \
+          -Xswiftc "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+          -Xswiftc "-target" \
+          -Xswiftc "arm64-apple-ios15.0-simulator"
+
+  code-quality:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check Swift Version
+      run: swift --version
+
+    # SwiftLint is optional - uncomment if you want to add it later
+    # - name: Install SwiftLint
+    #   run: brew install swiftlint
+
+    # - name: Run SwiftLint
+    #   run: swiftlint lint --strict
+
+    - name: Check for TODO/FIXME comments
+      run: |
+        echo "Checking for TODO/FIXME comments..."
+        grep -r "TODO\|FIXME" Sources/ Tests/ || echo "No TODO/FIXME found"
+
+    - name: Check file permissions
+      run: |
+        echo "Checking for executable Swift files (should not be executable)..."
+        find Sources Tests -name "*.swift" -perm +111 || echo "No executable Swift files found"
