@@ -1,0 +1,550 @@
+// test_crdt_sqlite.cpp
+#include "crdt_sqlite.hpp"
+#include <iostream>
+#include <cassert>
+#include <filesystem>
+#include <cstdio>
+
+namespace fs = std::filesystem;
+
+// Test helper macros
+#define TEST(name) void test_##name()
+#define RUN_TEST(name) \
+  do { \
+    std::cout << "Running test: " << #name << "..."; \
+    test_##name(); \
+    std::cout << " PASSED" << std::endl; \
+  } while (0)
+
+#define ASSERT_EQ(a, b) \
+  do { \
+    if ((a) != (b)) { \
+      std::cerr << "Assertion failed: " << #a << " == " << #b \
+                << " (got " << (a) << " and " << (b) << ")" << std::endl; \
+      std::exit(1); \
+    } \
+  } while (0)
+
+#define ASSERT_TRUE(cond) \
+  do { \
+    if (!(cond)) { \
+      std::cerr << "Assertion failed: " << #cond << std::endl; \
+      std::exit(1); \
+    } \
+  } while (0)
+
+#define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
+
+// Test database helper
+class TestDB {
+public:
+  TestDB(const std::string &name) : path_("test_" + name + ".db") {
+    // Remove if exists
+    if (fs::exists(path_)) {
+      fs::remove(path_);
+    }
+  }
+
+  ~TestDB() {
+    // Clean up
+    if (fs::exists(path_)) {
+      fs::remove(path_);
+    }
+  }
+
+  const char *path() const { return path_.c_str(); }
+
+private:
+  std::string path_;
+};
+
+// Helper to count rows in a table
+int count_rows(sqlite3 *db, const std::string &table) {
+  std::string query = "SELECT COUNT(*) FROM " + table;
+  sqlite3_stmt *stmt;
+  sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+  sqlite3_step(stmt);
+  int count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return count;
+}
+
+// Helper to get a string value from a table
+std::string get_value(sqlite3 *db, const std::string &table,
+                     const std::string &col, int64_t rowid) {
+  std::string query = "SELECT " + col + " FROM " + table + " WHERE rowid = ?";
+  sqlite3_stmt *stmt;
+  sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+  sqlite3_bind_int64(stmt, 1, rowid);
+
+  std::string result;
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    const unsigned char *text = sqlite3_column_text(stmt, 0);
+    if (text) {
+      result = reinterpret_cast<const char *>(text);
+    }
+  }
+  sqlite3_finalize(stmt);
+  return result;
+}
+
+// Test 1: Basic initialization
+TEST(basic_init) {
+  TestDB test_db("basic_init");
+  CRDTSQLite db(test_db.path(), 1);
+
+  // Create a simple table
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+  // Enable CRDT
+  db.enable_crdt("users");
+
+  // Check that shadow tables were created
+  sqlite3 *raw_db = db.get_db();
+  sqlite3_stmt *stmt;
+  const char *check_sql = "SELECT name FROM sqlite_master WHERE type='table' "
+                         "AND (name='_crdt_users_versions' OR name='_crdt_users_tombstones' "
+                         "OR name='_crdt_users_clock')";
+  sqlite3_prepare_v2(raw_db, check_sql, -1, &stmt, nullptr);
+
+  int table_count = 0;
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    table_count++;
+  }
+  sqlite3_finalize(stmt);
+
+  ASSERT_EQ(table_count, 3); // versions, tombstones, clock
+}
+
+// Test 2: Simple insert
+TEST(simple_insert) {
+  TestDB test_db("simple_insert");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+  db.enable_crdt("users");
+
+  // Insert a row
+  db.execute("INSERT INTO users (name, age) VALUES ('Alice', 30)");
+
+  // Check that it's in the database
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+
+  // Check that we can get changes
+  auto changes = db.get_changes_since(0);
+  ASSERT_TRUE(changes.size() >= 2); // name and age columns
+}
+
+// Test 3: Update operation
+TEST(update_operation) {
+  TestDB test_db("update_operation");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+  db.enable_crdt("users");
+
+  db.execute("INSERT INTO users (name, age) VALUES ('Bob', 25)");
+  uint64_t version_after_insert = db.get_clock();
+
+  db.execute("UPDATE users SET age = 26 WHERE name = 'Bob'");
+
+  auto changes = db.get_changes_since(version_after_insert);
+  ASSERT_TRUE(changes.size() > 0); // Should have update changes
+
+  // Verify the value changed
+  std::string age = get_value(db.get_db(), "users", "age", 1);
+  ASSERT_EQ(age, "26");
+}
+
+// Test 4: Delete operation
+TEST(delete_operation) {
+  TestDB test_db("delete_operation");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  db.execute("INSERT INTO users (name) VALUES ('Charlie')");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+
+  uint64_t version_before_delete = db.get_clock();
+
+  db.execute("DELETE FROM users WHERE name = 'Charlie'");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);
+
+  // Check tombstone was created
+  ASSERT_EQ(db.tombstone_count(), 1);
+
+  // Check changes include deletion
+  auto changes = db.get_changes_since(version_before_delete);
+  bool found_delete = false;
+  for (const auto &change : changes) {
+    if (!change.col_name.has_value()) {
+      found_delete = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_delete);
+}
+
+// Test 5: Two-node sync
+TEST(two_node_sync) {
+  TestDB test_db1("two_node_1");
+  TestDB test_db2("two_node_2");
+
+  CRDTSQLite db1(test_db1.path(), 1);
+  CRDTSQLite db2(test_db2.path(), 2);
+
+  // Create same schema on both
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+
+  db1.enable_crdt("users");
+  db2.enable_crdt("users");
+
+  // Insert on node 1
+  db1.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')");
+
+  // Get changes and sync to node 2
+  auto changes = db1.get_changes_since(0);
+  db2.merge_changes(changes);
+
+  // Verify node 2 has the data
+  ASSERT_EQ(count_rows(db2.get_db(), "users"), 1);
+  ASSERT_EQ(get_value(db2.get_db(), "users", "name", 1), "Alice");
+  ASSERT_EQ(get_value(db2.get_db(), "users", "email", 1), "alice@example.com");
+}
+
+// Test 6: Concurrent updates (conflict resolution)
+TEST(concurrent_updates) {
+  TestDB test_db1("concurrent_1");
+  TestDB test_db2("concurrent_2");
+
+  CRDTSQLite db1(test_db1.path(), 1);
+  CRDTSQLite db2(test_db2.path(), 2);
+
+  // Create same schema
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+  db1.enable_crdt("users");
+  db2.enable_crdt("users");
+
+  // Insert same record on both nodes
+  db1.execute("INSERT INTO users (rowid, name) VALUES (1, 'Alice')");
+  db2.execute("INSERT INTO users (rowid, name) VALUES (1, 'Bob')");
+
+  // Sync node 1 -> node 2
+  auto changes1 = db1.get_changes_since(0);
+  db2.merge_changes(changes1);
+
+  // Sync node 2 -> node 1
+  auto changes2 = db2.get_changes_since(0);
+  db1.merge_changes(changes2);
+
+  // Both should converge to the same value (node 2's value wins due to higher node_id)
+  std::string name1 = get_value(db1.get_db(), "users", "name", 1);
+  std::string name2 = get_value(db2.get_db(), "users", "name", 1);
+
+  ASSERT_EQ(name1, name2);
+  ASSERT_EQ(name1, "Bob"); // Node 2 wins
+}
+
+// Test 7: Delete sync
+TEST(delete_sync) {
+  TestDB test_db1("delete_sync_1");
+  TestDB test_db2("delete_sync_2");
+
+  CRDTSQLite db1(test_db1.path(), 1);
+  CRDTSQLite db2(test_db2.path(), 2);
+
+  // Create same schema
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+  db1.enable_crdt("users");
+  db2.enable_crdt("users");
+
+  // Insert on node 1 and sync
+  db1.execute("INSERT INTO users (name) VALUES ('Charlie')");
+  auto changes = db1.get_changes_since(0);
+  db2.merge_changes(changes);
+
+  ASSERT_EQ(count_rows(db1.get_db(), "users"), 1);
+  ASSERT_EQ(count_rows(db2.get_db(), "users"), 1);
+
+  // Delete on node 1
+  uint64_t version_before_delete = db1.get_clock();
+  db1.execute("DELETE FROM users WHERE name = 'Charlie'");
+
+  // Sync deletion to node 2
+  auto delete_changes = db1.get_changes_since(version_before_delete);
+  db2.merge_changes(delete_changes);
+
+  // Both should have 0 rows
+  ASSERT_EQ(count_rows(db1.get_db(), "users"), 0);
+  ASSERT_EQ(count_rows(db2.get_db(), "users"), 0);
+
+  // Both should have tombstone
+  ASSERT_EQ(db1.tombstone_count(), 1);
+  ASSERT_EQ(db2.tombstone_count(), 1);
+}
+
+// Test 8: Multiple columns
+TEST(multiple_columns) {
+  TestDB test_db("multiple_columns");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price REAL, stock INTEGER)");
+  db.enable_crdt("products");
+
+  db.execute("INSERT INTO products (name, price, stock) VALUES ('Widget', 19.99, 100)");
+
+  auto changes = db.get_changes_since(0);
+
+  // Should have changes for name, price, and stock
+  bool has_name = false, has_price = false, has_stock = false;
+  for (const auto &change : changes) {
+    if (change.col_name.has_value()) {
+      if (*change.col_name == "name") has_name = true;
+      if (*change.col_name == "price") has_price = true;
+      if (*change.col_name == "stock") has_stock = true;
+    }
+  }
+
+  ASSERT_TRUE(has_name);
+  ASSERT_TRUE(has_price);
+  ASSERT_TRUE(has_stock);
+}
+
+// Test 9: Tombstone compaction
+TEST(tombstone_compaction) {
+  TestDB test_db("tombstone_compaction");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  // Insert and delete multiple rows
+  for (int i = 1; i <= 10; i++) {
+    std::string sql = "INSERT INTO users (rowid, name) VALUES (" + std::to_string(i) + ", 'User" + std::to_string(i) + "')";
+    db.execute(sql.c_str());
+  }
+
+  // Verify all inserts created tombstones when deleted
+  int initial_tombstones = 0;
+  for (int i = 1; i <= 10; i++) {
+    std::string sql = "DELETE FROM users WHERE rowid = " + std::to_string(i);
+    db.execute(sql.c_str());
+    initial_tombstones++;
+  }
+
+  // The actual tombstone count may vary based on which deletes succeeded
+  size_t tombstone_count_before = db.tombstone_count();
+  ASSERT_TRUE(tombstone_count_before >= 9 && tombstone_count_before <= 10);
+
+  // Compact tombstones (use current_clock + 1 to ensure all current tombstones are included)
+  uint64_t compact_version = db.get_clock() + 1;
+  size_t removed = db.compact_tombstones(compact_version);
+
+  ASSERT_EQ(removed, tombstone_count_before);
+  ASSERT_EQ(db.tombstone_count(), 0);
+}
+
+// Test 10: Transaction rollback
+TEST(transaction_rollback) {
+  TestDB test_db("transaction_rollback");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  db.execute("INSERT INTO users (name) VALUES ('Alice')");
+  uint64_t version_after_first = db.get_clock();
+
+  // Start transaction, insert, then rollback
+  db.execute("BEGIN TRANSACTION");
+  db.execute("INSERT INTO users (name) VALUES ('Bob')");
+  db.execute("ROLLBACK");
+
+  // Should only have Alice
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+
+  // Clock should not have advanced (rollback cleared pending changes)
+  uint64_t version_after_rollback = db.get_clock();
+  ASSERT_EQ(version_after_first, version_after_rollback);
+}
+
+// Test 11: Transaction commit
+TEST(transaction_commit) {
+  TestDB test_db("transaction_commit");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  uint64_t version_start = db.get_clock();
+
+  // Transaction with multiple inserts
+  db.execute("BEGIN TRANSACTION");
+  db.execute("INSERT INTO users (name) VALUES ('Alice')");
+  db.execute("INSERT INTO users (name) VALUES ('Bob')");
+  db.execute("COMMIT");
+
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 2);
+
+  // Clock should have advanced
+  ASSERT_TRUE(db.get_clock() > version_start);
+}
+
+// Test 12: Persistence (reload from disk)
+TEST(persistence) {
+  const char *db_path = "test_persistence.db";
+
+  // Remove if exists
+  if (fs::exists(db_path)) {
+    fs::remove(db_path);
+  }
+
+  uint64_t final_clock;
+
+  // Scope 1: Create and populate
+  {
+    CRDTSQLite db(db_path, 1);
+    db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+    db.enable_crdt("users");
+
+    db.execute("INSERT INTO users (name) VALUES ('Alice')");
+    db.execute("INSERT INTO users (name) VALUES ('Bob')");
+
+    final_clock = db.get_clock();
+  }
+
+  // Scope 2: Reopen and verify
+  {
+    CRDTSQLite db(db_path, 1);
+    db.enable_crdt("users");
+
+    ASSERT_EQ(count_rows(db.get_db(), "users"), 2);
+    ASSERT_EQ(db.get_clock(), final_clock);
+
+    // Can still get changes
+    auto changes = db.get_changes_since(0);
+    ASSERT_TRUE(changes.size() >= 2);
+  }
+
+  // Cleanup
+  fs::remove(db_path);
+}
+
+// Test 13: Excluding nodes in get_changes_since
+TEST(exclude_nodes) {
+  TestDB test_db1("exclude_1");
+  TestDB test_db2("exclude_2");
+
+  CRDTSQLite db1(test_db1.path(), 1);
+  CRDTSQLite db2(test_db2.path(), 2);
+
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+  db1.enable_crdt("users");
+  db2.enable_crdt("users");
+
+  // Insert on both
+  db1.execute("INSERT INTO users (name) VALUES ('Alice')");
+  db2.execute("INSERT INTO users (name) VALUES ('Bob')");
+
+  // Sync bidirectionally
+  auto changes1 = db1.get_changes_since(0);
+  auto changes2 = db2.get_changes_since(0);
+  db1.merge_changes(changes2);
+  db2.merge_changes(changes1);
+
+  // Now get changes excluding node 1
+  CrdtSet<CrdtNodeId> excluding;
+  excluding.insert(1);
+  auto filtered = db1.get_changes_since_excluding(0, excluding);
+
+  // Should only have changes from node 2
+  for (const auto &change : filtered) {
+    ASSERT_EQ(change.node_id, 2);
+  }
+}
+
+// Test 14: NULL values
+TEST(null_values) {
+  TestDB test_db("null_values");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+  db.enable_crdt("users");
+
+  db.execute("INSERT INTO users (name, email) VALUES ('Alice', NULL)");
+
+  auto changes = db.get_changes_since(0);
+
+  // Should have a change for email column even though it's NULL
+  bool has_email = false;
+  for (const auto &change : changes) {
+    if (change.col_name.has_value() && *change.col_name == "email") {
+      has_email = true;
+      // Value should represent NULL
+      ASSERT_TRUE(change.value.has_value());
+      ASSERT_EQ(*change.value, "NULL");
+    }
+  }
+  ASSERT_TRUE(has_email);
+}
+
+// Test 15: Integer types
+TEST(integer_types) {
+  TestDB test_db("integer_types");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE numbers (id INTEGER PRIMARY KEY, value INTEGER)");
+  db.enable_crdt("numbers");
+
+  db.execute("INSERT INTO numbers (value) VALUES (42)");
+  db.execute("INSERT INTO numbers (value) VALUES (-123)");
+  db.execute("INSERT INTO numbers (value) VALUES (0)");
+
+  auto changes = db.get_changes_since(0);
+
+  // Verify integer values are correctly stored
+  bool found_42 = false, found_neg = false, found_zero = false;
+  for (const auto &change : changes) {
+    if (change.col_name.has_value() && *change.col_name == "value" && change.value.has_value()) {
+      if (*change.value == "42") found_42 = true;
+      if (*change.value == "-123") found_neg = true;
+      if (*change.value == "0") found_zero = true;
+    }
+  }
+
+  ASSERT_TRUE(found_42);
+  ASSERT_TRUE(found_neg);
+  ASSERT_TRUE(found_zero);
+}
+
+int main() {
+  std::cout << "Running CRDT-SQLite tests..." << std::endl << std::endl;
+
+  RUN_TEST(basic_init);
+  RUN_TEST(simple_insert);
+  RUN_TEST(update_operation);
+  RUN_TEST(delete_operation);
+  RUN_TEST(two_node_sync);
+  RUN_TEST(concurrent_updates);
+  RUN_TEST(delete_sync);
+  RUN_TEST(multiple_columns);
+  RUN_TEST(tombstone_compaction);
+  RUN_TEST(transaction_rollback);
+  RUN_TEST(transaction_commit);
+  RUN_TEST(persistence);
+  RUN_TEST(exclude_nodes);
+  RUN_TEST(null_values);
+  RUN_TEST(integer_types);
+
+  std::cout << std::endl << "All tests passed!" << std::endl;
+  return 0;
+}

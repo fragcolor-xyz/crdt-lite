@@ -1,0 +1,297 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master, develop, claude/* ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    name: Test on Linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { cc: gcc-11, cxx: g++-11 }
+          - { cc: gcc-12, cxx: g++-12 }
+          - { cc: clang-14, cxx: clang++-14 }
+          - { cc: clang-15, cxx: clang++-15 }
+        build_type: [Debug, Release]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          ninja-build \
+          libsqlite3-dev \
+          ${{ matrix.compiler.cc }} \
+          ${{ matrix.compiler.cxx }}
+
+    - name: Configure CMake
+      env:
+        CC: ${{ matrix.compiler.cc }}
+        CXX: ${{ matrix.compiler.cxx }}
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DBUILD_TESTS=ON \
+          -DBUILD_SQLITE_WRAPPER=ON
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure --verbose
+
+    - name: Upload test results
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-linux-${{ matrix.compiler.cc }}-${{ matrix.build_type }}
+        path: |
+          build/Testing/
+          build/**/*.log
+
+  test-macos:
+    name: Test on macOS
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        brew install cmake ninja sqlite3
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DBUILD_TESTS=ON \
+          -DBUILD_SQLITE_WRAPPER=ON
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure --verbose
+
+    - name: Upload test results
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-macos-${{ matrix.build_type }}
+        path: |
+          build/Testing/
+          build/**/*.log
+
+  test-windows:
+    name: Test on Windows
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Install dependencies with vcpkg
+      run: |
+        vcpkg install sqlite3:x64-windows
+
+    - name: Configure CMake
+      run: |
+        cmake -B build `
+          -G "Visual Studio 17 2022" `
+          -A x64 `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DBUILD_TESTS=ON `
+          -DBUILD_SQLITE_WRAPPER=ON
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest -C ${{ matrix.build_type }} --output-on-failure --verbose
+
+    - name: Upload test results
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-windows-${{ matrix.build_type }}
+        path: |
+          build/Testing/
+          build/**/*.log
+
+  sanitizers:
+    name: Sanitizers (Linux)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - { name: address, flags: "-fsanitize=address -fno-omit-frame-pointer" }
+          - { name: undefined, flags: "-fsanitize=undefined -fno-omit-frame-pointer" }
+          - { name: thread, flags: "-fsanitize=thread -fno-omit-frame-pointer" }
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          ninja-build \
+          libsqlite3-dev \
+          clang-15
+
+    - name: Configure CMake with ${{ matrix.sanitizer.name }} sanitizer
+      env:
+        CC: clang-15
+        CXX: clang++-15
+        CFLAGS: ${{ matrix.sanitizer.flags }}
+        CXXFLAGS: ${{ matrix.sanitizer.flags }}
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DBUILD_TESTS=ON \
+          -DBUILD_SQLITE_WRAPPER=ON \
+          -DCMAKE_C_FLAGS="${{ matrix.sanitizer.flags }}" \
+          -DCMAKE_CXX_FLAGS="${{ matrix.sanitizer.flags }}"
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests with ${{ matrix.sanitizer.name }} sanitizer
+      run: |
+        cd build
+        ctest --output-on-failure --verbose
+
+  valgrind:
+    name: Valgrind Memory Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          ninja-build \
+          libsqlite3-dev \
+          valgrind \
+          gcc-12 \
+          g++-12
+
+    - name: Configure CMake
+      env:
+        CC: gcc-12
+        CXX: g++-12
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DBUILD_TESTS=ON \
+          -DBUILD_SQLITE_WRAPPER=ON
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests with Valgrind
+      run: |
+        cd build
+        ctest --output-on-failure --verbose \
+          --overwrite MemoryCheckCommandOptions="--leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1" \
+          -T memcheck
+
+    - name: Upload Valgrind results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: valgrind-results
+        path: build/Testing/Temporary/MemoryChecker.*.log
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          ninja-build \
+          libsqlite3-dev \
+          gcovr \
+          gcc-12 \
+          g++-12
+
+    - name: Configure CMake with coverage
+      env:
+        CC: gcc-12
+        CXX: g++-12
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DBUILD_TESTS=ON \
+          -DBUILD_SQLITE_WRAPPER=ON \
+          -DCMAKE_CXX_FLAGS="--coverage -fprofile-arcs -ftest-coverage"
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure
+
+    - name: Generate coverage report
+      run: |
+        gcovr --root . --filter 'crdt.*\.(hpp|cpp)' \
+          --exclude '.*test.*' \
+          --print-summary \
+          --xml coverage.xml
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./coverage.xml
+        fail_ci_if_error: false
+        verbose: true
