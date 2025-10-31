@@ -121,6 +121,37 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
 
 CRDTSQLite::~CRDTSQLite() {
   if (db_) {
+    // Flush pending changes if in autocommit mode
+    // If in a transaction, can't flush (user must commit/rollback)
+    if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
+      try {
+        // Begin transaction, flush, commit
+        // Don't use exec_or_throw (throws), use sqlite3_exec directly
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, &err) == SQLITE_OK) {
+          flush_changes();
+          sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &err);
+          if (err) sqlite3_free(err);
+        } else {
+          // Failed to start transaction - warn but don't throw (in destructor)
+          std::fprintf(stderr,
+            "CRDT-SQLite: Warning: Failed to flush pending changes on close: %s\n",
+            err ? err : "unknown error");
+          if (err) sqlite3_free(err);
+        }
+      } catch (const std::exception& e) {
+        // Flush failed - warn but don't throw from destructor
+        std::fprintf(stderr,
+          "CRDT-SQLite: Warning: Exception during flush on close: %s\n",
+          e.what());
+      }
+    } else if (!pending_changes_.empty()) {
+      // Pending changes exist but we're in a transaction
+      std::fprintf(stderr,
+        "CRDT-SQLite: Warning: %zu pending changes discarded (active transaction on close)\n",
+        pending_changes_.size());
+    }
+
     sqlite3_close(db_);
   }
 }
