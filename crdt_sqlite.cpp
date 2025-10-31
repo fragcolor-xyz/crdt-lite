@@ -101,7 +101,11 @@ SQLiteValue SQLiteValue::from_string(const std::string &str, Type type) {
 
 CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
     : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false), processing_wal_changes_(false) {
-  int rc = sqlite3_open(path, &db_);
+  // CRITICAL: Use SQLITE_OPEN_FULLMUTEX to ensure proper mutex protection
+  // This is essential for Windows where vcpkg SQLite may have different default threading
+  int rc = sqlite3_open_v2(path, &db_,
+                          SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                          nullptr);
   if (rc != SQLITE_OK) {
     std::string error = "Failed to open database: " + std::string(sqlite3_errmsg(db_));
     sqlite3_close(db_);
