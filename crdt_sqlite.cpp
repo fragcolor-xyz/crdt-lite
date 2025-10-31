@@ -100,7 +100,7 @@ SQLiteValue SQLiteValue::from_string(const std::string &str, Type type) {
 // CRDTSQLite implementation
 
 CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
-    : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false) {
+    : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false), processing_wal_changes_(false) {
   int rc = sqlite3_open(path, &db_);
   if (rc != SQLITE_OK) {
     std::string error = "Failed to open database: " + std::string(sqlite3_errmsg(db_));
@@ -157,9 +157,13 @@ void CRDTSQLite::enable_crdt(const std::string &table_name) {
     throw CRDTSQLiteException("Table does not exist: " + table_name);
   }
 
-  tracked_table_ = table_name;
-  cache_column_types();
+  // IMPORTANT: Set tracked_table_ AFTER creating shadow tables
+  // Otherwise wal_callback fires during shadow table creation and tries to access non-existent tables
+  cache_column_types(table_name);
   create_shadow_tables(table_name);
+
+  // Only set tracked_table_ after everything is ready
+  tracked_table_ = table_name;
   // No need to load into memory - we query shadow tables directly
 }
 
@@ -338,8 +342,8 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   exec_or_throw(delete_trigger.c_str());
 }
 
-void CRDTSQLite::cache_column_types() {
-  std::string pragma_sql = "PRAGMA table_info(" + tracked_table_ + ")";
+void CRDTSQLite::cache_column_types(const std::string &table_name) {
+  std::string pragma_sql = "PRAGMA table_info(" + table_name + ")";
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(db_, pragma_sql.c_str(), -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
@@ -373,7 +377,7 @@ void CRDTSQLite::refresh_schema() {
   }
 
   // Re-scan column types from table
-  cache_column_types();
+  cache_column_types(tracked_table_);
 
   // Update _crdt_<table>_types table with current columns
   std::string types_table = "_crdt_" + tracked_table_ + "_types";
@@ -1214,8 +1218,15 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
     return SQLITE_OK;  // No table being tracked
   }
 
+  // Prevent infinite recursion: process_pending_changes() does SQL writes,
+  // which trigger wal_callback again!
+  if (self->processing_wal_changes_) {
+    return SQLITE_OK;  // Already processing, don't recurse
+  }
+
   // Query pending changes from trigger-populated table
   // This is safe because we're called AFTER commit with locks released
+  self->processing_wal_changes_ = true;
   try {
     self->process_pending_changes();
   } catch (const std::exception& e) {
@@ -1224,6 +1235,7 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
       "CRDT-SQLite: Error processing changes in wal_callback: %s\n",
       e.what());
   }
+  self->processing_wal_changes_ = false;
 
   return SQLITE_OK;
 }

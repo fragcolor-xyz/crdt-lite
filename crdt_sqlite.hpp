@@ -251,11 +251,14 @@ private:
   // Schema change tracking (for ALTER TABLE auto-handling)
   bool pending_schema_refresh_;
 
+  // Prevent re-entry into wal_callback (process_pending_changes writes trigger wal_hook again)
+  bool processing_wal_changes_;
+
   /// Creates shadow tables for CRDT metadata
   void create_shadow_tables(const std::string &table_name);
 
-  /// Caches column types for the tracked table
-  void cache_column_types();
+  /// Caches column types for the specified table
+  void cache_column_types(const std::string &table_name);
 
   /// Queries the current values of a row
   std::unordered_map<std::string, SQLiteValue> query_row_values(CrdtRecordId record_id);
