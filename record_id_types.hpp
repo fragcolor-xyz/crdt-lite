@@ -173,7 +173,21 @@ struct RecordIdTraits<uint128_t> {
   /// - 2^64 IDs:  impossible (exceeds node's 64-bit space)
   ///
   /// Recommendation: Use this method for multi-node systems where node_id is unique.
+  ///
+  /// @param node_id Unique node identifier (must fit in 63 bits to avoid sign issues)
+  /// @throws std::invalid_argument if node_id >= 2^63 (reserved for safe signed/unsigned conversion)
   static uint128_t generate_with_node(uint64_t node_id) {
+    // SECURITY: Validate node_id fits in 63 bits
+    // This prevents issues when node_id originates from signed int64_t (CrdtNodeId)
+    // and avoids potential sign bit complications in cross-platform serialization
+    constexpr uint64_t MAX_NODE_ID = (1ULL << 63) - 1;  // 2^63 - 1
+    if (node_id > MAX_NODE_ID) {
+      throw std::invalid_argument(
+        "node_id must fit in 63 bits (max " + std::to_string(MAX_NODE_ID) +
+        "), got " + std::to_string(node_id)
+      );
+    }
+
     static std::random_device rd;
     static std::mt19937_64 gen(rd());
     static std::uniform_int_distribution<uint64_t> dis;

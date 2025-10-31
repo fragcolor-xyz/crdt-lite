@@ -361,6 +361,14 @@ void CRDTSQLite::refresh_schema() {
 }
 
 void CRDTSQLite::execute(const char *sql) {
+  // DIAGNOSTIC: Log all execute() calls on Windows
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite] execute() called with SQL: %.80s%s\n",
+    sql, strlen(sql) > 80 ? "..." : "");
+  std::fprintf(stderr, "[CRDT-SQLite]   autocommit=%d, pending_changes=%zu\n",
+    sqlite3_get_autocommit(db_), pending_changes_.size());
+  #endif
+
   // Check if we're in autocommit mode (not in an explicit transaction)
   bool was_autocommit = sqlite3_get_autocommit(db_);
 
@@ -376,6 +384,9 @@ void CRDTSQLite::execute(const char *sql) {
 
   // If ending a transaction and we have pending changes, flush first
   if (!was_autocommit && is_commit && !pending_changes_.empty()) {
+    #ifdef _WIN32
+    std::fprintf(stderr, "[CRDT-SQLite]   Flushing before user COMMIT\n");
+    #endif
     try {
       flush_changes();
     } catch (...) {
@@ -388,6 +399,9 @@ void CRDTSQLite::execute(const char *sql) {
   // BUT don't wrap if this SQL is itself a transaction statement
   bool started_transaction = false;
   if (was_autocommit && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
+    #ifdef _WIN32
+    std::fprintf(stderr, "[CRDT-SQLite]   Starting implicit transaction\n");
+    #endif
     exec_or_throw("BEGIN");
     started_transaction = true;
   }
@@ -433,11 +447,23 @@ void CRDTSQLite::execute(const char *sql) {
 }
 
 sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite] prepare() called: %.80s%s\n",
+    sql, strlen(sql) > 80 ? "..." : "");
+  #endif
+
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
+    #ifdef _WIN32
+    std::fprintf(stderr, "[CRDT-SQLite]   prepare() FAILED: %s\n", get_error().c_str());
+    #endif
     throw CRDTSQLiteException("Failed to prepare statement: " + get_error());
   }
+
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite]   prepare() succeeded\n");
+  #endif
   return stmt;
 }
 
@@ -701,37 +727,41 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
     current_clock = std::max(current_clock, remote.db_version);
 
     // Check if record is tombstoned
-    std::string tomb_check = "SELECT db_version, node_id FROM " + tombstones_table + " WHERE record_id = ?";
-    sqlite3_stmt *stmt = prepare(tomb_check.c_str());
-    RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, remote.record_id);
-
     bool is_tombstoned = false;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-      uint64_t tomb_db_version = sqlite3_column_int64(stmt, 0);
-      CrdtNodeId tomb_node_id = sqlite3_column_int64(stmt, 1);
+    {
+      std::string tomb_check = "SELECT db_version, node_id FROM " + tombstones_table + " WHERE record_id = ?";
+      Statement stmt(prepare(tomb_check.c_str()));
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, remote.record_id);
 
-      // Tombstone always wins (db_version comparison)
-      // SECURITY: Use strict > for node_id tiebreaker (consistent LWW semantics)
-      if (tomb_db_version > remote.db_version ||
-          (tomb_db_version == remote.db_version && tomb_node_id > remote.node_id)) {
-        is_tombstoned = true;
+      if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        uint64_t tomb_db_version = sqlite3_column_int64(stmt.get(), 0);
+        CrdtNodeId tomb_node_id = sqlite3_column_int64(stmt.get(), 1);
+
+        // Tombstone wins if version is newer, or equal version with higher node_id
+        // SECURITY: Use >= for node_id tiebreaker (if versions equal, tombstone wins on tie)
+        if (tomb_db_version > remote.db_version ||
+            (tomb_db_version == remote.db_version && tomb_node_id >= remote.node_id)) {
+          is_tombstoned = true;
+        }
       }
+      // Statement auto-finalized here
     }
-    sqlite3_finalize(stmt);
 
     if (!remote.col_name.has_value()) {
       // This is a delete (tombstone)
       if (!is_tombstoned) {
         // Accept tombstone
-        std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +
-                                 " (record_id, db_version, node_id, local_db_version) VALUES (?, ?, ?, ?)";
-        stmt = prepare(insert_tomb.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, remote.record_id);
-        sqlite3_bind_int64(stmt, 2, remote.db_version);
-        sqlite3_bind_int64(stmt, 3, remote.node_id);
-        sqlite3_bind_int64(stmt, 4, current_clock);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        {
+          std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +
+                                   " (record_id, db_version, node_id, local_db_version) VALUES (?, ?, ?, ?)";
+          Statement stmt(prepare(insert_tomb.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, remote.record_id);
+          sqlite3_bind_int64(stmt.get(), 2, remote.db_version);
+          sqlite3_bind_int64(stmt.get(), 3, remote.node_id);
+          sqlite3_bind_int64(stmt.get(), 4, current_clock);
+          sqlite3_step(stmt.get());
+          // Statement auto-finalized here
+        }
 
         // Delete from main table
         apply_to_sqlite({remote});
@@ -746,49 +776,54 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
       }
 
       // Query current version from shadow table
-      std::string version_check = "SELECT col_version, db_version, node_id FROM " +
-                                 versions_table + " WHERE record_id = ? AND col_name = ?";
-      stmt = prepare(version_check.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, remote.record_id);
-      sqlite3_bind_text(stmt, 2, remote.col_name->c_str(), -1, SQLITE_TRANSIENT);
-
       bool remote_wins = false;
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-        // Existing version - do LWW comparison
-        uint64_t local_col_version = sqlite3_column_int64(stmt, 0);
-        uint64_t local_db_version = sqlite3_column_int64(stmt, 1);
-        CrdtNodeId local_node_id = sqlite3_column_int64(stmt, 2);
+      {
+        std::string version_check = "SELECT col_version, db_version, node_id FROM " +
+                                   versions_table + " WHERE record_id = ? AND col_name = ?";
+        Statement stmt(prepare(version_check.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, remote.record_id);
+        sqlite3_bind_text(stmt.get(), 2, remote.col_name->c_str(), -1, SQLITE_TRANSIENT);
 
-        // LWW: compare col_version, then db_version, then node_id
-        if (remote.col_version > local_col_version) {
-          remote_wins = true;
-        } else if (remote.col_version == local_col_version) {
-          if (remote.db_version > local_db_version) {
+        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+          // Existing version - do LWW comparison
+          uint64_t local_col_version = sqlite3_column_int64(stmt.get(), 0);
+          uint64_t local_db_version = sqlite3_column_int64(stmt.get(), 1);
+          CrdtNodeId local_node_id = sqlite3_column_int64(stmt.get(), 2);
+
+          // LWW: compare col_version, then db_version, then node_id
+          // Use >= for final tiebreaker to ensure deterministic convergence
+          if (remote.col_version > local_col_version) {
             remote_wins = true;
-          } else if (remote.db_version == local_db_version && remote.node_id > local_node_id) {
-            remote_wins = true;
+          } else if (remote.col_version == local_col_version) {
+            if (remote.db_version > local_db_version) {
+              remote_wins = true;
+            } else if (remote.db_version == local_db_version && remote.node_id >= local_node_id) {
+              remote_wins = true;
+            }
           }
+        } else {
+          // No existing version - accept remote
+          remote_wins = true;
         }
-      } else {
-        // No existing version - accept remote
-        remote_wins = true;
+        // Statement auto-finalized here
       }
-      sqlite3_finalize(stmt);
 
       if (remote_wins) {
         // Update shadow table
-        std::string update_version = "INSERT OR REPLACE INTO " + versions_table +
-                                    " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
-                                    "VALUES (?, ?, ?, ?, ?, ?)";
-        stmt = prepare(update_version.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, remote.record_id);
-        sqlite3_bind_text(stmt, 2, remote.col_name->c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 3, remote.col_version);
-        sqlite3_bind_int64(stmt, 4, remote.db_version);
-        sqlite3_bind_int64(stmt, 5, remote.node_id);
-        sqlite3_bind_int64(stmt, 6, current_clock);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        {
+          std::string update_version = "INSERT OR REPLACE INTO " + versions_table +
+                                      " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
+                                      "VALUES (?, ?, ?, ?, ?, ?)";
+          Statement stmt(prepare(update_version.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, remote.record_id);
+          sqlite3_bind_text(stmt.get(), 2, remote.col_name->c_str(), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64(stmt.get(), 3, remote.col_version);
+          sqlite3_bind_int64(stmt.get(), 4, remote.db_version);
+          sqlite3_bind_int64(stmt.get(), 5, remote.node_id);
+          sqlite3_bind_int64(stmt.get(), 6, current_clock);
+          sqlite3_step(stmt.get());
+          // Statement auto-finalized here
+        }
 
         // Update main table
         apply_to_sqlite({remote});
@@ -800,12 +835,14 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
 
   // Increment and update clock
   current_clock++;
-  std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
-  std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
-  sqlite3_stmt *stmt = prepare(update_clock.c_str());
-  sqlite3_bind_int64(stmt, 1, current_clock);
-  sqlite3_step(stmt);
-  sqlite3_finalize(stmt);
+  {
+    std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
+    std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
+    Statement stmt(prepare(update_clock.c_str()));
+    sqlite3_bind_int64(stmt.get(), 1, current_clock);
+    sqlite3_step(stmt.get());
+    // Statement auto-finalized here
+  }
 
   return accepted;
 }
@@ -815,11 +852,14 @@ size_t CRDTSQLite::compact_tombstones(uint64_t min_acknowledged_version) {
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
   std::string delete_sql = "DELETE FROM " + tombstones_table +
                           " WHERE db_version < ?";
-  sqlite3_stmt *stmt = prepare(delete_sql.c_str());
-  sqlite3_bind_int64(stmt, 1, min_acknowledged_version);
-  sqlite3_step(stmt);
-  int removed = sqlite3_changes(db_);
-  sqlite3_finalize(stmt);
+  int removed;
+  {
+    Statement stmt(prepare(delete_sql.c_str()));
+    sqlite3_bind_int64(stmt.get(), 1, min_acknowledged_version);
+    sqlite3_step(stmt.get());
+    removed = sqlite3_changes(db_);
+    // Statement auto-finalized here
+  }
 
   return removed;
 }
@@ -867,6 +907,11 @@ uint64_t CRDTSQLite::get_clock() const {
 }
 
 void CRDTSQLite::track_change(int operation, const char *table, sqlite3_int64 rowid) {
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite] track_change() called: op=%d, table=%s, rowid=%lld\n",
+    operation, table ? table : "NULL", rowid);
+  #endif
+
   if (!table || tracked_table_ != table) {
     return;
   }
@@ -878,6 +923,10 @@ void CRDTSQLite::track_change(int operation, const char *table, sqlite3_int64 ro
   change.rowid = rowid;
 
   pending_changes_.push_back(std::move(change));
+
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite]   Tracked change, pending_changes now %zu\n", pending_changes_.size());
+  #endif
 }
 
 std::unordered_map<std::string, SQLiteValue>
@@ -911,12 +960,21 @@ CRDTSQLite::query_row_values(CrdtRecordId record_id) {
 }
 
 void CRDTSQLite::flush_changes() {
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite] flush_changes() called: pending=%zu, flushing=%d, autocommit=%d\n",
+    pending_changes_.size(), flushing_changes_, sqlite3_get_autocommit(db_));
+  #endif
+
   if (pending_changes_.empty() || flushing_changes_) {
     return;  // Prevent re-entry
   }
 
   // SECURITY: RAII guard ensures flag is reset even on exception
   ScopeGuard guard(flushing_changes_);
+
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite]   Processing %zu pending changes\n", pending_changes_.size());
+  #endif
 
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
