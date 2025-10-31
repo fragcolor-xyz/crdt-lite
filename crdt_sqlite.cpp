@@ -1161,10 +1161,10 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
     if (!change.col_name.has_value()) {
       // Delete record
       std::string delete_sql = "DELETE FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
-      sqlite3_stmt *stmt = prepare(delete_sql.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
-      sqlite3_step(stmt);
-      sqlite3_finalize(stmt);
+      Statement stmt(prepare(delete_sql.c_str()));
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, change.record_id);
+      sqlite3_step(stmt.get());
+      // Auto-finalized
     } else {
       // Validate column name to prevent SQL injection
       if (!is_valid_column_name(*change.col_name)) {
@@ -1172,22 +1172,25 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
       }
 
       // Check if record exists
-      std::string check_sql = "SELECT COUNT(*) FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
-      sqlite3_stmt *stmt = prepare(check_sql.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
-      sqlite3_step(stmt);
-      int count = sqlite3_column_int(stmt, 0);
-      sqlite3_finalize(stmt);
+      int count = 0;
+      {
+        std::string check_sql = "SELECT COUNT(*) FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
+        Statement stmt(prepare(check_sql.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, change.record_id);
+        sqlite3_step(stmt.get());
+        count = sqlite3_column_int(stmt.get(), 0);
+        // Auto-finalized
+      }
 
       if (!change.value.has_value()) {
         // Field deletion - set to NULL or remove
         if (count > 0) {
           std::string update_sql = "UPDATE " + tracked_table_ + " SET " +
                                   *change.col_name + " = NULL WHERE " + id_column + " = ?";
-          stmt = prepare(update_sql.c_str());
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
-          sqlite3_step(stmt);
-          sqlite3_finalize(stmt);
+          Statement stmt(prepare(update_sql.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, change.record_id);
+          sqlite3_step(stmt.get());
+          // Auto-finalized
         }
       } else {
         // Insert or update
@@ -1204,56 +1207,56 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
           // Insert new record
           std::string insert_sql = "INSERT INTO " + tracked_table_ +
                                   " (" + id_column + ", " + *change.col_name + ") VALUES (?, ?)";
-          stmt = prepare(insert_sql.c_str());
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
+          Statement stmt(prepare(insert_sql.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, change.record_id);
 
           switch (value.type) {
           case SQLiteValue::NULL_TYPE:
-            sqlite3_bind_null(stmt, 2);
+            sqlite3_bind_null(stmt.get(), 2);
             break;
           case SQLiteValue::INTEGER:
-            sqlite3_bind_int64(stmt, 2, value.int_val);
+            sqlite3_bind_int64(stmt.get(), 2, value.int_val);
             break;
           case SQLiteValue::REAL:
-            sqlite3_bind_double(stmt, 2, value.real_val);
+            sqlite3_bind_double(stmt.get(), 2, value.real_val);
             break;
           case SQLiteValue::TEXT:
-            sqlite3_bind_text(stmt, 2, value.text_val.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 2, value.text_val.c_str(), -1, SQLITE_TRANSIENT);
             break;
           case SQLiteValue::BLOB:
-            sqlite3_bind_blob(stmt, 2, value.blob_val.data(), value.blob_val.size(), SQLITE_TRANSIENT);
+            sqlite3_bind_blob(stmt.get(), 2, value.blob_val.data(), value.blob_val.size(), SQLITE_TRANSIENT);
             break;
           }
 
-          sqlite3_step(stmt);
-          sqlite3_finalize(stmt);
+          sqlite3_step(stmt.get());
+          // Auto-finalized
         } else {
           // Update existing record
           std::string update_sql = "UPDATE " + tracked_table_ + " SET " +
                                   *change.col_name + " = ? WHERE " + id_column + " = ?";
-          stmt = prepare(update_sql.c_str());
+          Statement stmt(prepare(update_sql.c_str()));
 
           switch (value.type) {
           case SQLiteValue::NULL_TYPE:
-            sqlite3_bind_null(stmt, 1);
+            sqlite3_bind_null(stmt.get(), 1);
             break;
           case SQLiteValue::INTEGER:
-            sqlite3_bind_int64(stmt, 1, value.int_val);
+            sqlite3_bind_int64(stmt.get(), 1, value.int_val);
             break;
           case SQLiteValue::REAL:
-            sqlite3_bind_double(stmt, 1, value.real_val);
+            sqlite3_bind_double(stmt.get(), 1, value.real_val);
             break;
           case SQLiteValue::TEXT:
-            sqlite3_bind_text(stmt, 1, value.text_val.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 1, value.text_val.c_str(), -1, SQLITE_TRANSIENT);
             break;
           case SQLiteValue::BLOB:
-            sqlite3_bind_blob(stmt, 1, value.blob_val.data(), value.blob_val.size(), SQLITE_TRANSIENT);
+            sqlite3_bind_blob(stmt.get(), 1, value.blob_val.data(), value.blob_val.size(), SQLITE_TRANSIENT);
             break;
           }
 
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, change.record_id);
-          sqlite3_step(stmt);
-          sqlite3_finalize(stmt);
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 2, change.record_id);
+          sqlite3_step(stmt.get());
+          // Auto-finalized
         }
       }
     }
