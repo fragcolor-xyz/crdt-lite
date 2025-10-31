@@ -125,19 +125,24 @@ CRDTSQLite::~CRDTSQLite() {
     // If in a transaction, can't flush (user must commit/rollback)
     if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
       try {
-        // Begin transaction, flush, commit
-        // Don't use exec_or_throw (throws), use sqlite3_exec directly
-        char* err = nullptr;
-        if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, &err) == SQLITE_OK) {
+        // CRITICAL FIX: Use prepared statements for transaction control
+        // Don't mix sqlite3_exec with prepare/step (causes Windows mutex issues)
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, "BEGIN", -1, &stmt, nullptr) == SQLITE_OK) {
+          sqlite3_step(stmt);
+          sqlite3_finalize(stmt);
+
           flush_changes();
-          sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &err);
-          if (err) sqlite3_free(err);
+
+          if (sqlite3_prepare_v2(db_, "COMMIT", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+          }
         } else {
           // Failed to start transaction - warn but don't throw (in destructor)
           std::fprintf(stderr,
-            "CRDT-SQLite: Warning: Failed to flush pending changes on close: %s\n",
-            err ? err : "unknown error");
-          if (err) sqlite3_free(err);
+            "CRDT-SQLite: Warning: Failed to flush pending changes on close\n");
+          if (stmt) sqlite3_finalize(stmt);
         }
       } catch (const std::exception& e) {
         // Flush failed - warn but don't throw from destructor
@@ -400,9 +405,13 @@ void CRDTSQLite::execute(const char *sql) {
   bool started_transaction = false;
   if (was_autocommit && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
     #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   Starting implicit transaction\n");
+    std::fprintf(stderr, "[CRDT-SQLite]   Starting implicit transaction (using prepare/step, not exec)\n");
     #endif
-    exec_or_throw("BEGIN");
+
+    // CRITICAL FIX: Use prepared statement for BEGIN, not sqlite3_exec
+    // On Windows, mixing sqlite3_exec with prepare/bind/step causes mutex issues
+    Statement begin_stmt(prepare("BEGIN"));
+    sqlite3_step(begin_stmt.get());
     started_transaction = true;
   }
 
@@ -415,9 +424,10 @@ void CRDTSQLite::execute(const char *sql) {
       sqlite3_free(err_msg);
     }
 
-    // Rollback if we started a transaction
+    // Rollback if we started a transaction (use prepared statement for consistency)
     if (started_transaction) {
-      sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+      Statement rollback_stmt(prepare("ROLLBACK"));
+      sqlite3_step(rollback_stmt.get());
     }
 
     throw CRDTSQLiteException(error);
@@ -428,15 +438,20 @@ void CRDTSQLite::execute(const char *sql) {
     try {
       flush_changes();
     } catch (...) {
-      // Rollback on flush failure
-      sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+      // Rollback on flush failure (use prepared statement)
+      Statement rollback_stmt(prepare("ROLLBACK"));
+      sqlite3_step(rollback_stmt.get());
       throw;
     }
   }
 
-  // Commit if we started a transaction
+  // Commit if we started a transaction (use prepared statement for consistency)
   if (started_transaction) {
-    exec_or_throw("COMMIT");
+    #ifdef _WIN32
+    std::fprintf(stderr, "[CRDT-SQLite]   Committing transaction (using prepare/step)\n");
+    #endif
+    Statement commit_stmt(prepare("COMMIT"));
+    sqlite3_step(commit_stmt.get());
   }
 
   // If ALTER TABLE was detected, refresh schema metadata
@@ -471,9 +486,14 @@ std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
   // Auto-flush pending changes (handles case where prepare/step used instead of execute)
   if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    exec_or_throw("BEGIN");
+    // Use prepared statements for transaction control (Windows mutex fix)
+    Statement begin_stmt(prepare("BEGIN"));
+    sqlite3_step(begin_stmt.get());
+
     flush_changes();
-    exec_or_throw("COMMIT");
+
+    Statement commit_stmt(prepare("COMMIT"));
+    sqlite3_step(commit_stmt.get());
   }
 
   std::vector<Change<CrdtRecordId, std::string>> changes;
@@ -583,9 +603,14 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
                                        const CrdtSet<CrdtNodeId> &excluding) {
   // Auto-flush pending changes (handles case where prepare/step used instead of execute)
   if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    exec_or_throw("BEGIN");
+    // Use prepared statements for transaction control (Windows mutex fix)
+    Statement begin_stmt(prepare("BEGIN"));
+    sqlite3_step(begin_stmt.get());
+
     flush_changes();
-    exec_or_throw("COMMIT");
+
+    Statement commit_stmt(prepare("COMMIT"));
+    sqlite3_step(commit_stmt.get());
   }
 
   // SECURITY: Prevent DoS via enormous SQL queries
@@ -709,9 +734,14 @@ std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes) {
   // Auto-flush pending changes (handles case where prepare/step used instead of execute)
   if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    exec_or_throw("BEGIN");
+    // Use prepared statements for transaction control (Windows mutex fix)
+    Statement begin_stmt(prepare("BEGIN"));
+    sqlite3_step(begin_stmt.get());
+
     flush_changes();
-    exec_or_throw("COMMIT");
+
+    Statement commit_stmt(prepare("COMMIT"));
+    sqlite3_step(commit_stmt.get());
   }
 
   std::vector<Change<CrdtRecordId, std::string>> accepted;
