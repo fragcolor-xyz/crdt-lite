@@ -43,13 +43,7 @@ struct SQLiteValue {
   static SQLiteValue from_string(const std::string &str, Type type);
 };
 
-/// Pending change during a transaction
-struct PendingChange {
-  int operation;         // SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE
-  sqlite3_int64 rowid;   // SQLite rowid (always int64, even for uint128_t)
-  // Note: For uint128_t, we resolve rowid -> actual ID in flush_changes()
-  // to avoid doing SQLite queries inside update_callback (mutex issues on Windows)
-};
+// PendingChange struct removed - we use triggers to populate _pending table instead
 
 /// CRDT-enabled SQLite database wrapper
 ///
@@ -213,17 +207,6 @@ public:
   // Users should implement their own serialization using Change<> structure
 
 private:
-  /// RAII guard to ensure boolean flag is reset on scope exit
-  class ScopeGuard {
-  public:
-    explicit ScopeGuard(bool &flag) : flag_(flag) { flag_ = true; }
-    ~ScopeGuard() { flag_ = false; }
-    ScopeGuard(const ScopeGuard&) = delete;
-    ScopeGuard& operator=(const ScopeGuard&) = delete;
-  private:
-    bool &flag_;
-  };
-
   /// RAII wrapper for sqlite3_stmt* to prevent memory leaks
   ///
   /// Automatically calls sqlite3_finalize() on destruction, ensuring statements
@@ -262,11 +245,6 @@ private:
   std::string tracked_table_;
   CrdtNodeId node_id_;
 
-  // Pending changes within current transaction
-  std::vector<PendingChange> pending_changes_;
-  bool in_transaction_;
-  bool flushing_changes_;  // Prevent re-entry into flush_changes()
-
   // Column type cache (column_name -> Type)
   std::unordered_map<std::string, SQLiteValue::Type> column_types_;
 
@@ -279,14 +257,11 @@ private:
   /// Caches column types for the tracked table
   void cache_column_types();
 
-  /// Tracks a change from the update hook
-  void track_change(int operation, const char *table, sqlite3_int64 rowid);
-
   /// Queries the current values of a row
   std::unordered_map<std::string, SQLiteValue> query_row_values(CrdtRecordId record_id);
 
-  /// Flushes pending changes to CRDT and shadow tables
-  void flush_changes();
+  /// Processes pending changes from _pending table (called by wal_hook)
+  void process_pending_changes();
 
   /// Applies accepted changes to SQLite table
   void apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes);
@@ -296,18 +271,10 @@ private:
                                  const char *arg1, const char *arg2,
                                  const char *arg3, const char *arg4);
 
-  /// SQLite callback for update hook
-  static void update_callback(void *ctx, int operation,
-                             const char *db_name, const char *table,
-                             sqlite3_int64 rowid);
-
   /// SQLite callback for WAL hook (fires AFTER commit with locks released)
   static int wal_callback(void *ctx, sqlite3 *db, const char *db_name, int num_pages);
 
-  /// SQLite callback for commit hook
-  static int commit_callback(void *ctx);
-
-  /// SQLite callback for rollback hook
+  /// SQLite callback for rollback hook (clears pending table)
   static void rollback_callback(void *ctx);
 
   /// Helper to execute SQL and check for errors

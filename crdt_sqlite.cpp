@@ -100,8 +100,7 @@ SQLiteValue SQLiteValue::from_string(const std::string &str, Type type) {
 // CRDTSQLite implementation
 
 CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
-    : db_(nullptr), node_id_(node_id), in_transaction_(false), flushing_changes_(false),
-      pending_schema_refresh_(false) {
+    : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false) {
   int rc = sqlite3_open(path, &db_);
   if (rc != SQLITE_OK) {
     std::string error = "Failed to open database: " + std::string(sqlite3_errmsg(db_));
@@ -119,26 +118,15 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
 
   // Install hooks
   sqlite3_set_authorizer(db_, authorizer_callback, this);
-  sqlite3_update_hook(db_, update_callback, this);  // Tracks WHAT changed
-  sqlite3_wal_hook(db_, wal_callback, this);        // Flushes AFTER commit (safe to call prepare/step)
-  sqlite3_commit_hook(db_, commit_callback, this);
+  // NOTE: No update_hook! We use triggers instead (much faster, no callback overhead)
+  sqlite3_wal_hook(db_, wal_callback, this);  // Processes pending changes after commit
   sqlite3_rollback_hook(db_, rollback_callback, this);
 }
 
 CRDTSQLite::~CRDTSQLite() {
   if (db_) {
-    // WAL mode: Pending changes should be auto-flushed by wal_callback after each commit
-    // If pending changes exist here, it means:
-    // 1. User is in the middle of a transaction, OR
-    // 2. An exception was thrown before commit
-    // In either case, we can't safely flush (might be holding locks)
-    if (!pending_changes_.empty()) {
-      std::fprintf(stderr,
-        "CRDT-SQLite: Warning: %zu pending changes discarded on close "
-        "(transaction not committed or exception thrown)\n",
-        pending_changes_.size());
-    }
-
+    // WAL mode with triggers: Changes are auto-flushed by wal_callback after each commit
+    // Any pending changes in _pending table are automatically rolled back on close
     sqlite3_close(db_);
   }
 }
@@ -253,6 +241,18 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     exec_or_throw(init_clock.c_str());
   }
 
+  // Create pending changes table for tracking within transactions
+  // This table is populated by triggers (not hooks) to avoid mutex issues
+  std::string pending_table = "_crdt_" + table_name + "_pending";
+  std::string create_pending = R"(
+    CREATE TABLE IF NOT EXISTS )" + pending_table + R"( (
+      operation INTEGER NOT NULL,
+      record_id )" + record_id_type + R"( NOT NULL,
+      PRIMARY KEY (operation, record_id)
+    )
+  )";
+  exec_or_throw(create_pending.c_str());
+
   // Create column types table (stores type info for reconstruction)
   std::string types_table = "_crdt_" + table_name + "_types";
   std::string create_types = R"(
@@ -291,6 +291,51 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     )";
     exec_or_throw(create_lookaside.c_str());
   }
+
+  // Create triggers to track changes
+  // These populate _pending table which is processed by wal_hook
+  // Using triggers instead of update_hook eliminates callback overhead during writes
+
+  std::string id_column;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    id_column = "NEW.rowid";
+  } else {
+    id_column = "NEW.id";
+  }
+
+  // INSERT trigger
+  std::string insert_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_insert "
+                               "AFTER INSERT ON " + table_name + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_INSERT) + ", " + id_column + "); "
+                               "END";
+  exec_or_throw(insert_trigger.c_str());
+
+  // UPDATE trigger
+  std::string update_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_update "
+                               "AFTER UPDATE ON " + table_name + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_UPDATE) + ", " + id_column + "); "
+                               "END";
+  exec_or_throw(update_trigger.c_str());
+
+  // DELETE trigger
+  std::string delete_id_column;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    delete_id_column = "OLD.rowid";
+  } else {
+    delete_id_column = "OLD.id";
+  }
+
+  std::string delete_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_delete "
+                               "BEFORE DELETE ON " + table_name + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + delete_id_column + "); "
+                               "END";
+  exec_or_throw(delete_trigger.c_str());
 }
 
 void CRDTSQLite::cache_column_types() {
@@ -825,28 +870,7 @@ uint64_t CRDTSQLite::get_clock() const {
   return 0;
 }
 
-void CRDTSQLite::track_change(int operation, const char *table, sqlite3_int64 rowid) {
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] track_change() called: op=%d, table=%s, rowid=%lld\n",
-    operation, table ? table : "NULL", rowid);
-  #endif
-
-  if (!table || tracked_table_ != table) {
-    return;
-  }
-
-  // CRITICAL: Do minimal work here - we're inside update_callback with mutex held
-  // All ID lookups and queries deferred to flush_changes() to avoid Windows mutex issues
-  PendingChange change;
-  change.operation = operation;
-  change.rowid = rowid;
-
-  pending_changes_.push_back(std::move(change));
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite]   Tracked change, pending_changes now %zu\n", pending_changes_.size());
-  #endif
-}
+// track_change() removed - we use triggers to populate _pending table instead
 
 std::unordered_map<std::string, SQLiteValue>
 CRDTSQLite::query_row_values(CrdtRecordId record_id) {
@@ -878,108 +902,53 @@ CRDTSQLite::query_row_values(CrdtRecordId record_id) {
   return values;
 }
 
-void CRDTSQLite::flush_changes() {
+void CRDTSQLite::process_pending_changes() {
   #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] flush_changes() called: pending=%zu, flushing=%d, autocommit=%d\n",
-    pending_changes_.size(), flushing_changes_, sqlite3_get_autocommit(db_));
+  std::fprintf(stderr, "[CRDT-SQLite] process_pending_changes() called\n");
   #endif
 
-  if (pending_changes_.empty() || flushing_changes_) {
-    return;  // Prevent re-entry
-  }
-
-  // SECURITY: RAII guard ensures flag is reset even on exception
-  ScopeGuard guard(flushing_changes_);
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite]   Processing %zu pending changes\n", pending_changes_.size());
-  #endif
-
+  std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
+
+  // Query pending changes from table
+  std::string query = "SELECT operation, record_id FROM " + pending_table;
+  sqlite3_stmt *query_stmt = prepare(query.c_str());
+
+  struct PendingRecord {
+    int operation;
+    CrdtRecordId record_id;
+  };
+  std::vector<PendingRecord> pending_records;
+
+  while (sqlite3_step(query_stmt) == SQLITE_ROW) {
+    PendingRecord pending;
+    pending.operation = sqlite3_column_int(query_stmt, 0);
+    pending.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(query_stmt, 1);
+    pending_records.push_back(pending);
+  }
+  sqlite3_finalize(query_stmt);
+
+  if (pending_records.empty()) {
+    return;  // Nothing to do
+  }
+
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite]   Processing %zu pending changes\n", pending_records.size());
+  #endif
 
   // Get and increment clock
   uint64_t current_clock = get_clock();
   current_clock++;
 
-  // PHASE 1: Resolve rowid -> record_id and query values
-  // (Deferred from track_change to avoid mutex issues in update_callback)
-  struct ResolvedChange {
-    int operation;
-    CrdtRecordId record_id;
-    std::unordered_map<std::string, SQLiteValue> values;
-  };
-  std::vector<ResolvedChange> resolved_changes;
-  resolved_changes.reserve(pending_changes_.size());
-
-  for (const auto &pending : pending_changes_) {
-    ResolvedChange resolved;
-    resolved.operation = pending.operation;
-
-    // Resolve rowid -> record_id
-    if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
-      // For uint128_t: lookup actual ID from rowid
-      if (pending.operation == SQLITE_DELETE) {
-        // For DELETE: query lookaside table
-        std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
-        std::string query = "SELECT id FROM " + lookaside_table + " WHERE rowid = ?";
-        sqlite3_stmt *stmt = prepare(query.c_str());
-        sqlite3_bind_int64(stmt, 1, pending.rowid);
-
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-          resolved.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
-          sqlite3_finalize(stmt);
-        } else {
-          // No lookaside entry - skip this change
-          sqlite3_finalize(stmt);
-          continue;
-        }
-      } else {
-        // For INSERT/UPDATE: query main table for id column
-        std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
-        sqlite3_stmt *stmt = prepare(query.c_str());
-        sqlite3_bind_int64(stmt, 1, pending.rowid);
-
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-          resolved.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
-          sqlite3_finalize(stmt);
-
-          // Update lookaside table
-          std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
-          std::string insert_lookaside = "INSERT OR REPLACE INTO " + lookaside_table +
-                                         " (rowid, id) VALUES (?, ?)";
-          stmt = prepare(insert_lookaside.c_str());
-          sqlite3_bind_int64(stmt, 1, pending.rowid);
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, resolved.record_id);
-          sqlite3_step(stmt);
-          sqlite3_finalize(stmt);
-        } else {
-          // Record not found - skip this change
-          sqlite3_finalize(stmt);
-          continue;
-        }
-      }
-    } else {
-      // For int64_t: rowid IS the record_id
-      resolved.record_id = static_cast<CrdtRecordId>(pending.rowid);
-    }
-
-    // Query values for INSERT/UPDATE
-    if (pending.operation != SQLITE_DELETE) {
-      resolved.values = query_row_values(resolved.record_id);
-    }
-
-    resolved_changes.push_back(std::move(resolved));
-  }
-
-  // PHASE 2: Process resolved changes
-  for (const auto &change : resolved_changes) {
-    if (change.operation == SQLITE_DELETE) {
+  // Process each pending change
+  for (const auto &pending : pending_records) {
+    if (pending.operation == SQLITE_DELETE) {
       // Create tombstone
       std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +
                                " (record_id, db_version, node_id, local_db_version) VALUES (?, ?, ?, ?)";
       sqlite3_stmt *stmt = prepare(insert_tomb.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
       sqlite3_bind_int64(stmt, 2, current_clock);
       sqlite3_bind_int64(stmt, 3, node_id_);
       sqlite3_bind_int64(stmt, 4, current_clock);
@@ -989,18 +958,20 @@ void CRDTSQLite::flush_changes() {
       // Remove all column versions for this record
       std::string delete_versions = "DELETE FROM " + versions_table + " WHERE record_id = ?";
       stmt = prepare(delete_versions.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
+      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
       sqlite3_step(stmt);
       sqlite3_finalize(stmt);
 
     } else {
-      // Handle insert/update - update each column
-      for (const auto &[col_name, value] : change.values) {
+      // INSERT/UPDATE: Query current values and update shadow table
+      auto values = query_row_values(pending.record_id);
+
+      for (const auto &[col_name, value] : values) {
         // Query current col_version for this column
         std::string query = "SELECT col_version FROM " + versions_table +
                            " WHERE record_id = ? AND col_name = ?";
         sqlite3_stmt *stmt = prepare(query.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
         sqlite3_bind_text(stmt, 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
 
         uint64_t col_version = 0;
@@ -1017,7 +988,7 @@ void CRDTSQLite::flush_changes() {
                                     " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
                                     "VALUES (?, ?, ?, ?, ?, ?)";
         stmt = prepare(insert_version.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, change.record_id);
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
         sqlite3_bind_text(stmt, 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 3, col_version);
         sqlite3_bind_int64(stmt, 4, current_clock);
@@ -1037,13 +1008,19 @@ void CRDTSQLite::flush_changes() {
   sqlite3_step(stmt);
   sqlite3_finalize(stmt);
 
-  pending_changes_.clear();
-  // flushing_changes_ reset automatically by ScopeGuard destructor
+  // Clear pending changes table
+  std::string clear_pending = "DELETE FROM " + pending_table;
+  exec_or_throw(clear_pending.c_str());
 }
 
 void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes) {
-  // Temporarily disable hooks to avoid recursion
-  sqlite3_update_hook(db_, nullptr, nullptr);
+  // Temporarily disable triggers to avoid recursion when applying remote changes
+  std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
+
+  // Drop triggers temporarily
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_insert").c_str());
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_update").c_str());
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_delete").c_str());
 
   // Determine which column to use for WHERE clauses
   std::string id_column;
@@ -1150,8 +1127,39 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
     }
   }
 
-  // Re-enable hooks
-  sqlite3_update_hook(db_, update_callback, this);
+  // Recreate triggers
+  std::string id_col_new, id_col_old;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    id_col_new = "NEW.rowid";
+    id_col_old = "OLD.rowid";
+  } else {
+    id_col_new = "NEW.id";
+    id_col_old = "OLD.id";
+  }
+
+  std::string insert_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_insert "
+                               "AFTER INSERT ON " + tracked_table_ + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_INSERT) + ", " + id_col_new + "); "
+                               "END";
+  exec_or_throw(insert_trigger.c_str());
+
+  std::string update_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_update "
+                               "AFTER UPDATE ON " + tracked_table_ + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_UPDATE) + ", " + id_col_new + "); "
+                               "END";
+  exec_or_throw(update_trigger.c_str());
+
+  std::string delete_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_delete "
+                               "BEFORE DELETE ON " + tracked_table_ + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
+                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + id_col_old + "); "
+                               "END";
+  exec_or_throw(delete_trigger.c_str());
 }
 
 int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
@@ -1191,12 +1199,7 @@ int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
   return SQLITE_OK;  // Allow by default
 }
 
-void CRDTSQLite::update_callback(void *ctx, int operation,
-                                 const char *db_name, const char *table,
-                                 sqlite3_int64 rowid) {
-  auto *self = static_cast<CRDTSQLite *>(ctx);
-  self->track_change(operation, table, static_cast<int64_t>(rowid));
-}
+// update_callback removed - we use triggers instead for better performance
 
 int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int num_pages) {
   // WAL callback fires AFTER commit completes and locks are released
@@ -1204,35 +1207,48 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
   auto *self = static_cast<CRDTSQLite *>(ctx);
 
   #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] wal_callback: num_pages=%d, pending_changes=%zu\n",
-    num_pages, self->pending_changes_.size());
+  std::fprintf(stderr, "[CRDT-SQLite] wal_callback: num_pages=%d\n", num_pages);
   #endif
 
-  // Flush pending changes to CRDT shadow tables
+  if (self->tracked_table_.empty()) {
+    return SQLITE_OK;  // No table being tracked
+  }
+
+  // Query pending changes from trigger-populated table
   // This is safe because we're called AFTER commit with locks released
-  if (!self->pending_changes_.empty() && !self->tracked_table_.empty()) {
-    try {
-      self->flush_changes();
-    } catch (const std::exception& e) {
-      // Log error but don't throw from callback
-      std::fprintf(stderr,
-        "CRDT-SQLite: Error flushing changes in wal_callback: %s\n",
-        e.what());
-    }
+  try {
+    self->process_pending_changes();
+  } catch (const std::exception& e) {
+    // Log error but don't throw from callback
+    std::fprintf(stderr,
+      "CRDT-SQLite: Error processing changes in wal_callback: %s\n",
+      e.what());
   }
 
   return SQLITE_OK;
 }
 
-int CRDTSQLite::commit_callback(void *ctx) {
-  // NOTE: Flushing moved to wal_callback (which fires AFTER commit with locks released)
-  // commit_callback fires DURING commit with locks held - unsafe to call prepare/step
-  return 0; // Allow commit
-}
+// commit_callback removed - we use wal_callback instead
 
 void CRDTSQLite::rollback_callback(void *ctx) {
   auto *self = static_cast<CRDTSQLite *>(ctx);
-  self->pending_changes_.clear();
+
+  if (self->tracked_table_.empty()) {
+    return;  // No table being tracked
+  }
+
+  // Clear pending changes table on rollback
+  std::string pending_table = "_crdt_" + self->tracked_table_ + "_pending";
+  std::string clear_sql = "DELETE FROM " + pending_table;
+
+  try {
+    self->exec_or_throw(clear_sql.c_str());
+  } catch (const std::exception& e) {
+    // Log error but don't throw from callback
+    std::fprintf(stderr,
+      "CRDT-SQLite: Error clearing pending changes on rollback: %s\n",
+      e.what());
+  }
 }
 
 void CRDTSQLite::exec_or_throw(const char *sql) {
