@@ -1312,10 +1312,13 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 * /*db*/, const char * /*db_name
   try {
     self->process_pending_changes();
   } catch (const std::exception& e) {
-    // Log error but don't throw from callback
+    // Log error and return SQLITE_ERROR to signal failure
+    // ProcessingGuard destructor resets flag, enabling retry on next wal_callback
     std::fprintf(stderr,
-      "CRDT-SQLite: Error processing changes in wal_callback: %s\n",
+      "CRDT-SQLite ERROR: Failed to process changes in wal_callback: %s\n"
+      "Changes remain in _pending table and will retry on next commit.\n",
       e.what());
+    return SQLITE_ERROR;  // Signal error (commit already completed, this is just notification)
   }
 
   return SQLITE_OK;
