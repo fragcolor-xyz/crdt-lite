@@ -136,16 +136,33 @@ jobs:
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Install dependencies with vcpkg
+    - name: Build SQLite from source
+      shell: pwsh
       run: |
-        vcpkg install sqlite3:x64-windows
+        # Download SQLite amalgamation
+        $SQLITE_VERSION = "3470200"
+        $SQLITE_YEAR = "2024"
+        Invoke-WebRequest -Uri "https://www.sqlite.org/$SQLITE_YEAR/sqlite-amalgamation-$SQLITE_VERSION.zip" -OutFile sqlite.zip
+        Expand-Archive sqlite.zip -DestinationPath .
+
+        # Compile SQLite with FULLMUTEX threading (SQLITE_THREADSAFE=1)
+        cd sqlite-amalgamation-$SQLITE_VERSION
+        cl /c /O2 /DSQLITE_THREADSAFE=1 /DSQLITE_ENABLE_COLUMN_METADATA sqlite3.c
+        lib /OUT:sqlite3.lib sqlite3.obj
+
+        # Create include directory
+        New-Item -ItemType Directory -Force -Path ../sqlite_install/include
+        New-Item -ItemType Directory -Force -Path ../sqlite_install/lib
+        Copy-Item sqlite3.h ../sqlite_install/include/
+        Copy-Item sqlite3.lib ../sqlite_install/lib/
+        cd ..
 
     - name: Configure CMake
       run: |
         cmake -B build `
           -G "Visual Studio 17 2022" `
           -A x64 `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_PREFIX_PATH="$PWD/sqlite_install" `
           -DBUILD_TESTS=ON `
           -DBUILD_SQLITE_WRAPPER=ON
 

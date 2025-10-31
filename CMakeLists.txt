@@ -27,8 +27,25 @@ target_compile_features(crdt-lite INTERFACE cxx_std_20)
 
 # SQLite CRDT wrapper library
 if(BUILD_SQLITE_WRAPPER)
-  # Find SQLite3
+  # Find SQLite3 (supports both system packages and custom builds)
   find_package(SQLite3)
+
+  # If find_package failed, try manual search (for custom SQLite builds)
+  if(NOT SQLite3_FOUND)
+    find_path(SQLite3_INCLUDE_DIR NAMES sqlite3.h
+      HINTS ${CMAKE_PREFIX_PATH}/include)
+    find_library(SQLite3_LIBRARY NAMES sqlite3
+      HINTS ${CMAKE_PREFIX_PATH}/lib)
+
+    if(SQLite3_INCLUDE_DIR AND SQLite3_LIBRARY)
+      set(SQLite3_FOUND TRUE)
+      add_library(SQLite::SQLite3 UNKNOWN IMPORTED)
+      set_target_properties(SQLite::SQLite3 PROPERTIES
+        IMPORTED_LOCATION "${SQLite3_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIR}")
+      message(STATUS "Found SQLite3 (manual): ${SQLite3_LIBRARY}")
+    endif()
+  endif()
 
   if(SQLite3_FOUND)
     add_library(crdt_sqlite STATIC
