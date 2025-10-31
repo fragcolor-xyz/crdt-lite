@@ -400,21 +400,7 @@ void CRDTSQLite::execute(const char *sql) {
     }
   }
 
-  // If in autocommit and we have a tracked table, start explicit transaction
-  // BUT don't wrap if this SQL is itself a transaction statement
-  bool started_transaction = false;
-  if (was_autocommit && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
-    #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   Starting implicit transaction (using prepare/step, not exec)\n");
-    #endif
-
-    // CRITICAL FIX: Use prepared statement for BEGIN, not sqlite3_exec
-    // On Windows, mixing sqlite3_exec with prepare/bind/step causes mutex issues
-    Statement begin_stmt(prepare("BEGIN"));
-    sqlite3_step(begin_stmt.get());
-    started_transaction = true;
-  }
-
+  // Execute user SQL via sqlite3_exec (this will fire hooks and accumulate pending changes)
   char *err_msg = nullptr;
   int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
   if (rc != SQLITE_OK) {
@@ -423,35 +409,18 @@ void CRDTSQLite::execute(const char *sql) {
       error += err_msg;
       sqlite3_free(err_msg);
     }
-
-    // Rollback if we started a transaction (use prepared statement for consistency)
-    if (started_transaction) {
-      Statement rollback_stmt(prepare("ROLLBACK"));
-      sqlite3_step(rollback_stmt.get());
-    }
-
     throw CRDTSQLiteException(error);
   }
 
-  // Flush changes before commit (if we have pending changes and we started the transaction)
-  if (started_transaction && !pending_changes_.empty()) {
-    try {
-      flush_changes();
-    } catch (...) {
-      // Rollback on flush failure (use prepared statement)
-      Statement rollback_stmt(prepare("ROLLBACK"));
-      sqlite3_step(rollback_stmt.get());
-      throw;
-    }
-  }
-
-  // Commit if we started a transaction (use prepared statement for consistency)
-  if (started_transaction) {
+  // CRITICAL: Flush pending changes AFTER sqlite3_exec completes
+  // At this point we're back in autocommit mode (sqlite3_exec creates its own transaction)
+  // Now we can safely use prepare/step to flush without mixing exec and prepare in same transaction
+  if (!pending_changes_.empty() && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
     #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   Committing transaction (using prepare/step)\n");
+    std::fprintf(stderr, "[CRDT-SQLite]   Flushing %zu changes after execute (in autocommit)\n",
+      pending_changes_.size());
     #endif
-    Statement commit_stmt(prepare("COMMIT"));
-    sqlite3_step(commit_stmt.get());
+    flush_changes();
   }
 
   // If ALTER TABLE was detected, refresh schema metadata
