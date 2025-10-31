@@ -4,8 +4,8 @@ A high-performance CRDT wrapper for SQLite that enables automatic multi-node syn
 
 ## Features
 
-- 🚀 **~10x faster writes** than cr-sqlite's pure-trigger approach
-- 💾 **Crash-safe**: Survives power loss between commit and metadata update  
+- 🚀 **High performance**: Hybrid trigger + async processing (benchmarks pending)
+- 💾 **Crash-safe**: Survives power loss between commit and metadata update
 - 🔄 **Automatic sync**: Changes tracked transparently using triggers
 - 🎯 **Column-level conflicts**: Fine-grained conflict resolution per field
 - 🌍 **Cross-platform**: Linux, macOS, Windows (with custom SQLite build)
@@ -86,11 +86,18 @@ CRDT-SQLite uses a **hybrid trigger + WAL hook** architecture that combines cras
 
 ### Performance Comparison
 
-| Approach | Lock Duration | Overhead | Crash Safe | Performance |
-|----------|---------------|----------|------------|-------------|
+| Approach | Lock Duration | Overhead | Crash Safe | Expected Performance |
+|----------|---------------|----------|------------|---------------------|
 | **cr-sqlite** (pure triggers) | Long | High | Yes | Baseline |
 | **update_hook + vector** | Short | Low | ❌ No | Fast but unsafe |
-| **Ours** (triggers + wal_hook) | Short | Medium | ✅ Yes | ~10x faster |
+| **Ours** (triggers + wal_hook) | Short | Medium | ✅ Yes | **TBD** (benchmarks needed) |
+
+**Hypothesis**: Should be significantly faster than cr-sqlite because:
+- Triggers only INSERT into `_pending` (minimal work during write)
+- Heavy metadata updates happen in wal_hook AFTER locks released
+- Shorter critical section = less contention
+
+**Note**: Formal benchmarks comparing against cr-sqlite are planned but not yet completed.
 
 **Key Insight**: The `wal_hook` callback fires **AFTER** commit with all locks released, making `prepare()`/`step()` calls 100% safe.
 
