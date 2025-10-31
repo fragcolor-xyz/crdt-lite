@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 
 // SQLiteValue implementation
 
@@ -329,6 +330,37 @@ void CRDTSQLite::refresh_schema() {
 }
 
 void CRDTSQLite::execute(const char *sql) {
+  // Check if we're in autocommit mode (not in an explicit transaction)
+  bool was_autocommit = sqlite3_get_autocommit(db_);
+
+  // Normalize SQL for keyword detection
+  std::string sql_upper(sql);
+  std::transform(sql_upper.begin(), sql_upper.end(), sql_upper.begin(), ::toupper);
+
+  // Check if this SQL is a transaction control statement
+  bool is_begin = (sql_upper.find("BEGIN") != std::string::npos);
+  bool is_commit = (sql_upper.find("COMMIT") != std::string::npos ||
+                   sql_upper.find("END") != std::string::npos);
+  bool is_rollback = (sql_upper.find("ROLLBACK") != std::string::npos);
+
+  // If ending a transaction and we have pending changes, flush first
+  if (!was_autocommit && is_commit && !pending_changes_.empty()) {
+    try {
+      flush_changes();
+    } catch (...) {
+      // Flush failed - user should rollback
+      throw;
+    }
+  }
+
+  // If in autocommit and we have a tracked table, start explicit transaction
+  // BUT don't wrap if this SQL is itself a transaction statement
+  bool started_transaction = false;
+  if (was_autocommit && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
+    exec_or_throw("BEGIN");
+    started_transaction = true;
+  }
+
   char *err_msg = nullptr;
   int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
   if (rc != SQLITE_OK) {
@@ -337,7 +369,29 @@ void CRDTSQLite::execute(const char *sql) {
       error += err_msg;
       sqlite3_free(err_msg);
     }
+
+    // Rollback if we started a transaction
+    if (started_transaction) {
+      sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
     throw CRDTSQLiteException(error);
+  }
+
+  // Flush changes before commit (if we have pending changes and we started the transaction)
+  if (started_transaction && !pending_changes_.empty()) {
+    try {
+      flush_changes();
+    } catch (...) {
+      // Rollback on flush failure
+      sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+      throw;
+    }
+  }
+
+  // Commit if we started a transaction
+  if (started_transaction) {
+    exec_or_throw("COMMIT");
   }
 
   // If ALTER TABLE was detected, refresh schema metadata
@@ -358,6 +412,13 @@ sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
 
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
+  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
+  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
+    exec_or_throw("BEGIN");
+    flush_changes();
+    exec_or_throw("COMMIT");
+  }
+
   std::vector<Change<CrdtRecordId, std::string>> changes;
 
   // Determine id column (rowid or id)
@@ -463,6 +524,13 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
                                        const CrdtSet<CrdtNodeId> &excluding) {
+  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
+  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
+    exec_or_throw("BEGIN");
+    flush_changes();
+    exec_or_throw("COMMIT");
+  }
+
   // SECURITY: Prevent DoS via enormous SQL queries
   constexpr size_t MAX_EXCLUDED_NODES = 100;
   if (excluding.size() > MAX_EXCLUDED_NODES) {
@@ -582,6 +650,13 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
 
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes) {
+  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
+  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
+    exec_or_throw("BEGIN");
+    flush_changes();
+    exec_or_throw("COMMIT");
+  }
+
   std::vector<Change<CrdtRecordId, std::string>> accepted;
 
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
@@ -1116,19 +1191,10 @@ void CRDTSQLite::update_callback(void *ctx, int operation,
 }
 
 int CRDTSQLite::commit_callback(void *ctx) {
-  auto *self = static_cast<CRDTSQLite *>(ctx);
-  try {
-    self->flush_changes();
-    return 0; // Allow commit
-  } catch (const std::exception &e) {
-    // If flush fails, abort the transaction to maintain consistency
-    // SECURITY: Report error to stderr (cannot throw from C callback)
-    std::fprintf(stderr,
-      "CRDT-SQLite: Transaction commit aborted due to error: %s\n",
-      e.what()
-    );
-    return 1; // Abort commit
-  }
+  // NOTE: We don't flush here anymore - flushing is done in execute() before COMMIT
+  // This callback is only triggered for user-initiated BEGIN/COMMIT transactions
+  // Flushing here caused Windows mutex issues (can't do SQLite ops during commit)
+  return 0; // Allow commit
 }
 
 void CRDTSQLite::rollback_callback(void *ctx) {
