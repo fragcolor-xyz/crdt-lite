@@ -872,6 +872,22 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
 size_t CRDTSQLite::compact_tombstones(uint64_t min_acknowledged_version) {
   // Remove tombstones from shadow table
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
+
+  // For uint128_t, also clean up lookaside table to prevent unbounded growth
+  // First, get record_ids being compacted (before deleting them)
+  std::vector<CrdtRecordId> compacted_ids;
+  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    std::string select_sql = "SELECT record_id FROM " + tombstones_table +
+                            " WHERE db_version < ?";
+    Statement stmt(prepare(select_sql.c_str()));
+    sqlite3_bind_int64(stmt.get(), 1, min_acknowledged_version);
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+      compacted_ids.push_back(RecordIdTraits<CrdtRecordId>::from_sqlite(stmt.get(), 0));
+    }
+    // Statement auto-finalized here
+  }
+
+  // Delete tombstones
   std::string delete_sql = "DELETE FROM " + tombstones_table +
                           " WHERE db_version < ?";
   int removed;
@@ -881,6 +897,20 @@ size_t CRDTSQLite::compact_tombstones(uint64_t min_acknowledged_version) {
     sqlite3_step(stmt.get());
     removed = sqlite3_changes(db_);
     // Statement auto-finalized here
+  }
+
+  // Clean up lookaside table entries for compacted tombstones
+  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    if (!compacted_ids.empty()) {
+      std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
+      for (const auto& id : compacted_ids) {
+        std::string delete_lookaside = "DELETE FROM " + lookaside_table + " WHERE id = ?";
+        Statement stmt(prepare(delete_lookaside.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, id);
+        sqlite3_step(stmt.get());
+        // Statement auto-finalized here
+      }
+    }
   }
 
   return removed;
