@@ -848,6 +848,13 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
     }
 
     // Increment and update clock
+    if (current_clock == UINT64_MAX) {
+      throw CRDTSQLiteException(
+        "Clock overflow: reached UINT64_MAX (" + std::to_string(UINT64_MAX) + "). "
+        "Cannot increment clock further. After 2^64 operations, the clock wraps to 0, "
+        "breaking causality and conflict resolution. This database cannot accept more changes."
+      );
+    }
     current_clock++;
     {
       std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
@@ -1077,6 +1084,13 @@ void CRDTSQLite::process_pending_changes() {
 
   // Get and increment clock
   uint64_t current_clock = get_clock();
+  if (current_clock == UINT64_MAX) {
+    throw CRDTSQLiteException(
+      "Clock overflow: reached UINT64_MAX (" + std::to_string(UINT64_MAX) + "). "
+      "Cannot increment clock further. After 2^64 operations, the clock wraps to 0, "
+      "breaking causality and conflict resolution. This database cannot accept more changes."
+    );
+  }
   current_clock++;
 
   // Process each pending change
