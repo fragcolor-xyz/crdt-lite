@@ -720,13 +720,21 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
   // WAL mode: Changes are auto-flushed by wal_callback after each commit
   // No need to manually flush here - wal_callback fires before this function is called
 
-  std::vector<Change<CrdtRecordId, std::string>> accepted;
+  // Wrap entire merge operation in transaction for atomicity
+  // Without this, a crash mid-merge could leave database in inconsistent state:
+  // - Tombstone created but main table record still exists
+  // - Shadow table updated but main table not updated
+  // - Clock not incremented correctly
+  exec_or_throw("BEGIN TRANSACTION");
 
-  std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
-  std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
+  try {
+    std::vector<Change<CrdtRecordId, std::string>> accepted;
 
-  // Get current clock
-  uint64_t current_clock = get_clock();
+    std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
+    std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
+
+    // Get current clock
+    uint64_t current_clock = get_clock();
 
   for (auto& remote : changes) {
     // Update clock (always, even for rejected changes - maintains causality)
@@ -837,20 +845,28 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
         accepted.push_back(remote);
       }
     }
-  }
+    }
 
-  // Increment and update clock
-  current_clock++;
-  {
-    std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
-    std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
-    Statement stmt(prepare(update_clock.c_str()));
-    sqlite3_bind_int64(stmt.get(), 1, current_clock);
-    sqlite3_step(stmt.get());
-    // Statement auto-finalized here
-  }
+    // Increment and update clock
+    current_clock++;
+    {
+      std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
+      std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
+      Statement stmt(prepare(update_clock.c_str()));
+      sqlite3_bind_int64(stmt.get(), 1, current_clock);
+      sqlite3_step(stmt.get());
+      // Statement auto-finalized here
+    }
 
-  return accepted;
+    // Commit transaction - triggers wal_callback to process pending changes
+    exec_or_throw("COMMIT");
+
+    return accepted;
+  } catch (...) {
+    // Rollback on any exception
+    exec_or_throw("ROLLBACK");
+    throw;  // Re-throw exception after rollback
+  }
 }
 
 size_t CRDTSQLite::compact_tombstones(uint64_t min_acknowledged_version) {
