@@ -591,6 +591,16 @@ Contributions are welcome! Please ensure:
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## Related Projects
+
+- **[crdt-sqlite](https://github.com/sinkingsugar/crdt-sqlite)** - SQLite wrapper with CRDT synchronization
+  - Persistent storage for CRDT-backed applications
+  - Automatic change tracking via SQLite triggers
+  - Normal SQL INSERT/UPDATE/DELETE syntax (no special APIs required)
+  - Cross-platform support (Linux, macOS, Windows)
+  - Use crdt-lite for: in-memory state, game sync, real-time collaboration
+  - Use crdt-sqlite for: persistent storage, database-backed apps, SQLite integration
+
 ## References
 
 ### CRDT Theory
