@@ -1050,7 +1050,7 @@ void CRDTSQLite::process_pending_changes() {
 
         if (col_name_str) {
           // Build cache key: "record_id:col_name"
-          std::string key = std::to_string(static_cast<uint64_t>(rec_id)) + ":" + col_name_str;
+          std::string key = RecordIdTraits<CrdtRecordId>::to_string(rec_id) + ":" + col_name_str;
           version_cache[key] = col_ver;
         }
       }
@@ -1097,7 +1097,7 @@ void CRDTSQLite::process_pending_changes() {
       const std::string& col_name = *pending.col_name;
 
       // Look up col_version from cache (O(1) instead of O(n) queries)
-      std::string cache_key = std::to_string(static_cast<uint64_t>(pending.record_id)) + ":" + col_name;
+      std::string cache_key = RecordIdTraits<CrdtRecordId>::to_string(pending.record_id) + ":" + col_name;
       uint64_t col_version = 0;
       auto it = version_cache.find(cache_key);
       if (it != version_cache.end()) {
