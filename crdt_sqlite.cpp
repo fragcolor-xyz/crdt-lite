@@ -760,69 +760,16 @@ uint64_t CRDTSQLite::get_clock() const {
   return 0;
 }
 
-void CRDTSQLite::track_change(int operation, const char *table, CrdtRecordId record_id) {
+void CRDTSQLite::track_change(int operation, const char *table, sqlite3_int64 rowid) {
   if (!table || tracked_table_ != table) {
     return;
   }
 
+  // CRITICAL: Do minimal work here - we're inside update_callback with mutex held
+  // All ID lookups and queries deferred to flush_changes() to avoid Windows mutex issues
   PendingChange change;
   change.operation = operation;
-
-  // For non-auto-increment types (e.g., uint128_t), we need to get the actual ID
-  if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
-    if (operation == SQLITE_DELETE) {
-      // For DELETE: query lookaside table to get CRDT ID
-      // (main table row is already deleted, but lookaside persists the mapping)
-      std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
-      std::string query = "SELECT id FROM " + lookaside_table + " WHERE rowid = ?";
-      sqlite3_stmt *stmt = prepare(query.c_str());
-      sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid
-
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-        change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
-        sqlite3_finalize(stmt);
-      } else {
-        // No lookaside entry - record was never inserted with proper ID
-        sqlite3_finalize(stmt);
-        return;
-      }
-      // NOTE: We DON'T delete from lookaside - keep the mapping for sync
-    } else {
-      // For INSERT/UPDATE: query the id column using the rowid
-      std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
-      sqlite3_stmt *stmt = prepare(query.c_str());
-      sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid is always int64
-
-      if (sqlite3_step(stmt) == SQLITE_ROW) {
-        change.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
-        sqlite3_finalize(stmt);
-
-        // Populate lookaside table: rowid → CRDT ID
-        std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
-        std::string insert_lookaside = "INSERT OR REPLACE INTO " + lookaside_table +
-                                       " (rowid, id) VALUES (?, ?)";
-        stmt = prepare(insert_lookaside.c_str());
-        sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(record_id));  // rowid
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, change.record_id);  // CRDT ID
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-      } else {
-        // Record not found or doesn't have id column - skip
-        sqlite3_finalize(stmt);
-        return;
-      }
-    }
-  } else {
-    // For int64_t, rowid IS the record_id
-    change.record_id = record_id;
-  }
-
-  if (operation == SQLITE_DELETE) {
-    // For deletes, we don't need values
-  } else {
-    // For inserts and updates, query current values
-    change.values = query_row_values(change.record_id);
-  }
+  change.rowid = rowid;
 
   pending_changes_.push_back(std::move(change));
 }
@@ -872,8 +819,78 @@ void CRDTSQLite::flush_changes() {
   uint64_t current_clock = get_clock();
   current_clock++;
 
-  // Process each pending change
-  for (const auto &change : pending_changes_) {
+  // PHASE 1: Resolve rowid -> record_id and query values
+  // (Deferred from track_change to avoid mutex issues in update_callback)
+  struct ResolvedChange {
+    int operation;
+    CrdtRecordId record_id;
+    std::unordered_map<std::string, SQLiteValue> values;
+  };
+  std::vector<ResolvedChange> resolved_changes;
+  resolved_changes.reserve(pending_changes_.size());
+
+  for (const auto &pending : pending_changes_) {
+    ResolvedChange resolved;
+    resolved.operation = pending.operation;
+
+    // Resolve rowid -> record_id
+    if constexpr (!RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+      // For uint128_t: lookup actual ID from rowid
+      if (pending.operation == SQLITE_DELETE) {
+        // For DELETE: query lookaside table
+        std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
+        std::string query = "SELECT id FROM " + lookaside_table + " WHERE rowid = ?";
+        sqlite3_stmt *stmt = prepare(query.c_str());
+        sqlite3_bind_int64(stmt, 1, pending.rowid);
+
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+          resolved.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+          sqlite3_finalize(stmt);
+        } else {
+          // No lookaside entry - skip this change
+          sqlite3_finalize(stmt);
+          continue;
+        }
+      } else {
+        // For INSERT/UPDATE: query main table for id column
+        std::string query = "SELECT id FROM " + tracked_table_ + " WHERE rowid = ?";
+        sqlite3_stmt *stmt = prepare(query.c_str());
+        sqlite3_bind_int64(stmt, 1, pending.rowid);
+
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+          resolved.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
+          sqlite3_finalize(stmt);
+
+          // Update lookaside table
+          std::string lookaside_table = "_crdt_" + tracked_table_ + "_lookaside";
+          std::string insert_lookaside = "INSERT OR REPLACE INTO " + lookaside_table +
+                                         " (rowid, id) VALUES (?, ?)";
+          stmt = prepare(insert_lookaside.c_str());
+          sqlite3_bind_int64(stmt, 1, pending.rowid);
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 2, resolved.record_id);
+          sqlite3_step(stmt);
+          sqlite3_finalize(stmt);
+        } else {
+          // Record not found - skip this change
+          sqlite3_finalize(stmt);
+          continue;
+        }
+      }
+    } else {
+      // For int64_t: rowid IS the record_id
+      resolved.record_id = static_cast<CrdtRecordId>(pending.rowid);
+    }
+
+    // Query values for INSERT/UPDATE
+    if (pending.operation != SQLITE_DELETE) {
+      resolved.values = query_row_values(resolved.record_id);
+    }
+
+    resolved_changes.push_back(std::move(resolved));
+  }
+
+  // PHASE 2: Process resolved changes
+  for (const auto &change : resolved_changes) {
     if (change.operation == SQLITE_DELETE) {
       // Create tombstone
       std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +

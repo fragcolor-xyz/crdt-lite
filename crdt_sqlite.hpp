@@ -45,9 +45,10 @@ struct SQLiteValue {
 
 /// Pending change during a transaction
 struct PendingChange {
-  int operation; // SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE
-  CrdtRecordId record_id;
-  std::unordered_map<std::string, SQLiteValue> values;
+  int operation;         // SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE
+  sqlite3_int64 rowid;   // SQLite rowid (always int64, even for uint128_t)
+  // Note: For uint128_t, we resolve rowid -> actual ID in flush_changes()
+  // to avoid doing SQLite queries inside update_callback (mutex issues on Windows)
 };
 
 /// CRDT-enabled SQLite database wrapper
@@ -279,7 +280,7 @@ private:
   void cache_column_types();
 
   /// Tracks a change from the update hook
-  void track_change(int operation, const char *table, CrdtRecordId record_id);
+  void track_change(int operation, const char *table, sqlite3_int64 rowid);
 
   /// Queries the current values of a row
   std::unordered_map<std::string, SQLiteValue> query_row_values(CrdtRecordId record_id);

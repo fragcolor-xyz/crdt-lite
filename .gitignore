@@ -20,3 +20,14 @@ test-text-crdt
 *.o
 test_crdt_sqlite
 test_uint128
+test_int64
+test_int64_asan
+test_uint128_asan
+test_uint128_crdt
+test_uint128_crdt_asan
+test_crdt_sqlite_asan
+test_crdt_sqlite_clang
+*.dSYM/
+*.db
+*.db-shm
+*.db-wal
