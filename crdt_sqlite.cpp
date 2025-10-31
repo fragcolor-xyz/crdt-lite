@@ -112,48 +112,30 @@ CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
   // Enable foreign keys
   exec_or_throw("PRAGMA foreign_keys = ON");
 
+  // Enable WAL mode for better concurrency and to use wal_hook
+  // WAL mode provides 10x better performance and allows us to safely
+  // call prepare/step from wal_hook (which fires AFTER commit with locks released)
+  exec_or_throw("PRAGMA journal_mode=WAL");
+
   // Install hooks
   sqlite3_set_authorizer(db_, authorizer_callback, this);
-  sqlite3_update_hook(db_, update_callback, this);
+  sqlite3_update_hook(db_, update_callback, this);  // Tracks WHAT changed
+  sqlite3_wal_hook(db_, wal_callback, this);        // Flushes AFTER commit (safe to call prepare/step)
   sqlite3_commit_hook(db_, commit_callback, this);
   sqlite3_rollback_hook(db_, rollback_callback, this);
 }
 
 CRDTSQLite::~CRDTSQLite() {
   if (db_) {
-    // Flush pending changes if in autocommit mode
-    // If in a transaction, can't flush (user must commit/rollback)
-    if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-      try {
-        // CRITICAL FIX: Use prepared statements for transaction control
-        // Don't mix sqlite3_exec with prepare/step (causes Windows mutex issues)
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, "BEGIN", -1, &stmt, nullptr) == SQLITE_OK) {
-          sqlite3_step(stmt);
-          sqlite3_finalize(stmt);
-
-          flush_changes();
-
-          if (sqlite3_prepare_v2(db_, "COMMIT", -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
-          }
-        } else {
-          // Failed to start transaction - warn but don't throw (in destructor)
-          std::fprintf(stderr,
-            "CRDT-SQLite: Warning: Failed to flush pending changes on close\n");
-          if (stmt) sqlite3_finalize(stmt);
-        }
-      } catch (const std::exception& e) {
-        // Flush failed - warn but don't throw from destructor
-        std::fprintf(stderr,
-          "CRDT-SQLite: Warning: Exception during flush on close: %s\n",
-          e.what());
-      }
-    } else if (!pending_changes_.empty()) {
-      // Pending changes exist but we're in a transaction
+    // WAL mode: Pending changes should be auto-flushed by wal_callback after each commit
+    // If pending changes exist here, it means:
+    // 1. User is in the middle of a transaction, OR
+    // 2. An exception was thrown before commit
+    // In either case, we can't safely flush (might be holding locks)
+    if (!pending_changes_.empty()) {
       std::fprintf(stderr,
-        "CRDT-SQLite: Warning: %zu pending changes discarded (active transaction on close)\n",
+        "CRDT-SQLite: Warning: %zu pending changes discarded on close "
+        "(transaction not committed or exception thrown)\n",
         pending_changes_.size());
     }
 
@@ -374,33 +356,9 @@ void CRDTSQLite::execute(const char *sql) {
     sqlite3_get_autocommit(db_), pending_changes_.size());
   #endif
 
-  // Check if we're in autocommit mode (not in an explicit transaction)
-  bool was_autocommit = sqlite3_get_autocommit(db_);
-
-  // Normalize SQL for keyword detection
-  std::string sql_upper(sql);
-  std::transform(sql_upper.begin(), sql_upper.end(), sql_upper.begin(), ::toupper);
-
-  // Check if this SQL is a transaction control statement
-  bool is_begin = (sql_upper.find("BEGIN") != std::string::npos);
-  bool is_commit = (sql_upper.find("COMMIT") != std::string::npos ||
-                   sql_upper.find("END") != std::string::npos);
-  bool is_rollback = (sql_upper.find("ROLLBACK") != std::string::npos);
-
-  // If ending a transaction and we have pending changes, flush first
-  if (!was_autocommit && is_commit && !pending_changes_.empty()) {
-    #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   Flushing before user COMMIT\n");
-    #endif
-    try {
-      flush_changes();
-    } catch (...) {
-      // Flush failed - user should rollback
-      throw;
-    }
-  }
-
-  // Execute user SQL via sqlite3_exec (this will fire hooks and accumulate pending changes)
+  // Execute user SQL via sqlite3_exec
+  // This will fire update_hook to track changes
+  // After commit, wal_callback will automatically flush pending changes
   char *err_msg = nullptr;
   int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
   if (rc != SQLITE_OK) {
@@ -410,17 +368,6 @@ void CRDTSQLite::execute(const char *sql) {
       sqlite3_free(err_msg);
     }
     throw CRDTSQLiteException(error);
-  }
-
-  // CRITICAL: Flush pending changes AFTER sqlite3_exec completes
-  // At this point we're back in autocommit mode (sqlite3_exec creates its own transaction)
-  // Now we can safely use prepare/step to flush without mixing exec and prepare in same transaction
-  if (!pending_changes_.empty() && !tracked_table_.empty() && !is_begin && !is_commit && !is_rollback) {
-    #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   Flushing %zu changes after execute (in autocommit)\n",
-      pending_changes_.size());
-    #endif
-    flush_changes();
   }
 
   // If ALTER TABLE was detected, refresh schema metadata
@@ -453,17 +400,8 @@ sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
 
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
-  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
-  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    // Use prepared statements for transaction control (Windows mutex fix)
-    Statement begin_stmt(prepare("BEGIN"));
-    sqlite3_step(begin_stmt.get());
-
-    flush_changes();
-
-    Statement commit_stmt(prepare("COMMIT"));
-    sqlite3_step(commit_stmt.get());
-  }
+  // WAL mode: Changes are auto-flushed by wal_callback after each commit
+  // No need to manually flush here - wal_callback fires before this function is called
 
   std::vector<Change<CrdtRecordId, std::string>> changes;
 
@@ -570,17 +508,8 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
                                        const CrdtSet<CrdtNodeId> &excluding) {
-  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
-  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    // Use prepared statements for transaction control (Windows mutex fix)
-    Statement begin_stmt(prepare("BEGIN"));
-    sqlite3_step(begin_stmt.get());
-
-    flush_changes();
-
-    Statement commit_stmt(prepare("COMMIT"));
-    sqlite3_step(commit_stmt.get());
-  }
+  // WAL mode: Changes are auto-flushed by wal_callback after each commit
+  // No need to manually flush here - wal_callback fires before this function is called
 
   // SECURITY: Prevent DoS via enormous SQL queries
   constexpr size_t MAX_EXCLUDED_NODES = 100;
@@ -701,17 +630,8 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
 
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes) {
-  // Auto-flush pending changes (handles case where prepare/step used instead of execute)
-  if (!pending_changes_.empty() && sqlite3_get_autocommit(db_)) {
-    // Use prepared statements for transaction control (Windows mutex fix)
-    Statement begin_stmt(prepare("BEGIN"));
-    sqlite3_step(begin_stmt.get());
-
-    flush_changes();
-
-    Statement commit_stmt(prepare("COMMIT"));
-    sqlite3_step(commit_stmt.get());
-  }
+  // WAL mode: Changes are auto-flushed by wal_callback after each commit
+  // No need to manually flush here - wal_callback fires before this function is called
 
   std::vector<Change<CrdtRecordId, std::string>> accepted;
 
@@ -1278,10 +1198,35 @@ void CRDTSQLite::update_callback(void *ctx, int operation,
   self->track_change(operation, table, static_cast<int64_t>(rowid));
 }
 
+int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int num_pages) {
+  // WAL callback fires AFTER commit completes and locks are released
+  // This is the SAFE place to call prepare/step (unlike update_hook or commit_hook)
+  auto *self = static_cast<CRDTSQLite *>(ctx);
+
+  #ifdef _WIN32
+  std::fprintf(stderr, "[CRDT-SQLite] wal_callback: num_pages=%d, pending_changes=%zu\n",
+    num_pages, self->pending_changes_.size());
+  #endif
+
+  // Flush pending changes to CRDT shadow tables
+  // This is safe because we're called AFTER commit with locks released
+  if (!self->pending_changes_.empty() && !self->tracked_table_.empty()) {
+    try {
+      self->flush_changes();
+    } catch (const std::exception& e) {
+      // Log error but don't throw from callback
+      std::fprintf(stderr,
+        "CRDT-SQLite: Error flushing changes in wal_callback: %s\n",
+        e.what());
+    }
+  }
+
+  return SQLITE_OK;
+}
+
 int CRDTSQLite::commit_callback(void *ctx) {
-  // NOTE: We don't flush here anymore - flushing is done in execute() before COMMIT
-  // This callback is only triggered for user-initiated BEGIN/COMMIT transactions
-  // Flushing here caused Windows mutex issues (can't do SQLite ops during commit)
+  // NOTE: Flushing moved to wal_callback (which fires AFTER commit with locks released)
+  // commit_callback fires DURING commit with locks held - unsafe to call prepare/step
   return 0; // Allow commit
 }
 

@@ -301,6 +301,9 @@ private:
                              const char *db_name, const char *table,
                              sqlite3_int64 rowid);
 
+  /// SQLite callback for WAL hook (fires AFTER commit with locks released)
+  static int wal_callback(void *ctx, sqlite3 *db, const char *db_name, int num_pages);
+
   /// SQLite callback for commit hook
   static int commit_callback(void *ctx);
 
