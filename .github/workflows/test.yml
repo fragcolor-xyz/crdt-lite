@@ -1,7 +1,7 @@
 name: Tests
 
 # Simplified CI configuration:
-# - Test on Linux (GCC 12, Clang 15), macOS, Windows
+# - Test on Linux (GCC 12, Clang 18), macOS, Windows
 # - Both Debug and Release builds
 # - Combined ASan + UBSan for memory safety
 # - Code coverage reporting
@@ -28,8 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         compiler:
-          - { cc: gcc-12, cxx: g++-12, stdlib: "" }
-          - { cc: clang-15, cxx: clang++-15, stdlib: "-stdlib=libc++" }
+          - { cc: gcc-12, cxx: g++-12 }
+          - { cc: clang-18, cxx: clang++-18 }
         build_type: [Debug, Release]
 
     steps:
@@ -46,11 +46,6 @@ jobs:
           ${{ matrix.compiler.cc }} \
           ${{ matrix.compiler.cxx }}
 
-        # Install libc++ for Clang to avoid libstdc++-14 incompatibility
-        if [ "${{ matrix.compiler.cc }}" = "clang-15" ]; then
-          sudo apt-get install -y libc++-15-dev libc++abi-15-dev
-        fi
-
     - name: Configure CMake
       env:
         CC: ${{ matrix.compiler.cc }}
@@ -60,8 +55,7 @@ jobs:
           -G Ninja \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DBUILD_TESTS=ON \
-          -DBUILD_SQLITE_WRAPPER=ON \
-          -DCMAKE_CXX_FLAGS="${{ matrix.compiler.stdlib }}"
+          -DBUILD_SQLITE_WRAPPER=ON
 
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }}
@@ -227,12 +221,12 @@ jobs:
           cmake \
           ninja-build \
           libsqlite3-dev \
-          clang-15
+          clang-18
 
     - name: Configure CMake with sanitizers
       env:
-        CC: clang-15
-        CXX: clang++-15
+        CC: clang-18
+        CXX: clang++-18
       run: |
         cmake -B build \
           -G Ninja \
