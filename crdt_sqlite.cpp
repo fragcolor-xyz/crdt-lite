@@ -397,17 +397,9 @@ void CRDTSQLite::refresh_schema() {
 }
 
 void CRDTSQLite::execute(const char *sql) {
-  // DIAGNOSTIC: Log all execute() calls on Windows
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] execute() called with SQL: %.80s%s\n",
-    sql, strlen(sql) > 80 ? "..." : "");
-  std::fprintf(stderr, "[CRDT-SQLite]   autocommit=%d, pending_changes=%zu\n",
-    sqlite3_get_autocommit(db_), pending_changes_.size());
-  #endif
-
   // Execute user SQL via sqlite3_exec
-  // This will fire update_hook to track changes
-  // After commit, wal_callback will automatically flush pending changes
+  // Triggers populate _pending table during writes
+  // After commit, wal_callback processes _pending and updates CRDT metadata
   char *err_msg = nullptr;
   int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err_msg);
   if (rc != SQLITE_OK) {
@@ -427,23 +419,11 @@ void CRDTSQLite::execute(const char *sql) {
 }
 
 sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] prepare() called: %.80s%s\n",
-    sql, strlen(sql) > 80 ? "..." : "");
-  #endif
-
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
-    #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT-SQLite]   prepare() FAILED: %s\n", get_error().c_str());
-    #endif
     throw CRDTSQLiteException("Failed to prepare statement: " + get_error());
   }
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite]   prepare() succeeded\n");
-  #endif
   return stmt;
 }
 
@@ -907,10 +887,6 @@ CRDTSQLite::query_row_values(CrdtRecordId record_id) {
 }
 
 void CRDTSQLite::process_pending_changes() {
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] process_pending_changes() called\n");
-  #endif
-
   std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
@@ -936,10 +912,6 @@ void CRDTSQLite::process_pending_changes() {
   if (pending_records.empty()) {
     return;  // Nothing to do
   }
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite]   Processing %zu pending changes\n", pending_records.size());
-  #endif
 
   // Get and increment clock
   uint64_t current_clock = get_clock();
@@ -1209,10 +1181,6 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
   // WAL callback fires AFTER commit completes and locks are released
   // This is the SAFE place to call prepare/step (unlike update_hook or commit_hook)
   auto *self = static_cast<CRDTSQLite *>(ctx);
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT-SQLite] wal_callback: num_pages=%d\n", num_pages);
-  #endif
 
   if (self->tracked_table_.empty()) {
     return SQLITE_OK;  // No table being tracked
