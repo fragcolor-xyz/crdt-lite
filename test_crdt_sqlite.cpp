@@ -607,15 +607,20 @@ TEST(tombstone_resurrection) {
 
   uint64_t version_after_delete = db.get_clock();
 
-  // Try to recreate the same record
+  // Try to recreate the same record - tombstone should prevent resurrection
   db.execute("INSERT INTO users (id, name) VALUES (100, 'Resurrected User')");
 
-  // Record physically exists in SQLite and changes are emitted locally
-  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+  // FIXED: Tombstone now blocks resurrection locally too!
+  // The INSERT physically happens but process_pending_changes() detects tombstone
+  // and deletes the row, maintaining consistency with remote merge behavior
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);  // Tombstone enforced locally
   auto changes = db.get_changes_since(version_after_delete);
-  ASSERT_TRUE(changes.size() > 0);  // Changes emitted locally
+  ASSERT_EQ(changes.size(), 0);  // No changes emitted - resurrection blocked
 
-  // But when syncing to another node, tombstone blocks resurrection
+  // Verify tombstone still exists
+  ASSERT_EQ(db.tombstone_count(), 1);
+
+  // When syncing to another node, same behavior
   TestDB test_db2("tombstone_resurrection_remote");
   CRDTSQLite db2(test_db2.path(), 2);
   db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
@@ -627,6 +632,26 @@ TEST(tombstone_resurrection) {
   // Remote node should have tombstone, no records
   ASSERT_EQ(count_rows(db2.get_db(), "users"), 0);
   ASSERT_EQ(db2.tombstone_count(), 1);
+
+  // Additional test: Verify UPDATE on tombstoned record is also blocked
+  // First, create a non-tombstoned record
+  db.execute("INSERT INTO users (id, name) VALUES (200, 'Active User')");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+
+  // Delete it to create tombstone
+  db.execute("DELETE FROM users WHERE id = 200");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);
+  ASSERT_EQ(db.tombstone_count(), 2);
+
+  // Try to resurrect via INSERT then UPDATE
+  db.execute("INSERT INTO users (id, name) VALUES (200, 'Resurrected')");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);  // INSERT blocked by tombstone
+
+  // Try direct UPDATE (should also be blocked)
+  // Note: This would need the record to exist first, but since INSERT was blocked,
+  // UPDATE won't have a target. SQLite will silently do nothing.
+  db.execute("UPDATE users SET name = 'Updated Ghost' WHERE id = 200");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);  // Still no records
 }
 
 // Test 18: Concurrent edits to different columns

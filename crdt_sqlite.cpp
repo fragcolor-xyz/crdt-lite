@@ -1164,6 +1164,37 @@ void CRDTSQLite::process_pending_changes() {
         continue;
       }
 
+      // CRITICAL: Check if record is tombstoned before allowing resurrection
+      // Without this check, local inserts bypass tombstones while remote inserts don't,
+      // causing data inconsistency between nodes
+      bool is_tombstoned = false;
+      {
+        std::string tomb_check = "SELECT 1 FROM " + tombstones_table + " WHERE record_id = ?";
+        Statement stmt(prepare(tomb_check.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+          is_tombstoned = true;
+        }
+      }
+
+      if (is_tombstoned) {
+        // Enforce tombstone: delete the row that was inserted/updated
+        // This ensures local behavior matches remote merge behavior
+        std::string id_column;
+        if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+          id_column = "rowid";
+        } else {
+          id_column = "id";
+        }
+
+        std::string delete_sql = "DELETE FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
+        Statement stmt(prepare(delete_sql.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        sqlite3_step(stmt.get());
+        // Skip version metadata creation - record is tombstoned
+        continue;
+      }
+
       const std::string& col_name = *pending.col_name;
 
       // Look up col_version from cache (O(1) instead of O(n) queries)
