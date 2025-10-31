@@ -1047,38 +1047,48 @@ void CRDTSQLite::process_pending_changes() {
     }
 
     if (!version_keys.empty()) {
-      // Batch-fetch all versions in one query using IN clause
-      std::ostringstream query_sql;
-      query_sql << "SELECT record_id, col_name, col_version FROM " << versions_table << " WHERE ";
+      // Process in batches of 500 to avoid SQLite's 1000-term compound SELECT limit
+      // Each (record_id, col_name) pair becomes 2 bind parameters in the WHERE clause
+      constexpr size_t BATCH_SIZE = 500;
 
-      // Build OR conditions for all (record_id, col_name) pairs
-      for (size_t i = 0; i < version_keys.size(); ++i) {
-        if (i > 0) query_sql << " OR ";
-        query_sql << "(record_id = ? AND col_name = ?)";
-      }
+      for (size_t batch_start = 0; batch_start < version_keys.size(); batch_start += BATCH_SIZE) {
+        size_t batch_end = std::min(batch_start + BATCH_SIZE, version_keys.size());
+        size_t batch_count = batch_end - batch_start;
 
-      Statement stmt(prepare(query_sql.str().c_str()));
+        // Batch-fetch versions for this batch using OR conditions
+        std::ostringstream query_sql;
+        query_sql << "SELECT record_id, col_name, col_version FROM " << versions_table << " WHERE ";
 
-      // Bind all (record_id, col_name) pairs
-      int param_idx = 1;
-      for (const auto &[rec_id, col] : version_keys) {
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), param_idx++, rec_id);
-        sqlite3_bind_text(stmt.get(), param_idx++, col.c_str(), -1, SQLITE_TRANSIENT);
-      }
-
-      // Fetch all existing versions into cache
-      while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        CrdtRecordId rec_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt.get(), 0);
-        const char *col_name_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        uint64_t col_ver = sqlite3_column_int64(stmt.get(), 2);
-
-        if (col_name_str) {
-          // Build cache key: "record_id:col_name"
-          std::string key = RecordIdTraits<CrdtRecordId>::to_string(rec_id) + ":" + col_name_str;
-          version_cache[key] = col_ver;
+        // Build OR conditions for batch
+        for (size_t i = 0; i < batch_count; ++i) {
+          if (i > 0) query_sql << " OR ";
+          query_sql << "(record_id = ? AND col_name = ?)";
         }
+
+        Statement stmt(prepare(query_sql.str().c_str()));
+
+        // Bind batch (record_id, col_name) pairs
+        int param_idx = 1;
+        for (size_t i = batch_start; i < batch_end; ++i) {
+          const auto &[rec_id, col] = version_keys[i];
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), param_idx++, rec_id);
+          sqlite3_bind_text(stmt.get(), param_idx++, col.c_str(), -1, SQLITE_TRANSIENT);
+        }
+
+        // Fetch versions into cache
+        while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+          CrdtRecordId rec_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt.get(), 0);
+          const char *col_name_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+          uint64_t col_ver = sqlite3_column_int64(stmt.get(), 2);
+
+          if (col_name_str) {
+            // Build cache key: "record_id:col_name"
+            std::string key = RecordIdTraits<CrdtRecordId>::to_string(rec_id) + ":" + col_name_str;
+            version_cache[key] = col_ver;
+          }
+        }
+        // Statement auto-finalized, ready for next batch
       }
-      // Auto-finalized
     }
   }
 
