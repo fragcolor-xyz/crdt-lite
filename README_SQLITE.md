@@ -220,8 +220,15 @@ sqlite3_step(stmt);
 sqlite3_finalize(stmt);
 
 // All three options work! Triggers fire automatically.
+// Changes are processed asynchronously by wal_hook after commit.
 // Only caveat: Call refresh_schema() manually after ALTER TABLE (typically during migrations)
 ```
+
+**Change Processing:**
+- Triggers populate `_pending` table during writes (fast, in transaction)
+- `wal_hook` fires **AFTER** commit (locks released) and processes pending changes
+- This happens automatically - no manual flush needed
+- Both `execute()` and raw SQLite APIs benefit from this architecture
 
 #### `refresh_schema()`
 Refreshes internal column metadata after schema changes.
