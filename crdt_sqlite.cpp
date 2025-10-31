@@ -1115,10 +1115,26 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
   // Temporarily disable triggers to avoid recursion when applying remote changes
   std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
 
+  // Get column names BEFORE dropping triggers (needed for restoration)
+  std::vector<std::string> columns;
+  {
+    std::string pragma_sql = "PRAGMA table_info(" + tracked_table_ + ")";
+    Statement stmt(prepare(pragma_sql.c_str()));
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+      const char *col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt.get(), 1));
+      if (col_name) {
+        columns.push_back(col_name);
+      }
+    }
+  }
+
   // Drop triggers temporarily
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_insert").c_str());
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_update").c_str());
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_delete").c_str());
+
+  // RAII guard to ensure triggers are always restored
+  TriggerGuard guard(this, tracked_table_, columns);
 
   // Determine which column to use for WHERE clauses
   std::string id_column;
@@ -1232,22 +1248,7 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
       }
     }
   }
-
-  // Get column names for per-column change tracking
-  std::vector<std::string> columns;
-  {
-    std::string pragma_sql = "PRAGMA table_info(" + tracked_table_ + ")";
-    Statement stmt(prepare(pragma_sql.c_str()));
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-      const char *col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt.get(), 1));
-      if (col_name) {
-        columns.push_back(col_name);
-      }
-    }
-  }
-
-  // Create INSERT, UPDATE, DELETE triggers
-  create_triggers(tracked_table_, columns, /* use_if_not_exists= */ false);
+  // TriggerGuard destructor will automatically restore triggers
 }
 
 int CRDTSQLite::authorizer_callback(void *ctx, int action_code,

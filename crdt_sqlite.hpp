@@ -267,6 +267,35 @@ private:
     bool& flag_;
   };
 
+  /// RAII guard for trigger restoration in apply_to_sqlite
+  ///
+  /// Ensures triggers are always recreated after being dropped, even if
+  /// exceptions occur during change application. Without this, the database
+  /// would be left without triggers, causing silent data loss (changes won't
+  /// be tracked or replicated).
+  class TriggerGuard {
+  public:
+    TriggerGuard(CRDTSQLite* db, const std::string& table, const std::vector<std::string>& columns)
+      : db_(db), table_(table), columns_(columns) {}
+
+    ~TriggerGuard() {
+      try {
+        db_->create_triggers(table_, columns_, false);
+      } catch (const std::exception& e) {
+        // Log error but don't throw from destructor
+        std::fprintf(stderr, "CRITICAL: Failed to restore triggers for %s: %s\n",
+                    table_.c_str(), e.what());
+      }
+    }
+
+    TriggerGuard(const TriggerGuard&) = delete;
+    TriggerGuard& operator=(const TriggerGuard&) = delete;
+  private:
+    CRDTSQLite* db_;
+    std::string table_;
+    std::vector<std::string> columns_;
+  };
+
   sqlite3 *db_;
   std::string tracked_table_;
   CrdtNodeId node_id_;
