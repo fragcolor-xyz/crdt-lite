@@ -152,12 +152,40 @@ jobs:
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }}
 
-    - name: Run tests
+    - name: Run tests with debugger on failure
+      shell: pwsh
       run: |
         cd build
-        ctest -C ${{ matrix.build_type }} --output-on-failure --verbose
 
-    - name: Upload test results
+        # First try normal test run
+        $testFailed = $false
+        try {
+          ctest -C ${{ matrix.build_type }} --output-on-failure --verbose
+        } catch {
+          $testFailed = $true
+        }
+
+        # If test failed, run with WinDbg-like output for better stack traces
+        if ($testFailed -or $LASTEXITCODE -ne 0) {
+          Write-Host "`n=== TEST FAILED - Running with detailed crash info ===`n"
+
+          # Find the test executable
+          $testExe = Get-ChildItem -Path . -Recurse -Filter "test_crdt_sqlite.exe" | Select-Object -First 1
+
+          if ($testExe) {
+            Write-Host "Found test executable: $($testExe.FullName)"
+            Write-Host "`n=== Running test directly to capture crash ===`n"
+
+            # Run directly and capture any crash
+            & $testExe.FullName 2>&1 | Tee-Object -FilePath "test_crash_output.log"
+
+            Write-Host "`n=== Test executable exit code: $LASTEXITCODE ===`n"
+          }
+
+          exit 1
+        }
+
+    - name: Upload test results and crash logs
       if: failure()
       uses: actions/upload-artifact@v4
       with:
@@ -165,6 +193,7 @@ jobs:
         path: |
           build/Testing/
           build/**/*.log
+          build/test_crash_output.log
 
   sanitizers:
     name: Sanitizers (ASan + UBSan)
