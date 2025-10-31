@@ -225,7 +225,23 @@ public:
 
 // Hash function for uint128_t (required for std::unordered_set/map)
 // Newer versions of libc++ (macOS 15+) provide this, skip if already defined
-#if !defined(_LIBCPP_VERSION) || _LIBCPP_VERSION < 190000
+// Define std::hash<uint128_t> if not already provided by standard library
+//
+// Modern libc++ (19.0+) may provide std::hash<__uint128_t> automatically.
+// To prevent redefinition errors, users can define CRDT_HAS_UINT128_HASH
+// if their standard library already provides it.
+//
+// Override detection: #define CRDT_HAS_UINT128_HASH before including this header
+#ifndef CRDT_HAS_UINT128_HASH
+  // Auto-detect: libc++ 19.0+ provides hash, older versions don't
+  #if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION >= 190000
+    #define CRDT_HAS_UINT128_HASH 1
+  #else
+    #define CRDT_HAS_UINT128_HASH 0
+  #endif
+#endif
+
+#if !CRDT_HAS_UINT128_HASH
 namespace std {
   template<>
   struct hash<uint128_t> {
