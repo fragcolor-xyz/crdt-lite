@@ -309,6 +309,9 @@ private:
   // Prevent re-entry into wal_callback (process_pending_changes writes trigger wal_hook again)
   bool processing_wal_changes_;
 
+  // Flag set when clock overflow is detected (allows exception to propagate to caller)
+  bool clock_overflow_;
+
   /// Creates shadow tables for CRDT metadata
   void create_shadow_tables(const std::string &table_name);
 

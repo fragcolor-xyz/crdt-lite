@@ -101,7 +101,7 @@ SQLiteValue SQLiteValue::from_string(const std::string &str, Type type) {
 // CRDTSQLite implementation
 
 CRDTSQLite::CRDTSQLite(const char *path, CrdtNodeId node_id)
-    : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false), processing_wal_changes_(false) {
+    : db_(nullptr), node_id_(node_id), pending_schema_refresh_(false), processing_wal_changes_(false), clock_overflow_(false) {
   // CRITICAL: Use SQLITE_OPEN_FULLMUTEX to ensure proper mutex protection
   // This is essential for Windows where vcpkg SQLite may have different default threading
   int rc = sqlite3_open_v2(path, &db_,
@@ -454,6 +454,15 @@ void CRDTSQLite::refresh_schema() {
 }
 
 void CRDTSQLite::execute(const char *sql) {
+  // Check for clock overflow from previous operation
+  if (clock_overflow_) {
+    throw CRDTSQLiteException(
+      "Clock overflow: reached UINT64_MAX (" + std::to_string(UINT64_MAX) + "). "
+      "Cannot increment clock further. After 2^64 operations, the clock wraps to 0, "
+      "breaking causality and conflict resolution. This database cannot accept more changes."
+    );
+  }
+
   // Execute user SQL via sqlite3_exec
   // Triggers populate _pending table during writes
   // After commit, wal_callback processes _pending and updates CRDT metadata
@@ -1095,11 +1104,10 @@ void CRDTSQLite::process_pending_changes() {
   // Get and increment clock
   uint64_t current_clock = get_clock();
   if (current_clock == UINT64_MAX) {
-    throw CRDTSQLiteException(
-      "Clock overflow: reached UINT64_MAX (" + std::to_string(UINT64_MAX) + "). "
-      "Cannot increment clock further. After 2^64 operations, the clock wraps to 0, "
-      "breaking causality and conflict resolution. This database cannot accept more changes."
-    );
+    // Set flag so next execute() will throw (can't throw from wal_callback)
+    clock_overflow_ = true;
+    std::fprintf(stderr, "CRDT-SQLite FATAL: Clock overflow at UINT64_MAX. Database cannot accept more changes.\n");
+    return;  // Skip processing, leave changes in _pending
   }
   current_clock++;
 

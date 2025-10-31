@@ -672,6 +672,115 @@ TEST(concurrent_different_columns) {
   ASSERT_EQ(email2, "alice@new.com");
 }
 
+void test_clock_overflow() {
+  remove("test_clock_overflow.db");
+  CRDTSQLite db("test_clock_overflow.db", 1);
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  // Manually set clock to UINT64_MAX - 1
+  // SQLite INTEGER is signed 64-bit, so we work around this by using sqlite3_bind_int64
+  // with the value reinterpreted as signed
+  std::string clock_table = "_crdt_users_clock";
+  sqlite3_stmt *stmt;
+  std::string update_sql = "UPDATE " + clock_table + " SET time = ?";
+  sqlite3_prepare_v2(db.get_db(), update_sql.c_str(), -1, &stmt, nullptr);
+
+  // Bind UINT64_MAX - 1, which will be stored as -2 in SQLite but read back as UINT64_MAX - 1
+  sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(UINT64_MAX - 1));
+  sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+
+  // This insert should work (clock goes to UINT64_MAX)
+  db.execute("INSERT INTO users (name) VALUES ('Alice')");
+
+  // Verify clock is now at UINT64_MAX
+  ASSERT_EQ(db.get_clock(), UINT64_MAX);
+
+  // Next insert will execute but wal_callback will detect overflow and set flag
+  db.execute("INSERT INTO users (name) VALUES ('Bob')");
+
+  // The operation AFTER Bob should throw (clock_overflow_ flag was set by wal_callback)
+  bool exception_thrown = false;
+  try {
+    db.execute("INSERT INTO users (name) VALUES ('Charlie')");
+  } catch (const CRDTSQLiteException& e) {
+    std::string error(e.what());
+    exception_thrown = (error.find("Clock overflow") != std::string::npos);
+  }
+  ASSERT_EQ(exception_thrown, true);
+}
+
+void test_trigger_restoration_on_exception() {
+  remove("test_trigger_restore.db");
+  CRDTSQLite db("test_trigger_restore.db", 1);
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, invalid_col TEXT)");
+  db.enable_crdt("users");
+
+  // Insert a valid record (creates changes for all non-PK columns: name, invalid_col)
+  db.execute("INSERT INTO users (name) VALUES ('Alice')");
+  auto changes1 = db.get_changes_since(0);
+  // Note: INSERT tracks all columns, including NULL values
+  ASSERT_EQ(changes1.size() >= 1, true);  // At least the name column
+  size_t initial_changes = changes1.size();
+
+  // Try to apply a change with invalid column name to trigger exception
+  // This should fail in apply_to_sqlite, but triggers should be restored
+  std::vector<Change<int64_t, std::string>> bad_changes;
+  Change<int64_t, std::string> bad_change;
+  bad_change.record_id = 2;
+  bad_change.col_name = "invalid';DROP TABLE users--";  // SQL injection attempt
+  bad_change.value = "hacker";
+  bad_change.col_version = 1;
+  bad_change.db_version = 10;
+  bad_change.node_id = 2;
+  bad_changes.push_back(bad_change);
+
+  bool exception_thrown = false;
+  try {
+    db.merge_changes(bad_changes);
+  } catch (const CRDTSQLiteException& e) {
+    std::string error(e.what());
+    exception_thrown = (error.find("Invalid column name") != std::string::npos);
+  }
+  ASSERT_EQ(exception_thrown, true);
+
+  // Verify triggers are still working after exception
+  db.execute("INSERT INTO users (name) VALUES ('Bob')");
+  auto changes2 = db.get_changes_since(0);
+  // Bob should create the same number of changes as Alice
+  ASSERT_EQ(changes2.size(), initial_changes * 2);  // Both Alice and Bob tracked
+}
+
+void test_large_batch_processing() {
+  remove("test_large_batch.db");
+  CRDTSQLite db("test_large_batch.db", 1);
+  db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)");
+  db.enable_crdt("items");
+
+  // Insert >500 records to test batch processing
+  db.execute("BEGIN");
+  for (int i = 0; i < 600; ++i) {
+    std::string sql = "INSERT INTO items (value) VALUES ('item" + std::to_string(i) + "')";
+    db.execute(sql.c_str());
+  }
+  db.execute("COMMIT");
+
+  // Verify all changes were processed (600 inserts x 2 columns each)
+  auto changes = db.get_changes_since(0);
+  // The important thing is that batch processing handled >500 records without hitting SQLite limits
+  ASSERT_EQ(changes.size() >= 600, true);
+  std::printf("  - Processed %zu changes from 600 inserts\n", changes.size());
+
+  // Verify all records exist
+  sqlite3_stmt *stmt;
+  sqlite3_prepare_v2(db.get_db(), "SELECT COUNT(*) FROM items", -1, &stmt, nullptr);
+  sqlite3_step(stmt);
+  int count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  ASSERT_EQ(count, 600);
+}
+
 int main() {
   std::cout << "Running CRDT-SQLite tests..." << std::endl << std::endl;
 
@@ -693,6 +802,9 @@ int main() {
   RUN_TEST(alter_table_add_column);
   RUN_TEST(tombstone_resurrection);
   RUN_TEST(concurrent_different_columns);
+  RUN_TEST(clock_overflow);
+  RUN_TEST(trigger_restoration_on_exception);
+  RUN_TEST(large_batch_processing);
 
   std::cout << std::endl << "All tests passed!" << std::endl;
   return 0;
