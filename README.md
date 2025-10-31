@@ -9,12 +9,13 @@ CRDT-Lite is currently being used in [Formabble](https://formabble.com), a colla
 
 ## What's Inside
 
-This library includes two CRDT implementations:
+This library includes three CRDT implementations:
 
 1. **Column-Based CRDT** (Rust: `src/lib.rs`, C++: `crdt.hpp`) - Generic key-value store with fine-grained column-level conflict resolution
 2. **Text CRDT** (C++: `text_crdt.hpp`) - Line-based collaborative text editor with fractional positioning
+3. **CRDT-SQLite** (C++: `crdt_sqlite.hpp`) - High-performance SQLite wrapper with automatic multi-node synchronization ([Documentation](README_SQLITE.md))
 
-Both Rust and C++ implementations share the same core algorithms and maintain API compatibility.
+The Rust and C++ column-based implementations share the same core algorithms and maintain API compatibility.
 
 ## Features
 

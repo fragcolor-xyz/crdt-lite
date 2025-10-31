@@ -423,20 +423,8 @@ void CRDTSQLite::execute(const char *sql) {
 }
 
 sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT] prepare() called: %.100s\n", sql);
-  std::fprintf(stderr, "[CRDT]   db=%p, autocommit=%d, processing_wal=%d\n",
-    (void*)db_, sqlite3_get_autocommit(db_), processing_wal_changes_);
-  std::fflush(stderr);
-  #endif
-
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT]   prepare() result: rc=%d, stmt=%p\n", rc, (void*)stmt);
-  std::fflush(stderr);
-  #endif
 
   if (rc != SQLITE_OK) {
     throw CRDTSQLiteException("Failed to prepare statement: " + get_error());
@@ -904,22 +892,12 @@ CRDTSQLite::query_row_values(CrdtRecordId record_id) {
 }
 
 void CRDTSQLite::process_pending_changes() {
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT] process_pending_changes() start\n");
-  std::fflush(stderr);
-  #endif
-
   std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
 
   // Query pending changes from table
   std::string query = "SELECT operation, record_id FROM " + pending_table;
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT]   About to prepare: %s\n", query.c_str());
-  std::fflush(stderr);
-  #endif
 
   struct PendingRecord {
     int operation;
@@ -1178,8 +1156,8 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
 }
 
 int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
-                                    const char *arg1, const char *arg2,
-                                    const char *arg3, const char *arg4) {
+                                    const char * /*arg1*/, const char *arg2,
+                                    const char * /*arg3*/, const char * /*arg4*/) {
   auto *self = static_cast<CRDTSQLite *>(ctx);
 
   // Only monitor operations on CRDT-enabled table
@@ -1216,16 +1194,10 @@ int CRDTSQLite::authorizer_callback(void *ctx, int action_code,
 
 // update_callback removed - we use triggers instead for better performance
 
-int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int num_pages) {
+int CRDTSQLite::wal_callback(void *ctx, sqlite3 * /*db*/, const char * /*db_name*/, int /*num_pages*/) {
   // WAL callback fires AFTER commit completes and locks are released
   // This is the SAFE place to call prepare/step (unlike update_hook or commit_hook)
   auto *self = static_cast<CRDTSQLite *>(ctx);
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT] wal_callback: db=%p, num_pages=%d, table=%s\n",
-    (void*)db, num_pages, self->tracked_table_.c_str());
-  std::fflush(stderr);
-  #endif
 
   if (self->tracked_table_.empty()) {
     return SQLITE_OK;  // No table being tracked
@@ -1234,17 +1206,8 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
   // Prevent infinite recursion: process_pending_changes() does SQL writes,
   // which trigger wal_callback again!
   if (self->processing_wal_changes_) {
-    #ifdef _WIN32
-    std::fprintf(stderr, "[CRDT]   Already processing, skipping\n");
-    std::fflush(stderr);
-    #endif
     return SQLITE_OK;  // Already processing, don't recurse
   }
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT]   Starting process_pending_changes()\n");
-  std::fflush(stderr);
-  #endif
 
   // Query pending changes from trigger-populated table
   // This is safe because we're called AFTER commit with locks released
@@ -1258,11 +1221,6 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 *db, const char *db_name, int nu
       e.what());
   }
   self->processing_wal_changes_ = false;
-
-  #ifdef _WIN32
-  std::fprintf(stderr, "[CRDT]   wal_callback complete\n");
-  std::fflush(stderr);
-  #endif
 
   return SQLITE_OK;
 }
