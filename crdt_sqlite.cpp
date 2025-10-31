@@ -174,9 +174,10 @@ void CRDTSQLite::enable_crdt(const std::string &table_name) {
 
 void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   // SECURITY: Validate shadow table name length
-  // Longest name: "_crdt_<table>_versions_local_db_version_idx" (36 + table_name)
+  // Longest name: "_crdt_<table>_tombstones_local_db_version_idx" (41 + table_name)
+  //   "_crdt_" (6) + <table> + "_tombstones_local_db_version_idx" (35) = 41 + table_name
   // SQLite default max identifier: 64 chars (configurable but 64 is common)
-  constexpr size_t MAX_TABLE_NAME_LENGTH = 28; // 64 - 36 = 28
+  constexpr size_t MAX_TABLE_NAME_LENGTH = 23; // 64 - 41 = 23
   if (table_name.length() > MAX_TABLE_NAME_LENGTH) {
     throw CRDTSQLiteException(
       "Table name too long (" + std::to_string(table_name.length()) +
@@ -730,6 +731,15 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
 
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes) {
+  // Check for clock overflow from previous operation
+  if (clock_overflow_) {
+    throw CRDTSQLiteException(
+      "Clock overflow: reached UINT64_MAX (" + std::to_string(UINT64_MAX) + "). "
+      "Cannot increment clock further. After 2^64 operations, the clock wraps to 0, "
+      "breaking causality and conflict resolution. This database cannot accept more changes."
+    );
+  }
+
   // WAL mode: Changes are auto-flushed by wal_callback after each commit
   // No need to manually flush here - wal_callback fires before this function is called
 
@@ -1217,13 +1227,13 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
     }
   }
 
+  // RAII guard to ensure triggers are always restored (construct BEFORE dropping)
+  TriggerGuard guard(this, tracked_table_, columns);
+
   // Drop triggers temporarily
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_insert").c_str());
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_update").c_str());
   exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_delete").c_str());
-
-  // RAII guard to ensure triggers are always restored
-  TriggerGuard guard(this, tracked_table_, columns);
 
   // Determine which column to use for WHERE clauses
   std::string id_column;

@@ -125,9 +125,9 @@ public:
   /// - ⚠️  DROP COLUMN - not supported (causes metadata corruption)
   /// - ⚠️  RENAME COLUMN - not supported (causes metadata corruption)
   ///
-  /// @param table_name Name of the table to enable CRDT for (max 28 chars)
+  /// @param table_name Name of the table to enable CRDT for (max 23 chars)
   /// @throws CRDTSQLiteException if table doesn't exist, shadow tables cannot be created,
-  ///         or table_name exceeds 28 characters (to prevent SQLite identifier overflow)
+  ///         or table_name exceeds 23 characters (to prevent SQLite identifier overflow)
   void enable_crdt(const std::string &table_name);
 
   /// Executes SQL statement(s)

@@ -246,10 +246,15 @@ namespace std {
   template<>
   struct hash<uint128_t> {
     size_t operator()(const uint128_t& val) const noexcept {
-      // XOR high and low 64 bits
+      // Use boost-style hash combine to avoid collision vulnerabilities
+      // Simple XOR creates collisions: (A,B) and (B,A) hash to same value
       uint64_t high = static_cast<uint64_t>(val >> 64);
       uint64_t low = static_cast<uint64_t>(val & 0xFFFFFFFFFFFFFFFF);
-      return std::hash<uint64_t>{}(high) ^ std::hash<uint64_t>{}(low);
+
+      size_t seed = std::hash<uint64_t>{}(high);
+      // Boost hash_combine formula: seed ^= hash(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2)
+      seed ^= std::hash<uint64_t>{}(low) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+      return seed;
     }
   };
 }
