@@ -917,21 +917,22 @@ void CRDTSQLite::process_pending_changes() {
   std::fflush(stderr);
   #endif
 
-  sqlite3_stmt *query_stmt = prepare(query.c_str());
-
   struct PendingRecord {
     int operation;
     CrdtRecordId record_id;
   };
   std::vector<PendingRecord> pending_records;
 
-  while (sqlite3_step(query_stmt) == SQLITE_ROW) {
-    PendingRecord pending;
-    pending.operation = sqlite3_column_int(query_stmt, 0);
-    pending.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(query_stmt, 1);
-    pending_records.push_back(pending);
+  {
+    Statement query_stmt(prepare(query.c_str()));
+    while (sqlite3_step(query_stmt.get()) == SQLITE_ROW) {
+      PendingRecord pending;
+      pending.operation = sqlite3_column_int(query_stmt.get(), 0);
+      pending.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(query_stmt.get(), 1);
+      pending_records.push_back(pending);
+    }
+    // Auto-finalized here
   }
-  sqlite3_finalize(query_stmt);
 
   if (pending_records.empty()) {
     return;  // Nothing to do
@@ -945,22 +946,26 @@ void CRDTSQLite::process_pending_changes() {
   for (const auto &pending : pending_records) {
     if (pending.operation == SQLITE_DELETE) {
       // Create tombstone
-      std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +
-                               " (record_id, db_version, node_id, local_db_version) VALUES (?, ?, ?, ?)";
-      sqlite3_stmt *stmt = prepare(insert_tomb.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
-      sqlite3_bind_int64(stmt, 2, current_clock);
-      sqlite3_bind_int64(stmt, 3, node_id_);
-      sqlite3_bind_int64(stmt, 4, current_clock);
-      sqlite3_step(stmt);
-      sqlite3_finalize(stmt);
+      {
+        std::string insert_tomb = "INSERT OR REPLACE INTO " + tombstones_table +
+                                 " (record_id, db_version, node_id, local_db_version) VALUES (?, ?, ?, ?)";
+        Statement stmt(prepare(insert_tomb.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        sqlite3_bind_int64(stmt.get(), 2, current_clock);
+        sqlite3_bind_int64(stmt.get(), 3, node_id_);
+        sqlite3_bind_int64(stmt.get(), 4, current_clock);
+        sqlite3_step(stmt.get());
+        // Auto-finalized
+      }
 
       // Remove all column versions for this record
-      std::string delete_versions = "DELETE FROM " + versions_table + " WHERE record_id = ?";
-      stmt = prepare(delete_versions.c_str());
-      RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
-      sqlite3_step(stmt);
-      sqlite3_finalize(stmt);
+      {
+        std::string delete_versions = "DELETE FROM " + versions_table + " WHERE record_id = ?";
+        Statement stmt(prepare(delete_versions.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        sqlite3_step(stmt.get());
+        // Auto-finalized
+      }
 
     } else {
       // INSERT/UPDATE: Query current values and update shadow table
@@ -968,45 +973,51 @@ void CRDTSQLite::process_pending_changes() {
 
       for (const auto &[col_name, value] : values) {
         // Query current col_version for this column
-        std::string query = "SELECT col_version FROM " + versions_table +
-                           " WHERE record_id = ? AND col_name = ?";
-        sqlite3_stmt *stmt = prepare(query.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
-        sqlite3_bind_text(stmt, 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
-
         uint64_t col_version = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-          col_version = sqlite3_column_int64(stmt, 0);
+        {
+          std::string query = "SELECT col_version FROM " + versions_table +
+                             " WHERE record_id = ? AND col_name = ?";
+          Statement stmt(prepare(query.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+          sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
+
+          if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+            col_version = sqlite3_column_int64(stmt.get(), 0);
+          }
+          // Auto-finalized
         }
-        sqlite3_finalize(stmt);
 
         // Increment col_version
         col_version++;
 
         // Update shadow table
-        std::string insert_version = "INSERT OR REPLACE INTO " + versions_table +
-                                    " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
-                                    "VALUES (?, ?, ?, ?, ?, ?)";
-        stmt = prepare(insert_version.c_str());
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, pending.record_id);
-        sqlite3_bind_text(stmt, 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 3, col_version);
-        sqlite3_bind_int64(stmt, 4, current_clock);
-        sqlite3_bind_int64(stmt, 5, node_id_);
-        sqlite3_bind_int64(stmt, 6, current_clock);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        {
+          std::string insert_version = "INSERT OR REPLACE INTO " + versions_table +
+                                      " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
+                                      "VALUES (?, ?, ?, ?, ?, ?)";
+          Statement stmt(prepare(insert_version.c_str()));
+          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+          sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_int64(stmt.get(), 3, col_version);
+          sqlite3_bind_int64(stmt.get(), 4, current_clock);
+          sqlite3_bind_int64(stmt.get(), 5, node_id_);
+          sqlite3_bind_int64(stmt.get(), 6, current_clock);
+          sqlite3_step(stmt.get());
+          // Auto-finalized
+        }
       }
     }
   }
 
   // Update clock in database
-  std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
-  std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
-  sqlite3_stmt *stmt = prepare(update_clock.c_str());
-  sqlite3_bind_int64(stmt, 1, current_clock);
-  sqlite3_step(stmt);
-  sqlite3_finalize(stmt);
+  {
+    std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
+    std::string update_clock = "UPDATE " + clock_table + " SET time = ?";
+    Statement stmt(prepare(update_clock.c_str()));
+    sqlite3_bind_int64(stmt.get(), 1, current_clock);
+    sqlite3_step(stmt.get());
+    // Auto-finalized
+  }
 
   // Clear pending changes table
   std::string clear_pending = "DELETE FROM " + pending_table;
