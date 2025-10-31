@@ -317,6 +317,14 @@ private:
 
   /// Validates column name to prevent SQL injection
   static bool is_valid_column_name(const std::string &name);
+
+  /// Creates INSERT, UPDATE, DELETE triggers for change tracking
+  /// @param table_name Name of the table to create triggers for
+  /// @param columns Vector of column names (excluding primary key)
+  /// @param use_if_not_exists Whether to use "IF NOT EXISTS" clause
+  void create_triggers(const std::string &table_name,
+                       const std::vector<std::string> &columns,
+                       bool use_if_not_exists);
 };
 
 #endif // CRDT_SQLITE_HPP
