@@ -3,6 +3,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <cstdio>
 
 // SQLiteValue implementation
 
@@ -156,6 +157,18 @@ void CRDTSQLite::enable_crdt(const std::string &table_name) {
 }
 
 void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
+  // SECURITY: Validate shadow table name length
+  // Longest name: "_crdt_<table>_versions_local_db_version_idx" (36 + table_name)
+  // SQLite default max identifier: 64 chars (configurable but 64 is common)
+  constexpr size_t MAX_TABLE_NAME_LENGTH = 28; // 64 - 36 = 28
+  if (table_name.length() > MAX_TABLE_NAME_LENGTH) {
+    throw CRDTSQLiteException(
+      "Table name too long (" + std::to_string(table_name.length()) +
+      " > " + std::to_string(MAX_TABLE_NAME_LENGTH) + " chars). " +
+      "Shadow table/index names would exceed SQLite identifier limits."
+    );
+  }
+
   // Determine record_id SQL type
   std::string record_id_type = RecordIdTraits<CrdtRecordId>::sql_type();
 
@@ -208,7 +221,10 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   // Initialize clock if empty
   std::string check_clock = "SELECT COUNT(*) FROM " + clock_table;
   sqlite3_stmt *stmt;
-  sqlite3_prepare_v2(db_, check_clock.c_str(), -1, &stmt, nullptr);
+  int rc = sqlite3_prepare_v2(db_, check_clock.c_str(), -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    throw CRDTSQLiteException("Failed to prepare clock check: " + get_error());
+  }
   sqlite3_step(stmt);
   int count = sqlite3_column_int(stmt, 0);
   sqlite3_finalize(stmt);
@@ -233,7 +249,10 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     std::string insert_type = "INSERT OR REPLACE INTO " + types_table +
                              " (col_name, col_type) VALUES (?, ?)";
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db_, insert_type.c_str(), -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(db_, insert_type.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+      throw CRDTSQLiteException("Failed to prepare type insert: " + get_error());
+    }
     sqlite3_bind_text(stmt, 1, col_name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 2, static_cast<int>(col_type));
     sqlite3_step(stmt);
@@ -258,7 +277,10 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
 void CRDTSQLite::cache_column_types() {
   std::string pragma_sql = "PRAGMA table_info(" + tracked_table_ + ")";
   sqlite3_stmt *stmt;
-  sqlite3_prepare_v2(db_, pragma_sql.c_str(), -1, &stmt, nullptr);
+  int rc = sqlite3_prepare_v2(db_, pragma_sql.c_str(), -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    throw CRDTSQLiteException("Failed to prepare PRAGMA table_info: " + get_error());
+  }
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     std::string col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
@@ -295,7 +317,10 @@ void CRDTSQLite::refresh_schema() {
     std::string insert_type = "INSERT OR REPLACE INTO " + types_table +
                              " (col_name, col_type) VALUES (?, ?)";
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db_, insert_type.c_str(), -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(db_, insert_type.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+      throw CRDTSQLiteException("Failed to prepare type update: " + get_error());
+    }
     sqlite3_bind_text(stmt, 1, col_name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 2, static_cast<int>(col_type));
     sqlite3_step(stmt);
@@ -332,7 +357,7 @@ sqlite3_stmt *CRDTSQLite::prepare(const char *sql) {
 }
 
 std::vector<Change<CrdtRecordId, std::string>>
-CRDTSQLite::get_changes_since(uint64_t last_db_version) {
+CRDTSQLite::get_changes_since(uint64_t last_db_version, size_t max_changes) {
   std::vector<Change<CrdtRecordId, std::string>> changes;
 
   // Determine id column (rowid or id)
@@ -358,10 +383,19 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version) {
 
   query += "WHERE v.local_db_version > ?";
 
+  // SECURITY: Add LIMIT clause if max_changes specified
+  if (max_changes > 0) {
+    query += " LIMIT " + std::to_string(max_changes);
+  }
+
   sqlite3_stmt *stmt = prepare(query.c_str());
   sqlite3_bind_int64(stmt, 1, last_db_version);
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
+    // SECURITY: Check size limit (defense-in-depth)
+    if (max_changes > 0 && changes.size() >= max_changes) {
+      break;
+    }
     CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
     std::string col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
     uint64_t col_version = sqlite3_column_int64(stmt, 2);
@@ -387,16 +421,31 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version) {
   }
   sqlite3_finalize(stmt);
 
+  // SECURITY: Check if we've already hit the limit
+  if (max_changes > 0 && changes.size() >= max_changes) {
+    return changes;  // Already at limit, skip tombstones
+  }
+
   // Query tombstones
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
   std::string tomb_query = "SELECT record_id, db_version, node_id, local_db_version "
                           "FROM " + tombstones_table + " "
                           "WHERE local_db_version > ?";
 
+  // SECURITY: Apply remaining limit to tombstones query
+  if (max_changes > 0) {
+    size_t remaining = max_changes - changes.size();
+    tomb_query += " LIMIT " + std::to_string(remaining);
+  }
+
   stmt = prepare(tomb_query.c_str());
   sqlite3_bind_int64(stmt, 1, last_db_version);
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
+    // SECURITY: Check size limit (defense-in-depth)
+    if (max_changes > 0 && changes.size() >= max_changes) {
+      break;
+    }
     CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
     uint64_t db_version = sqlite3_column_int64(stmt, 1);
     CrdtNodeId node_id = sqlite3_column_int64(stmt, 2);
@@ -414,11 +463,13 @@ CRDTSQLite::get_changes_since(uint64_t last_db_version) {
 std::vector<Change<CrdtRecordId, std::string>>
 CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
                                        const CrdtSet<CrdtNodeId> &excluding) {
-  // Build NOT IN clause for excluded nodes
-  std::string excluded_nodes;
-  for (auto node : excluding) {
-    if (!excluded_nodes.empty()) excluded_nodes += ",";
-    excluded_nodes += std::to_string(node);
+  // SECURITY: Prevent DoS via enormous SQL queries
+  constexpr size_t MAX_EXCLUDED_NODES = 100;
+  if (excluding.size() > MAX_EXCLUDED_NODES) {
+    throw CRDTSQLiteException(
+      "Excluded nodes list too large (" + std::to_string(excluding.size()) +
+      " > " + std::to_string(MAX_EXCLUDED_NODES) + "). Use pagination instead."
+    );
   }
 
   std::vector<Change<CrdtRecordId, std::string>> changes;
@@ -445,12 +496,25 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
   }
 
   query += "WHERE v.local_db_version > ?";
-  if (!excluded_nodes.empty()) {
-    query += " AND v.node_id NOT IN (" + excluded_nodes + ")";
+
+  // SECURITY: Build parameterized NOT IN clause with proper placeholders
+  if (!excluding.empty()) {
+    query += " AND v.node_id NOT IN (";
+    for (size_t i = 0; i < excluding.size(); i++) {
+      if (i > 0) query += ",";
+      query += "?";
+    }
+    query += ")";
   }
 
   sqlite3_stmt *stmt = prepare(query.c_str());
   sqlite3_bind_int64(stmt, 1, last_db_version);
+
+  // SECURITY: Bind excluded node IDs as parameters (defense-in-depth)
+  int param_idx = 2;
+  for (auto node_id : excluding) {
+    sqlite3_bind_int64(stmt, param_idx++, node_id);
+  }
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
@@ -482,12 +546,25 @@ CRDTSQLite::get_changes_since_excluding(uint64_t last_db_version,
   std::string tomb_query = "SELECT record_id, db_version, node_id, local_db_version "
                           "FROM " + tombstones_table + " "
                           "WHERE local_db_version > ?";
-  if (!excluded_nodes.empty()) {
-    tomb_query += " AND node_id NOT IN (" + excluded_nodes + ")";
+
+  // SECURITY: Build parameterized NOT IN clause with proper placeholders
+  if (!excluding.empty()) {
+    tomb_query += " AND node_id NOT IN (";
+    for (size_t i = 0; i < excluding.size(); i++) {
+      if (i > 0) tomb_query += ",";
+      tomb_query += "?";
+    }
+    tomb_query += ")";
   }
 
   stmt = prepare(tomb_query.c_str());
   sqlite3_bind_int64(stmt, 1, last_db_version);
+
+  // SECURITY: Bind excluded node IDs as parameters (defense-in-depth)
+  param_idx = 2;
+  for (auto node_id : excluding) {
+    sqlite3_bind_int64(stmt, param_idx++, node_id);
+  }
 
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     CrdtRecordId record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt, 0);
@@ -528,8 +605,9 @@ CRDTSQLite::merge_changes(std::vector<Change<CrdtRecordId, std::string>> changes
       CrdtNodeId tomb_node_id = sqlite3_column_int64(stmt, 1);
 
       // Tombstone always wins (db_version comparison)
+      // SECURITY: Use strict > for node_id tiebreaker (consistent LWW semantics)
       if (tomb_db_version > remote.db_version ||
-          (tomb_db_version == remote.db_version && tomb_node_id >= remote.node_id)) {
+          (tomb_db_version == remote.db_version && tomb_node_id > remote.node_id)) {
         is_tombstoned = true;
       }
     }
@@ -648,7 +726,10 @@ size_t CRDTSQLite::tombstone_count() const {
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
   std::string count_sql = "SELECT COUNT(*) FROM " + tombstones_table;
   sqlite3_stmt *stmt;
-  sqlite3_prepare_v2(db_, count_sql.c_str(), -1, &stmt, nullptr);
+  int rc = sqlite3_prepare_v2(db_, count_sql.c_str(), -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    throw CRDTSQLiteException("Failed to prepare tombstone count: " + get_error());
+  }
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     int count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
@@ -666,7 +747,10 @@ uint64_t CRDTSQLite::get_clock() const {
   std::string clock_table = "_crdt_" + tracked_table_ + "_clock";
   std::string query = "SELECT time FROM " + clock_table;
   sqlite3_stmt *stmt;
-  sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
+  int rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    throw CRDTSQLiteException("Failed to prepare clock query: " + get_error());
+  }
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     uint64_t time = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);
@@ -778,7 +862,8 @@ void CRDTSQLite::flush_changes() {
     return;  // Prevent re-entry
   }
 
-  flushing_changes_ = true;
+  // SECURITY: RAII guard ensures flag is reset even on exception
+  ScopeGuard guard(flushing_changes_);
 
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
@@ -853,7 +938,7 @@ void CRDTSQLite::flush_changes() {
   sqlite3_finalize(stmt);
 
   pending_changes_.clear();
-  flushing_changes_ = false;
+  // flushing_changes_ reset automatically by ScopeGuard destructor
 }
 
 void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::string>> &changes) {
@@ -1020,6 +1105,11 @@ int CRDTSQLite::commit_callback(void *ctx) {
     return 0; // Allow commit
   } catch (const std::exception &e) {
     // If flush fails, abort the transaction to maintain consistency
+    // SECURITY: Report error to stderr (cannot throw from C callback)
+    std::fprintf(stderr,
+      "CRDT-SQLite: Transaction commit aborted due to error: %s\n",
+      e.what()
+    );
     return 1; // Abort commit
   }
 }

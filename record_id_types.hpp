@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <random>
+#include <stdexcept>
 #include <sqlite3.h>
 
 // Type traits for different record ID types
@@ -100,7 +101,9 @@ struct RecordIdTraits<uint128_t> {
     int size = sqlite3_column_bytes(stmt, index);
 
     if (size != 16) {
-      return 0;  // Invalid blob
+      throw std::invalid_argument(
+        "Invalid uint128_t blob size: expected 16 bytes, got " + std::to_string(size)
+      );
     }
 
     uint128_t result = 0;
@@ -117,7 +120,9 @@ struct RecordIdTraits<uint128_t> {
     int size = sqlite3_value_bytes(val);
 
     if (size != 16) {
-      return 0;  // Invalid blob
+      throw std::invalid_argument(
+        "Invalid uint128_t blob size: expected 16 bytes, got " + std::to_string(size)
+      );
     }
 
     uint128_t result = 0;
@@ -135,7 +140,18 @@ struct RecordIdTraits<uint128_t> {
     return false;  // Must generate manually
   }
 
-  // Generate random 128-bit ID
+  /// Generate random 128-bit ID
+  ///
+  /// Collision probability (birthday paradox):
+  /// - 2^32 IDs:  ~2^-65 chance of collision (negligible)
+  /// - 2^64 IDs:  ~50% chance of collision (avoid this scale!)
+  ///
+  /// Note: No timestamp component. Collisions rely purely on randomness.
+  /// For distributed systems with many nodes, prefer generate_with_node()
+  /// to partition the ID space by node.
+  ///
+  /// User responsibility: If you provide your own IDs instead of using this
+  /// function, collision avoidance is entirely your responsibility.
   static uint128_t generate() {
     static std::random_device rd;
     static std::mt19937_64 gen(rd());
@@ -147,7 +163,16 @@ struct RecordIdTraits<uint128_t> {
     return (static_cast<uint128_t>(high) << 64) | low;
   }
 
-  // Generate with node ID in high bits (prevents collisions)
+  /// Generate with node ID in high bits (RECOMMENDED for distributed systems)
+  ///
+  /// Partitions the 128-bit space: high 64 bits = node_id, low 64 bits = random.
+  /// This eliminates cross-node collisions entirely - only same-node IDs can collide.
+  ///
+  /// Collision probability PER NODE:
+  /// - 2^32 IDs:  ~2^-33 chance (negligible)
+  /// - 2^64 IDs:  impossible (exceeds node's 64-bit space)
+  ///
+  /// Recommendation: Use this method for multi-node systems where node_id is unique.
   static uint128_t generate_with_node(uint64_t node_id) {
     static std::random_device rd;
     static std::mt19937_64 gen(rd());
@@ -185,6 +210,8 @@ public:
 };
 
 // Hash function for uint128_t (required for std::unordered_set/map)
+// Newer versions of libc++ (macOS 15+) provide this, skip if already defined
+#if !defined(_LIBCPP_VERSION) || _LIBCPP_VERSION < 190000
 namespace std {
   template<>
   struct hash<uint128_t> {
@@ -196,6 +223,7 @@ namespace std {
     }
   };
 }
+#endif
 
 #endif // __SIZEOF_INT128__
 

@@ -71,6 +71,37 @@ struct PendingChange {
 /// // Merge remote changes
 /// db.merge_changes(remote_changes);
 /// ```
+///
+/// Thread Safety:
+/// ⚠️  This class is NOT thread-safe. Do not access the same CRDTSQLite instance
+/// from multiple threads concurrently. Reasons:
+/// - SQLite connections have limited thread safety
+/// - This class contains mutable state without synchronization
+/// - SQLite hooks (update_hook, commit_hook) are NOT thread-safe callbacks
+/// - Hooks may be invoked from different threads if connection is shared
+///
+/// Safe usage options:
+/// - Use one CRDTSQLite instance per thread (each with its own database connection)
+/// - Protect ALL access with an external mutex/lock (including hook callbacks)
+/// - Use SQLite's WAL mode with proper application-level locking
+///
+/// ⚠️  NEVER share a CRDTSQLite instance across threads without external synchronization
+///
+/// Error Handling:
+/// This class uses exceptions (CRDTSQLiteException) for all error conditions:
+/// - Database connection failures
+/// - SQL execution errors
+/// - Parameter validation failures (e.g., table name too long, too many excluded nodes)
+/// - Schema inconsistencies
+///
+/// Functions that return numeric values (e.g., get_clock(), tombstone_count()):
+/// - Return 0 when no table is tracked (not an error condition)
+/// - Return actual count/value otherwise
+/// - Never return error codes - use exceptions instead
+///
+/// Functions that return vectors (e.g., get_changes_since()):
+/// - Return empty vector when no changes exist (not an error)
+/// - Throw CRDTSQLiteException on actual errors (SQL failure, validation failure)
 class CRDTSQLite {
 public:
   /// Creates a CRDT-enabled SQLite database
@@ -99,8 +130,9 @@ public:
   /// - ⚠️  DROP COLUMN - not supported (causes metadata corruption)
   /// - ⚠️  RENAME COLUMN - not supported (causes metadata corruption)
   ///
-  /// @param table_name Name of the table to enable CRDT for
-  /// @throws CRDTSQLiteException if table doesn't exist or shadow tables cannot be created
+  /// @param table_name Name of the table to enable CRDT for (max 28 chars)
+  /// @throws CRDTSQLiteException if table doesn't exist, shadow tables cannot be created,
+  ///         or table_name exceeds 28 characters (to prevent SQLite identifier overflow)
   void enable_crdt(const std::string &table_name);
 
   /// Executes SQL statement(s)
@@ -124,14 +156,18 @@ public:
   /// Gets all changes since a given version
   ///
   /// @param last_db_version Version to get changes since (0 for all changes)
+  /// @param max_changes Maximum number of changes to return (0 = unlimited)
   /// @return Vector of changes that occurred after last_db_version
-  std::vector<Change<CrdtRecordId, std::string>> get_changes_since(uint64_t last_db_version);
+  /// @note For unbounded queries (max_changes=0), consider memory implications
+  std::vector<Change<CrdtRecordId, std::string>> get_changes_since(
+    uint64_t last_db_version, size_t max_changes = 0);
 
   /// Gets changes since a version, excluding specific nodes
   ///
   /// @param last_db_version Version to get changes since
-  /// @param excluding Set of node IDs to exclude
+  /// @param excluding Set of node IDs to exclude (max 100 nodes)
   /// @return Vector of changes
+  /// @throws CRDTSQLiteException if excluding.size() > 100
   std::vector<Change<CrdtRecordId, std::string>> get_changes_since_excluding(
     uint64_t last_db_version,
     const CrdtSet<CrdtNodeId> &excluding);
@@ -176,6 +212,51 @@ public:
   // Users should implement their own serialization using Change<> structure
 
 private:
+  /// RAII guard to ensure boolean flag is reset on scope exit
+  class ScopeGuard {
+  public:
+    explicit ScopeGuard(bool &flag) : flag_(flag) { flag_ = true; }
+    ~ScopeGuard() { flag_ = false; }
+    ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(const ScopeGuard&) = delete;
+  private:
+    bool &flag_;
+  };
+
+  /// RAII wrapper for sqlite3_stmt* to prevent memory leaks
+  ///
+  /// Automatically calls sqlite3_finalize() on destruction, ensuring statements
+  /// are properly cleaned up even if exceptions are thrown.
+  ///
+  /// Usage:
+  ///   Statement stmt(prepare("SELECT ..."));
+  ///   sqlite3_bind_int64(stmt.get(), 1, value);
+  ///   while (sqlite3_step(stmt.get()) == SQLITE_ROW) { ... }
+  ///   // No need to call finalize() - done automatically
+  ///
+  /// NOTE: Existing code uses raw pointers for historical reasons.
+  /// New code should prefer this wrapper for exception safety.
+  class Statement {
+  public:
+    explicit Statement(sqlite3_stmt *stmt) : stmt_(stmt) {}
+    ~Statement() { if (stmt_) sqlite3_finalize(stmt_); }
+    Statement(const Statement&) = delete;
+    Statement& operator=(const Statement&) = delete;
+    Statement(Statement&& other) noexcept : stmt_(other.stmt_) { other.stmt_ = nullptr; }
+    Statement& operator=(Statement&& other) noexcept {
+      if (this != &other) {
+        if (stmt_) sqlite3_finalize(stmt_);
+        stmt_ = other.stmt_;
+        other.stmt_ = nullptr;
+      }
+      return *this;
+    }
+    sqlite3_stmt* get() const { return stmt_; }
+    sqlite3_stmt* operator->() const { return stmt_; }
+  private:
+    sqlite3_stmt *stmt_;
+  };
+
   sqlite3 *db_;
   std::string tracked_table_;
   CrdtNodeId node_id_;
