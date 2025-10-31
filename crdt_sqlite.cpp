@@ -873,21 +873,21 @@ CRDTSQLite::query_row_values(CrdtRecordId record_id) {
     query = "SELECT * FROM " + tracked_table_ + " WHERE id = ?";
   }
 
-  sqlite3_stmt *stmt = prepare(query.c_str());
-  RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt, 1, record_id);
+  Statement stmt(prepare(query.c_str()));
+  RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, record_id);
 
-  if (sqlite3_step(stmt) == SQLITE_ROW) {
-    int num_cols = sqlite3_column_count(stmt);
+  if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+    int num_cols = sqlite3_column_count(stmt.get());
     for (int i = 0; i < num_cols; i++) {
-      const char *col_name = sqlite3_column_name(stmt, i);
+      const char *col_name = sqlite3_column_name(stmt.get(), i);
       if (!col_name) continue;
 
-      sqlite3_value *val = sqlite3_column_value(stmt, i);
+      sqlite3_value *val = sqlite3_column_value(stmt.get(), i);
       values[col_name] = SQLiteValue::from_sqlite(val);
     }
   }
 
-  sqlite3_finalize(stmt);
+  // Auto-finalized by Statement RAII wrapper
   return values;
 }
 
@@ -1032,6 +1032,11 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
       sqlite3_step(stmt);
       sqlite3_finalize(stmt);
     } else {
+      // Validate column name to prevent SQL injection
+      if (!is_valid_column_name(*change.col_name)) {
+        throw CRDTSQLiteException("Invalid column name in change: " + *change.col_name);
+      }
+
       // Check if record exists
       std::string check_sql = "SELECT COUNT(*) FROM " + tracked_table_ + " WHERE " + id_column + " = ?";
       sqlite3_stmt *stmt = prepare(check_sql.c_str());
@@ -1211,7 +1216,8 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 * /*db*/, const char * /*db_name
 
   // Query pending changes from trigger-populated table
   // This is safe because we're called AFTER commit with locks released
-  self->processing_wal_changes_ = true;
+  // Use RAII guard to ensure flag is always reset, even on exception
+  ProcessingGuard guard(self->processing_wal_changes_);
   try {
     self->process_pending_changes();
   } catch (const std::exception& e) {
@@ -1220,7 +1226,6 @@ int CRDTSQLite::wal_callback(void *ctx, sqlite3 * /*db*/, const char * /*db_name
       "CRDT-SQLite: Error processing changes in wal_callback: %s\n",
       e.what());
   }
-  self->processing_wal_changes_ = false;
 
   return SQLITE_OK;
 }
@@ -1267,6 +1272,33 @@ std::string CRDTSQLite::get_error() const {
 
 bool CRDTSQLite::is_valid_table_name(const std::string &name) {
   // Table name must:
+  // 1. Not be empty
+  // 2. Start with letter or underscore
+  // 3. Contain only alphanumeric characters and underscores
+  // 4. Not be too long (SQLite limit is 1024 bytes, we use 128 for safety)
+  if (name.empty() || name.length() > 128) {
+    return false;
+  }
+
+  // First character must be letter or underscore
+  char first = name[0];
+  if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_')) {
+    return false;
+  }
+
+  // Remaining characters must be alphanumeric or underscore
+  for (char c : name) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_')) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool CRDTSQLite::is_valid_column_name(const std::string &name) {
+  // Column name validation follows same rules as table names:
   // 1. Not be empty
   // 2. Start with letter or underscore
   // 3. Contain only alphanumeric characters and underscores

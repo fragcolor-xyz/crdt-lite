@@ -190,6 +190,17 @@ public:
   size_t tombstone_count() const;
 
   /// Gets the current logical clock value
+  ///
+  /// The logical clock uses uint64_t, providing 2^64 unique version numbers.
+  ///
+  /// **Clock Overflow Limitation:**
+  /// After 2^64 operations (~18 quintillion), the clock wraps to 0, breaking
+  /// causality and conflict resolution. This is not handled.
+  ///
+  /// **Impact:** Negligible for all practical use cases. Even at 1 billion
+  /// operations per second, overflow would take ~585 years.
+  ///
+  /// @return Current logical clock value (0 if no table is tracked)
   uint64_t get_clock() const;
 
   /// Gets the underlying sqlite3* handle
@@ -241,6 +252,21 @@ private:
     sqlite3_stmt *stmt_;
   };
 
+  /// RAII guard for processing_wal_changes_ flag
+  ///
+  /// Ensures the flag is always reset, even if exceptions occur during
+  /// process_pending_changes(). This prevents the wal_callback from being
+  /// permanently disabled after an error.
+  class ProcessingGuard {
+  public:
+    explicit ProcessingGuard(bool& flag) : flag_(flag) { flag_ = true; }
+    ~ProcessingGuard() { flag_ = false; }
+    ProcessingGuard(const ProcessingGuard&) = delete;
+    ProcessingGuard& operator=(const ProcessingGuard&) = delete;
+  private:
+    bool& flag_;
+  };
+
   sqlite3 *db_;
   std::string tracked_table_;
   CrdtNodeId node_id_;
@@ -288,6 +314,9 @@ private:
 
   /// Validates and sanitizes table name to prevent SQL injection
   static bool is_valid_table_name(const std::string &name);
+
+  /// Validates column name to prevent SQL injection
+  static bool is_valid_column_name(const std::string &name);
 };
 
 #endif // CRDT_SQLITE_HPP
