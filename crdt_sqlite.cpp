@@ -1010,6 +1010,54 @@ void CRDTSQLite::process_pending_changes() {
     return;  // Nothing to do
   }
 
+  // PERFORMANCE: Batch-fetch all existing column versions to avoid N+1 queries
+  // Build map: (record_id, col_name) -> col_version
+  std::unordered_map<std::string, uint64_t> version_cache;
+  {
+    // Collect all (record_id, col_name) pairs that need version lookup
+    std::vector<std::pair<CrdtRecordId, std::string>> version_keys;
+    for (const auto &pending : pending_changes) {
+      if (pending.operation != SQLITE_DELETE && pending.col_name.has_value()) {
+        version_keys.emplace_back(pending.record_id, *pending.col_name);
+      }
+    }
+
+    if (!version_keys.empty()) {
+      // Batch-fetch all versions in one query using IN clause
+      std::ostringstream query_sql;
+      query_sql << "SELECT record_id, col_name, col_version FROM " << versions_table << " WHERE ";
+
+      // Build OR conditions for all (record_id, col_name) pairs
+      for (size_t i = 0; i < version_keys.size(); ++i) {
+        if (i > 0) query_sql << " OR ";
+        query_sql << "(record_id = ? AND col_name = ?)";
+      }
+
+      Statement stmt(prepare(query_sql.str().c_str()));
+
+      // Bind all (record_id, col_name) pairs
+      int param_idx = 1;
+      for (const auto &[rec_id, col] : version_keys) {
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), param_idx++, rec_id);
+        sqlite3_bind_text(stmt.get(), param_idx++, col.c_str(), -1, SQLITE_TRANSIENT);
+      }
+
+      // Fetch all existing versions into cache
+      while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        CrdtRecordId rec_id = RecordIdTraits<CrdtRecordId>::from_sqlite(stmt.get(), 0);
+        const char *col_name_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        uint64_t col_ver = sqlite3_column_int64(stmt.get(), 2);
+
+        if (col_name_str) {
+          // Build cache key: "record_id:col_name"
+          std::string key = std::to_string(static_cast<uint64_t>(rec_id)) + ":" + col_name_str;
+          version_cache[key] = col_ver;
+        }
+      }
+      // Auto-finalized
+    }
+  }
+
   // Get and increment clock
   uint64_t current_clock = get_clock();
   current_clock++;
@@ -1048,19 +1096,12 @@ void CRDTSQLite::process_pending_changes() {
 
       const std::string& col_name = *pending.col_name;
 
-      // Query current col_version for this column
+      // Look up col_version from cache (O(1) instead of O(n) queries)
+      std::string cache_key = std::to_string(static_cast<uint64_t>(pending.record_id)) + ":" + col_name;
       uint64_t col_version = 0;
-      {
-        std::string query = "SELECT col_version FROM " + versions_table +
-                           " WHERE record_id = ? AND col_name = ?";
-        Statement stmt(prepare(query.c_str()));
-        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
-        sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
-
-        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-          col_version = sqlite3_column_int64(stmt.get(), 0);
-        }
-        // Auto-finalized
+      auto it = version_cache.find(cache_key);
+      if (it != version_cache.end()) {
+        col_version = it->second;
       }
 
       // Increment col_version
