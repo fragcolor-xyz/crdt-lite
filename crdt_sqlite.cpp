@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <vector>
 
 // SQLiteValue implementation
 
@@ -251,12 +252,15 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
 
   // Create pending changes table for tracking within transactions
   // This table is populated by triggers (not hooks) to avoid mutex issues
+  // IMPORTANT: col_name tracks WHICH column changed (for column-level conflict resolution)
+  // NOTE: col_name is empty string '' for DELETE operations (not NULL)
   std::string pending_table = "_crdt_" + table_name + "_pending";
   std::string create_pending = R"(
     CREATE TABLE IF NOT EXISTS )" + pending_table + R"( (
       operation INTEGER NOT NULL,
       record_id )" + record_id_type + R"( NOT NULL,
-      PRIMARY KEY (operation, record_id)
+      col_name TEXT NOT NULL DEFAULT '',  -- Empty string for DELETE, column name for UPDATE/INSERT
+      PRIMARY KEY (operation, record_id, col_name)
     )
   )";
   exec_or_throw(create_pending.c_str());
@@ -311,25 +315,46 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
     id_column = "NEW.id";
   }
 
-  // INSERT trigger
-  std::string insert_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_insert "
-                               "AFTER INSERT ON " + table_name + " "
-                               "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_INSERT) + ", " + id_column + "); "
-                               "END";
-  exec_or_throw(insert_trigger.c_str());
+  // Get column names for per-column change tracking
+  std::vector<std::string> columns;
+  {
+    std::string pragma_sql = "PRAGMA table_info(" + table_name + ")";
+    Statement stmt(prepare(pragma_sql.c_str()));
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+      const char *col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt.get(), 1));
+      if (col_name) {
+        columns.push_back(col_name);
+      }
+    }
+  }
 
-  // UPDATE trigger
-  std::string update_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_update "
-                               "AFTER UPDATE ON " + table_name + " "
-                               "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_UPDATE) + ", " + id_column + "); "
-                               "END";
-  exec_or_throw(update_trigger.c_str());
+  // INSERT trigger - track all columns as changed
+  std::ostringstream insert_trigger_sql;
+  insert_trigger_sql << "CREATE TRIGGER IF NOT EXISTS _crdt_" << table_name << "_insert "
+                     << "AFTER INSERT ON " << table_name << " BEGIN ";
+  for (const auto& col : columns) {
+    insert_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) VALUES ("
+                       << SQLITE_INSERT << ", " << id_column << ", '" << col << "'); ";
+  }
+  insert_trigger_sql << "END";
+  exec_or_throw(insert_trigger_sql.str().c_str());
 
-  // DELETE trigger
+  // UPDATE trigger - only track changed columns
+  std::ostringstream update_trigger_sql;
+  update_trigger_sql << "CREATE TRIGGER IF NOT EXISTS _crdt_" << table_name << "_update "
+                     << "AFTER UPDATE ON " << table_name << " BEGIN ";
+  for (const auto& col : columns) {
+    // Use IS DISTINCT FROM to handle NULL comparisons correctly
+    update_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) "
+                       << "SELECT " << SQLITE_UPDATE << ", " << id_column << ", '" << col << "' "
+                       << "WHERE OLD." << col << " IS NOT NEW." << col << "; ";
+  }
+  update_trigger_sql << "END";
+  exec_or_throw(update_trigger_sql.str().c_str());
+
+  // DELETE trigger - col_name is empty string for deletes
   std::string delete_id_column;
   if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
     delete_id_column = "OLD.rowid";
@@ -340,8 +365,8 @@ void CRDTSQLite::create_shadow_tables(const std::string &table_name) {
   std::string delete_trigger = "CREATE TRIGGER IF NOT EXISTS _crdt_" + table_name + "_delete "
                                "BEFORE DELETE ON " + table_name + " "
                                "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + delete_id_column + "); "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id, col_name) "
+                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + delete_id_column + ", ''); "
                                "END";
   exec_or_throw(delete_trigger.c_str());
 }
@@ -398,6 +423,63 @@ void CRDTSQLite::refresh_schema() {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
   }
+
+  // CRITICAL: Regenerate triggers to include new columns
+  // DROP existing triggers
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_insert").c_str());
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_update").c_str());
+  exec_or_throw(("DROP TRIGGER IF EXISTS _crdt_" + tracked_table_ + "_delete").c_str());
+
+  // Recreate column-aware triggers with new schema
+  std::string pending_table = "_crdt_" + tracked_table_ + "_pending";
+  std::string id_col_new, id_col_old;
+  if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
+    id_col_new = "NEW.rowid";
+    id_col_old = "OLD.rowid";
+  } else {
+    id_col_new = "NEW.id";
+    id_col_old = "OLD.id";
+  }
+
+  // Get current column list
+  std::vector<std::string> columns;
+  for (const auto& [col_name, col_type] : column_types_) {
+    columns.push_back(col_name);
+  }
+
+  // INSERT trigger - track all columns
+  std::ostringstream insert_trigger_sql;
+  insert_trigger_sql << "CREATE TRIGGER _crdt_" << tracked_table_ << "_insert "
+                     << "AFTER INSERT ON " << tracked_table_ << " BEGIN ";
+  for (const auto& col : columns) {
+    insert_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) VALUES ("
+                       << SQLITE_INSERT << ", " << id_col_new << ", '" << col << "'); ";
+  }
+  insert_trigger_sql << "END";
+  exec_or_throw(insert_trigger_sql.str().c_str());
+
+  // UPDATE trigger - only track changed columns
+  std::ostringstream update_trigger_sql;
+  update_trigger_sql << "CREATE TRIGGER _crdt_" << tracked_table_ << "_update "
+                     << "AFTER UPDATE ON " << tracked_table_ << " BEGIN ";
+  for (const auto& col : columns) {
+    update_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) "
+                       << "SELECT " << SQLITE_UPDATE << ", " << id_col_new << ", '" << col << "' "
+                       << "WHERE OLD." << col << " IS NOT NEW." << col << "; ";
+  }
+  update_trigger_sql << "END";
+  exec_or_throw(update_trigger_sql.str().c_str());
+
+  // DELETE trigger - col_name is empty string
+  std::string delete_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_delete "
+                               "BEFORE DELETE ON " + tracked_table_ + " "
+                               "BEGIN "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id, col_name) "
+                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + id_col_old + ", ''); "
+                               "END";
+  exec_or_throw(delete_trigger.c_str());
 }
 
 void CRDTSQLite::execute(const char *sql) {
@@ -896,27 +978,35 @@ void CRDTSQLite::process_pending_changes() {
   std::string versions_table = "_crdt_" + tracked_table_ + "_versions";
   std::string tombstones_table = "_crdt_" + tracked_table_ + "_tombstones";
 
-  // Query pending changes from table
-  std::string query = "SELECT operation, record_id FROM " + pending_table;
+  // Query pending changes from table (now includes col_name)
+  std::string query = "SELECT operation, record_id, col_name FROM " + pending_table;
 
-  struct PendingRecord {
+  struct PendingChange {
     int operation;
     CrdtRecordId record_id;
+    std::optional<std::string> col_name;  // NULL for DELETE operations
   };
-  std::vector<PendingRecord> pending_records;
+  std::vector<PendingChange> pending_changes;
 
   {
     Statement query_stmt(prepare(query.c_str()));
     while (sqlite3_step(query_stmt.get()) == SQLITE_ROW) {
-      PendingRecord pending;
+      PendingChange pending;
       pending.operation = sqlite3_column_int(query_stmt.get(), 0);
       pending.record_id = RecordIdTraits<CrdtRecordId>::from_sqlite(query_stmt.get(), 1);
-      pending_records.push_back(pending);
+
+      // col_name is empty string for DELETE operations
+      const char* col_name_str = reinterpret_cast<const char*>(sqlite3_column_text(query_stmt.get(), 2));
+      if (col_name_str && col_name_str[0] != '\0') {
+        pending.col_name = col_name_str;
+      }
+
+      pending_changes.push_back(pending);
     }
     // Auto-finalized here
   }
 
-  if (pending_records.empty()) {
+  if (pending_changes.empty()) {
     return;  // Nothing to do
   }
 
@@ -925,7 +1015,7 @@ void CRDTSQLite::process_pending_changes() {
   current_clock++;
 
   // Process each pending change
-  for (const auto &pending : pending_records) {
+  for (const auto &pending : pending_changes) {
     if (pending.operation == SQLITE_DELETE) {
       // Create tombstone
       {
@@ -950,43 +1040,46 @@ void CRDTSQLite::process_pending_changes() {
       }
 
     } else {
-      // INSERT/UPDATE: Query current values and update shadow table
-      auto values = query_row_values(pending.record_id);
+      // INSERT/UPDATE: Update version for the specific changed column only
+      if (!pending.col_name.has_value()) {
+        // Shouldn't happen - INSERT/UPDATE should always have col_name
+        continue;
+      }
 
-      for (const auto &[col_name, value] : values) {
-        // Query current col_version for this column
-        uint64_t col_version = 0;
-        {
-          std::string query = "SELECT col_version FROM " + versions_table +
-                             " WHERE record_id = ? AND col_name = ?";
-          Statement stmt(prepare(query.c_str()));
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
-          sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
+      const std::string& col_name = *pending.col_name;
 
-          if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-            col_version = sqlite3_column_int64(stmt.get(), 0);
-          }
-          // Auto-finalized
+      // Query current col_version for this column
+      uint64_t col_version = 0;
+      {
+        std::string query = "SELECT col_version FROM " + versions_table +
+                           " WHERE record_id = ? AND col_name = ?";
+        Statement stmt(prepare(query.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+          col_version = sqlite3_column_int64(stmt.get(), 0);
         }
+        // Auto-finalized
+      }
 
-        // Increment col_version
-        col_version++;
+      // Increment col_version
+      col_version++;
 
-        // Update shadow table
-        {
-          std::string insert_version = "INSERT OR REPLACE INTO " + versions_table +
-                                      " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
-                                      "VALUES (?, ?, ?, ?, ?, ?)";
-          Statement stmt(prepare(insert_version.c_str()));
-          RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
-          sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
-          sqlite3_bind_int64(stmt.get(), 3, col_version);
-          sqlite3_bind_int64(stmt.get(), 4, current_clock);
-          sqlite3_bind_int64(stmt.get(), 5, node_id_);
-          sqlite3_bind_int64(stmt.get(), 6, current_clock);
-          sqlite3_step(stmt.get());
-          // Auto-finalized
-        }
+      // Update shadow table
+      {
+        std::string insert_version = "INSERT OR REPLACE INTO " + versions_table +
+                                    " (record_id, col_name, col_version, db_version, node_id, local_db_version) " +
+                                    "VALUES (?, ?, ?, ?, ?, ?)";
+        Statement stmt(prepare(insert_version.c_str()));
+        RecordIdTraits<CrdtRecordId>::bind_to_sqlite(stmt.get(), 1, pending.record_id);
+        sqlite3_bind_text(stmt.get(), 2, col_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt.get(), 3, col_version);
+        sqlite3_bind_int64(stmt.get(), 4, current_clock);
+        sqlite3_bind_int64(stmt.get(), 5, node_id_);
+        sqlite3_bind_int64(stmt.get(), 6, current_clock);
+        sqlite3_step(stmt.get());
+        // Auto-finalized
       }
     }
   }
@@ -1125,7 +1218,7 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
     }
   }
 
-  // Recreate triggers
+  // Recreate triggers (column-aware)
   std::string id_col_new, id_col_old;
   if constexpr (RecordIdTraits<CrdtRecordId>::is_auto_increment()) {
     id_col_new = "NEW.rowid";
@@ -1135,27 +1228,49 @@ void CRDTSQLite::apply_to_sqlite(const std::vector<Change<CrdtRecordId, std::str
     id_col_old = "OLD.id";
   }
 
-  std::string insert_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_insert "
-                               "AFTER INSERT ON " + tracked_table_ + " "
-                               "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_INSERT) + ", " + id_col_new + "); "
-                               "END";
-  exec_or_throw(insert_trigger.c_str());
+  // Get column names for per-column change tracking
+  std::vector<std::string> columns;
+  {
+    std::string pragma_sql = "PRAGMA table_info(" + tracked_table_ + ")";
+    Statement stmt(prepare(pragma_sql.c_str()));
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+      const char *col_name = reinterpret_cast<const char *>(sqlite3_column_text(stmt.get(), 1));
+      if (col_name) {
+        columns.push_back(col_name);
+      }
+    }
+  }
 
-  std::string update_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_update "
-                               "AFTER UPDATE ON " + tracked_table_ + " "
-                               "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_UPDATE) + ", " + id_col_new + "); "
-                               "END";
-  exec_or_throw(update_trigger.c_str());
+  // INSERT trigger - track all columns as changed
+  std::ostringstream insert_trigger_sql;
+  insert_trigger_sql << "CREATE TRIGGER _crdt_" << tracked_table_ << "_insert "
+                     << "AFTER INSERT ON " << tracked_table_ << " BEGIN ";
+  for (const auto& col : columns) {
+    insert_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) VALUES ("
+                       << SQLITE_INSERT << ", " << id_col_new << ", '" << col << "'); ";
+  }
+  insert_trigger_sql << "END";
+  exec_or_throw(insert_trigger_sql.str().c_str());
+
+  // UPDATE trigger - only track changed columns
+  std::ostringstream update_trigger_sql;
+  update_trigger_sql << "CREATE TRIGGER _crdt_" << tracked_table_ << "_update "
+                     << "AFTER UPDATE ON " << tracked_table_ << " BEGIN ";
+  for (const auto& col : columns) {
+    update_trigger_sql << "  INSERT OR REPLACE INTO " << pending_table
+                       << " (operation, record_id, col_name) "
+                       << "SELECT " << SQLITE_UPDATE << ", " << id_col_new << ", '" << col << "' "
+                       << "WHERE OLD." << col << " IS NOT NEW." << col << "; ";
+  }
+  update_trigger_sql << "END";
+  exec_or_throw(update_trigger_sql.str().c_str());
 
   std::string delete_trigger = "CREATE TRIGGER _crdt_" + tracked_table_ + "_delete "
                                "BEFORE DELETE ON " + tracked_table_ + " "
                                "BEGIN "
-                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id) "
-                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + id_col_old + "); "
+                               "  INSERT OR REPLACE INTO " + pending_table + " (operation, record_id, col_name) "
+                               "  VALUES (" + std::to_string(SQLITE_DELETE) + ", " + id_col_old + ", ''); "
                                "END";
   exec_or_throw(delete_trigger.c_str());
 }

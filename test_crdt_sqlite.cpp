@@ -589,6 +589,89 @@ TEST(alter_table_add_column) {
   ASSERT_EQ(age_val, "30");
 }
 
+// Test 17: Tombstone resurrection - deleted record should not be recreatable
+TEST(tombstone_resurrection) {
+  TestDB test_db("tombstone_resurrection");
+  CRDTSQLite db(test_db.path(), 1);
+
+  db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.enable_crdt("users");
+
+  // Insert and delete a record
+  db.execute("INSERT INTO users (id, name) VALUES (100, 'Deleted User')");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+
+  db.execute("DELETE FROM users WHERE id = 100");
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 0);
+  ASSERT_EQ(db.tombstone_count(), 1);
+
+  uint64_t version_after_delete = db.get_clock();
+
+  // Try to recreate the same record
+  db.execute("INSERT INTO users (id, name) VALUES (100, 'Resurrected User')");
+
+  // Record physically exists in SQLite and changes are emitted locally
+  ASSERT_EQ(count_rows(db.get_db(), "users"), 1);
+  auto changes = db.get_changes_since(version_after_delete);
+  ASSERT_TRUE(changes.size() > 0);  // Changes emitted locally
+
+  // But when syncing to another node, tombstone blocks resurrection
+  TestDB test_db2("tombstone_resurrection_remote");
+  CRDTSQLite db2(test_db2.path(), 2);
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+  db2.enable_crdt("users");
+
+  // Sync all changes including original delete
+  db2.merge_changes(db.get_changes_since(0));
+
+  // Remote node should have tombstone, no records
+  ASSERT_EQ(count_rows(db2.get_db(), "users"), 0);
+  ASSERT_EQ(db2.tombstone_count(), 1);
+}
+
+// Test 18: Concurrent edits to different columns
+TEST(concurrent_different_columns) {
+  TestDB test_db1("concurrent_diff_cols_1");
+  TestDB test_db2("concurrent_diff_cols_2");
+
+  CRDTSQLite db1(test_db1.path(), 1);
+  CRDTSQLite db2(test_db2.path(), 2);
+
+  // Setup both nodes with same initial state
+  db1.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+  db1.enable_crdt("users");
+  db1.execute("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@old.com')");
+
+  db2.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
+  db2.enable_crdt("users");
+  db2.merge_changes(db1.get_changes_since(0));
+
+  // Capture sync point after initial sync (both nodes at same state)
+  uint64_t sync_point1 = db1.get_clock();
+  uint64_t sync_point2 = db2.get_clock();
+
+  // Node 1: Update name column
+  db1.execute("UPDATE users SET name = 'Alice Smith' WHERE id = 1");
+
+  // Node 2: Update email column (concurrent, different column)
+  db2.execute("UPDATE users SET email = 'alice@new.com' WHERE id = 1");
+
+  // Sync both ways (each node sends changes since its own last sync)
+  db1.merge_changes(db2.get_changes_since(sync_point2));
+  db2.merge_changes(db1.get_changes_since(sync_point1));
+
+  // Both changes should be preserved (different columns don't conflict)
+  std::string name1 = get_value(db1.get_db(), "users", "name", 1);
+  std::string email1 = get_value(db1.get_db(), "users", "email", 1);
+  ASSERT_EQ(name1, "Alice Smith");
+  ASSERT_EQ(email1, "alice@new.com");
+
+  std::string name2 = get_value(db2.get_db(), "users", "name", 1);
+  std::string email2 = get_value(db2.get_db(), "users", "email", 1);
+  ASSERT_EQ(name2, "Alice Smith");
+  ASSERT_EQ(email2, "alice@new.com");
+}
+
 int main() {
   std::cout << "Running CRDT-SQLite tests..." << std::endl << std::endl;
 
@@ -608,6 +691,8 @@ int main() {
   RUN_TEST(null_values);
   RUN_TEST(integer_types);
   RUN_TEST(alter_table_add_column);
+  RUN_TEST(tombstone_resurrection);
+  RUN_TEST(concurrent_different_columns);
 
   std::cout << std::endl << "All tests passed!" << std::endl;
   return 0;
