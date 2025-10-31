@@ -112,12 +112,15 @@ CRDT-SQLite uses a **hybrid trigger + WAL hook** architecture that combines cras
 |---------|------------------------|-----------|
 | **Write API** | ✅ Normal SQL (INSERT/UPDATE/DELETE) | ❌ Virtual tables (special functions required) |
 | **Read API** | ✅ Normal SELECT | ✅ Normal SELECT |
+| **CRDT metadata access** | C++ APIs only | ✅ SQL queries (via virtual tables) |
 | **Architecture** | Triggers + wal_hook | Virtual tables + triggers |
 | **Learning curve** | Low (just SQL) | Higher (learn cr-sqlite API) |
 | **Existing code** | Works unchanged | Requires rewrite |
 | **Performance** | TBD (benchmarks pending) | Established baseline |
 
 **Key advantage:** Our trigger-based approach means you write normal SQL - no special APIs, no virtual tables, no code changes. Just enable CRDT on a table and keep writing SQL like you always have.
+
+**Tradeoff:** cr-sqlite exposes CRDT metadata (versions, clocks) via SQL queries, while we provide C++ APIs (`get_changes_since()`, `merge_changes()`). If you prefer C++ over SQL for sync logic, this is actually cleaner.
 
 ## Shadow Tables
 
