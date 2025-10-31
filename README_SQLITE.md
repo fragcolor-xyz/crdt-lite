@@ -10,6 +10,7 @@ A high-performance CRDT wrapper for SQLite that enables automatic multi-node syn
 - 🎯 **Column-level conflicts**: Fine-grained conflict resolution per field
 - 🌍 **Cross-platform**: Linux, macOS, Windows (with custom SQLite build)
 - 📦 **Zero code changes**: Existing SQL apps work without modification
+- ✏️ **Normal SQL writes**: Unlike cr-sqlite, no virtual tables = normal INSERT/UPDATE/DELETE works!
 
 ## Quick Start
 
@@ -19,13 +20,17 @@ A high-performance CRDT wrapper for SQLite that enables automatic multi-node syn
 // Create database with unique node ID
 CRDTSQLite db("myapp.db", 1);
 
-// Enable CRDT for a table
+// Create table and enable CRDT
 db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
 db.enable_crdt("users");
 
-// Use normal SQL - changes are tracked automatically
+// Use normal SQL - changes are tracked automatically by triggers!
+// You can use execute() wrapper (convenient)...
 db.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')");
-db.execute("UPDATE users SET email = 'alice@newdomain.com' WHERE name = 'Alice'");
+
+// ...or raw SQLite APIs (also works!)
+sqlite3_exec(db.get_db(), "UPDATE users SET email = 'new@example.com' WHERE name = 'Alice'",
+             nullptr, nullptr, nullptr);
 
 // Get changes since last sync
 auto changes = db.get_changes_since(0);
@@ -101,6 +106,19 @@ CRDT-SQLite uses a **hybrid trigger + WAL hook** architecture that combines cras
 
 **Key Insight**: The `wal_hook` callback fires **AFTER** commit with all locks released, making `prepare()`/`step()` calls 100% safe.
 
+## Comparison with cr-sqlite
+
+| Feature | **CRDT-SQLite** (Ours) | cr-sqlite |
+|---------|------------------------|-----------|
+| **Write API** | ✅ Normal SQL (INSERT/UPDATE/DELETE) | ❌ Virtual tables (special functions required) |
+| **Read API** | ✅ Normal SELECT | ✅ Normal SELECT |
+| **Architecture** | Triggers + wal_hook | Virtual tables + triggers |
+| **Learning curve** | Low (just SQL) | Higher (learn cr-sqlite API) |
+| **Existing code** | Works unchanged | Requires rewrite |
+| **Performance** | TBD (benchmarks pending) | Established baseline |
+
+**Key advantage:** Our trigger-based approach means you write normal SQL - no special APIs, no virtual tables, no code changes. Just enable CRDT on a table and keep writing SQL like you always have.
+
 ## Shadow Tables
 
 When you call `enable_crdt("users")`, four shadow tables are created:
@@ -162,13 +180,58 @@ CRDTSQLite(const char *path, CrdtNodeId node_id);
 ### Core Methods
 
 #### `enable_crdt(const std::string &table_name)`
-Enables CRDT synchronization for a table.
+Enables CRDT synchronization for a table. Creates triggers that automatically track changes.
 
 **Schema Change Support:**
 - ✅ ALTER TABLE ADD COLUMN - fully automatic
 - ❌ DROP TABLE - blocked
 - ⚠️ RENAME TABLE - not blocked but WILL BREAK
 - ⚠️ DROP/RENAME COLUMN - not supported
+
+#### `execute(const char *sql)` **[Optional Convenience Wrapper]**
+Executes SQL with exception-based error handling and automatic schema refresh.
+
+**What it does:**
+- Wraps `sqlite3_exec()` with exception throwing
+- Auto-calls `refresh_schema()` after ALTER TABLE
+
+**Alternative: Use Raw SQLite APIs**
+
+Since triggers and `wal_hook` handle everything automatically, you can use raw SQLite APIs directly:
+
+```cpp
+CRDTSQLite db("myapp.db", 1);
+db.enable_crdt("users");
+
+// Option 1: Use execute() wrapper (convenience)
+db.execute("INSERT INTO users (name) VALUES ('Alice')");
+
+// Option 2: Use raw sqlite3_exec() (also works!)
+sqlite3_exec(db.get_db(), "INSERT INTO users (name) VALUES ('Bob')",
+             nullptr, nullptr, nullptr);
+
+// Option 3: Use prepare/step (already exposed)
+sqlite3_stmt *stmt = db.prepare("INSERT INTO users (name) VALUES (?)");
+sqlite3_bind_text(stmt, 1, "Charlie", -1, SQLITE_STATIC);
+sqlite3_step(stmt);
+sqlite3_finalize(stmt);
+
+// All three options work! Triggers fire automatically.
+// Only caveat: Call refresh_schema() manually after ALTER TABLE (typically during migrations)
+```
+
+#### `refresh_schema()`
+Refreshes internal column metadata after schema changes.
+
+**When to call:**
+- After ALTER TABLE ADD COLUMN (typically at end of migration)
+- Only needed if using raw SQLite APIs instead of `execute()`
+
+#### `prepare(const char *sql)`
+Prepares a SQL statement for parameterized queries. Returns `sqlite3_stmt*` (caller must finalize).
+
+#### `get_db()`
+Returns raw `sqlite3*` handle for direct SQLite API access.
 
 #### `get_changes_since(uint64_t last_db_version, size_t max_changes = 0)`
 Gets all changes since a given version.
