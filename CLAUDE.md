@@ -1,24 +1,25 @@
 # crdt-lite
 
-A lightweight, column-based CRDT (Conflict-free Replicated Data Type) implementation with both Rust and C++ versions.
+A lightweight, column-based CRDT (Conflict-free Replicated Data Type) implementation with Rust, C++, and Swift versions.
 
 ## Project Overview
 
 This library provides generic CRDTs for building distributed, eventually-consistent data structures. The project includes:
 
-1. **Column-based CRDT** (`src/lib.rs`, `crdt.hpp`) - Generic key-value store with column-level conflict resolution
+1. **Column-based CRDT** (`src/lib.rs`, `crdt.hpp`, `Sources/CRDTLite/CRDT.swift`) - Generic key-value store with column-level conflict resolution
 2. **Text CRDT** (`text_crdt.hpp`) - Line-based collaborative text editor with fractional positioning
 
-Both implementations support last-write-wins (LWW) semantics, tombstone-based deletion, logical clocks for causality tracking, and customizable merge rules.
+All implementations support last-write-wins (LWW) semantics, tombstone-based deletion, logical clocks for causality tracking, and customizable merge rules.
 
 ## Architecture
 
-### Dual Implementation Strategy
+### Multi-Language Implementation Strategy
 
-- **Rust** (`src/lib.rs`): Primary implementation with strong type safety, memory safety guarantees
+- **Rust** (`src/lib.rs`): Primary implementation with strong type safety, memory safety guarantees, `serde` support for JSON/binary serialization
 - **C++** (`crdt.hpp`, `text_crdt.hpp`): Header-only template library for high-performance, zero-cost abstractions
+- **Swift** (`Sources/CRDTLite/CRDT.swift`): Native iOS/macOS implementation with `Codable` support, full interoperability with Rust/C++ backends
 
-Both implementations maintain API compatibility and use the same core algorithms.
+All implementations maintain API compatibility and use the same core algorithms, allowing seamless data exchange via JSON.
 
 ### Core Concepts
 
@@ -498,14 +499,39 @@ Run:
 cargo test
 ```
 
+### Swift Tests (`Tests/CRDTLiteTests/CRDTTests.swift`)
+
+Comprehensive test suite matching Rust and C++ tests:
+
+- Logical clock tests
+- Tombstone storage and compaction
+- Basic insert/update operations
+- Delete operations (record and field)
+- Merge and conflict resolution
+- Sync between nodes
+- Change compression
+- JSON serialization/deserialization
+- Complex data types
+- Edge cases and error conditions
+
+Run:
+```bash
+swift test
+swift test --parallel
+swift test --filter CRDTTests.testBasicInsert
+```
+
+See [SWIFT_README.md](./SWIFT_README.md) for detailed Swift documentation.
+
 ## Working with the Codebase
 
 ### Adding New Features
 
-1. **Choose implementation:** Start with Rust or C++ based on your needs
-2. **Update both:** Keep Rust and C++ APIs in sync
-3. **Add tests:** All new features need test coverage in both languages
-4. **Document:** Update this file with architecture decisions
+1. **Choose implementation:** Start with Rust, C++, or Swift based on your needs
+2. **Update all implementations:** Keep Rust, C++, and Swift APIs in sync
+3. **Add tests:** All new features need test coverage in all languages
+4. **Document:** Update this file and language-specific READMEs with architecture decisions
+5. **Ensure interoperability:** Test JSON serialization compatibility between implementations
 
 ### Common Pitfalls
 
