@@ -3,7 +3,7 @@
 //! This module provides a `PersistedCRDT` wrapper around the core `CRDT` type that:
 //! - Maintains an append-only Write-Ahead Log (WAL) for durability
 //! - Automatically creates snapshots to prevent unbounded WAL growth
-//! - Provides hooks for pre-operation validation and post-operation broadcasting
+//! - Provides hooks for post-operation broadcasting and file sealing notifications
 //! - Returns changes from all operations for async network propagation
 //!
 //! # Example
