@@ -12,23 +12,37 @@
 //! optimized for distributed CRDTs, where eventual consistency is more important than single-node
 //! durability.
 //!
-//! ## What This Means
+//! ## Failure Modes and Data Safety
 //!
-//! - **Crash Safety**: Process crashes are recoverable (data in OS page cache is preserved)
-//! - **Power Failure**: Recent writes (up to `snapshot_threshold` operations, default 1000) may be lost
-//! - **Distributed Safety**: Changes broadcast to network peers are preserved system-wide
-//! - **Fsync Only on Snapshot**: Durability guaranteed every `snapshot_threshold` operations
+//! | Failure Type | Data Loss | Why |
+//! |--------------|-----------|-----|
+//! | Process crash | **None** | OS page cache survives process termination |
+//! | Kernel panic | **~0-30s** | Depends on kernel writeback (typically 30s) |
+//! | Power failure | **Up to 1000 ops** | Unflushed WAL + page cache lost |
+//!
+//! **Key insight:** Most failures (process crashes) are fully recoverable even without fsync,
+//! because the OS kernel maintains a page cache that survives process termination. The kernel
+//! typically flushes dirty pages to disk every 30 seconds (configurable via `vm.dirty_writeback_centisecs`).
 //!
 //! ## Why No Fsync Per Write?
 //!
 //! 1. **Performance**: Fsync is expensive (10-100x slower than buffered writes)
-//! 2. **CRDT Semantics**: Eventual consistency means data loss on one node is recoverable
-//!    - If this node crashes before fsync, peers have the data
+//! 2. **Most crashes are safe anyway**: Process crashes (most common) don't lose page cache
+//! 3. **CRDT Semantics**: Eventual consistency means data loss on one node is recoverable
+//!    - If this node has power failure before fsync, peers have the data
 //!    - On recovery, this node syncs from peers and gets the changes back
 //!    - System-wide convergence is maintained
-//! 3. **Broadcast First**: Hooks fire before fsync to minimize network propagation delay
+//! 4. **Broadcast First**: Hooks fire before fsync to minimize network propagation delay
 //!    - Faster propagation = smaller conflict windows
 //!    - Local durability deferred to batch fsync during snapshot
+//!
+//! ## What Snapshots Provide
+//!
+//! - **Guaranteed persistence**: Fsynced to disk (survives power failure)
+//! - **Bounded recovery time**: No need to replay thousands of WAL operations
+//! - **WAL compaction**: Can safely delete old segments after snapshot
+//!
+//! Snapshots are about **efficiency and certainty**, not basic crash safety.
 //!
 //! ## When This Design Is Appropriate
 //!
@@ -37,10 +51,15 @@
 //! - Crash recovery syncs from network
 //! - No data loss from distributed system perspective
 //!
-//! ⚠️ **Single-node deployments** (not recommended)
-//! - Power failure can lose up to 1000 operations
+//! ✅ **Single-node deployments with process isolation**
+//! - Process crashes are fully recoverable (page cache intact)
+//! - Kernel writeback provides reasonable power failure protection (~30s window)
+//! - Consider reducing `snapshot_threshold` to 10-50 for tighter bounds
+//!
+//! ⚠️ **Single-node deployments without power protection**
+//! - Power failure can lose up to `snapshot_threshold` operations (default 1000)
 //! - No peers to recover from
-//! - Consider reducing `snapshot_threshold` to 10-50 for more frequent fsync
+//! - Mitigation: Use UPS, reduce `snapshot_threshold`, or accept risk
 //!
 //! ## Platform Notes
 //!

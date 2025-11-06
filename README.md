@@ -495,14 +495,29 @@ let pcrdt = PersistedCRDT::<String, String, String>::open(
 
 ### Durability Guarantees
 
-**Design choice:** WAL writes are flushed to OS but NOT fsynced per-operation for CRDT performance:
+**Design choice:** WAL writes are buffered by the OS but NOT fsynced per-operation for CRDT performance:
 
-- ✅ Changes written to WAL before broadcast (minimizes network latency)
-- ✅ Changes fsynced during snapshot creation (periodic durability)
-- ⚠️ Crash before snapshot = possible local data loss
-- ✅ Peers have the data from broadcast (system-wide consistency maintained)
+| Failure Type | Data Loss | Why |
+|--------------|-----------|-----|
+| Process crash | None | OS page cache survives process termination |
+| Kernel panic | ~0-30s | Depends on kernel writeback timing (typically 30s) |
+| Power failure | Up to `snapshot_threshold` ops | Unflushed WAL + page cache lost |
 
-This design prioritizes CRDT convergence over local durability. For stronger durability guarantees, decrease `snapshot_threshold`.
+**What this means:**
+- ✅ **Process crashes**: Fully recoverable (most common failure mode)
+- ✅ **System crashes**: Usually recoverable (kernel flushes dirty pages every ~30s)
+- ⚠️ **Power failures**: May lose recent operations not yet in a snapshot
+- ✅ **Distributed safety**: Changes broadcast to peers before local fsync (network-wide convergence maintained)
+
+**Snapshots provide:**
+- **Guaranteed persistence** at a point in time (fsynced to disk)
+- **Bounded recovery time** (don't replay thousands of WAL operations)
+- **WAL compaction** (can delete old segments after snapshot)
+
+This design prioritizes CRDT convergence and performance over single-node durability. For stronger local durability:
+- Reduce `snapshot_threshold` (e.g., 10-50 for single-node deployments)
+- Use UPS/battery-backed storage for power failure protection
+- Accept that process crashes are already safe (page cache preserved)
 
 ### Tombstone Compaction
 
