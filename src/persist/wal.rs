@@ -108,19 +108,7 @@ where
         self.current_file.flush()?;
         self.current_file.get_ref().sync_all()?;
 
-        // Collect all existing WAL segment paths (these are now sealed)
-        let mut sealed_segments = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(base_path) {
-            for entry in entries.flatten() {
-                let filename = entry.file_name();
-                let filename_str = filename.to_string_lossy();
-                if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
-                    sealed_segments.push(entry.path());
-                }
-            }
-        }
-
-        // Create new segment BEFORE deleting old ones (to release the old file handle)
+        // Create new segment file FIRST (before directory reads) to minimize Windows locking issues
         self.segment_number += 1;
         let new_wal_path = Self::segment_path(base_path, self.segment_number);
 
@@ -128,12 +116,32 @@ where
             .create(true)
             .write(true)
             .truncate(true)
-            .open(new_wal_path)?;
+            .open(&new_wal_path)?;
 
         // Replace the current BufWriter, dropping the old one and closing the old file handle
         self.current_file = BufWriter::new(new_file);
 
-        // Now call hooks on sealed segments (old file is closed, data is fsynced)
+        // On Windows, give OS time to release file locks before directory operations
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Now collect all sealed WAL segment paths (old file handle is released)
+        let mut sealed_segments = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(base_path) {
+            for entry in entries.flatten() {
+                let filename = entry.file_name();
+                let filename_str = filename.to_string_lossy();
+                if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
+                    // Don't include the new segment we just created
+                    let path = entry.path();
+                    if path != new_wal_path {
+                        sealed_segments.push(path);
+                    }
+                }
+            }
+        }
+
+        // Call hooks on sealed segments (old file is closed, data is fsynced)
         for segment_path in &sealed_segments {
             for hook in hooks {
                 hook.on_wal_sealed(segment_path);

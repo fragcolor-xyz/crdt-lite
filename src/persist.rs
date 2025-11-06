@@ -446,6 +446,8 @@ where
 
     /// Creates a snapshot of the current CRDT state and rotates the WAL.
     fn create_snapshot(&mut self) -> Result<(), PersistError> {
+        use std::io::Write;
+
         // Serialize CRDT to bytes
         let bytes = self
             .crdt
@@ -459,13 +461,19 @@ where
         let snapshot_path = self
             .base_path
             .join(format!("snapshot_{:06}.bin", self.snapshot_version));
-        std::fs::write(&snapshot_path, &bytes)?;
 
-        // fsync the snapshot (scope to ensure file is closed on Windows)
+        // Explicitly manage file handle for Windows compatibility
         {
-            let file = std::fs::File::open(&snapshot_path)?;
+            let mut file = std::fs::File::create(&snapshot_path)?;
+            file.write_all(&bytes)?;
             file.sync_all()?;
-        } // file is dropped here, releasing any locks
+            // Explicitly drop before any other operations
+            drop(file);
+        }
+
+        // On Windows, give OS time to release file locks
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Call snapshot hooks (file is now sealed and immutable)
         for hook in &self.snapshot_hooks {
