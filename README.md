@@ -38,6 +38,17 @@ Both Rust and C++ implementations share the same core algorithms and maintain AP
 - ✅ **Conflict detection** - Preserve or resolve concurrent edits
 - ✅ **Change streaming** - Real-time collaboration support
 
+### Persistence Layer (Rust)
+
+- ✅ **Write-Ahead Log (WAL)** - Durable operation log with automatic rotation
+- ✅ **Snapshots** - Periodic full-state checkpoints with configurable thresholds
+- ✅ **Crash Recovery** - Automatic recovery from snapshot + WAL replay
+- ✅ **Hook System** - Callbacks for post-operation, snapshot, and WAL sealing events
+- ✅ **Batch Collector** - Accumulate changes for efficient network broadcasting
+- ✅ **Upload Tracking** - Track uploaded snapshots/WAL segments for safe cleanup
+- ✅ **Auto-cleanup** - Configurable retention policies to prevent disk bloat
+- ✅ **Windows Support** - Proper file handle management for strict locking
+
 ### Platform Support
 
 - ✅ **`no_std` compatible** - Works in embedded systems and other `no_std` environments (requires `alloc`)
@@ -333,6 +344,192 @@ struct FractionalPosition {
 - Can always insert between any two positions
 - Automatically extends depth when space runs out
 
+## Persistence Layer
+
+The Rust implementation includes an optional persistence layer with WAL (Write-Ahead Log) and snapshots for durability and crash recovery.
+
+### Quick Start
+
+```toml
+[dependencies]
+crdt-lite = { version = "0.5", features = ["persist"] }
+```
+
+```rust
+use crdt_lite::persist::{PersistedCRDT, PersistConfig};
+use std::path::PathBuf;
+
+// Open or create a persisted CRDT
+let mut pcrdt = PersistedCRDT::<String, String, String>::open(
+    PathBuf::from("./data"),
+    1, // node_id
+    PersistConfig::default(),
+)?;
+
+// Use like a normal CRDT - all operations are automatically persisted
+pcrdt.insert_or_update(
+    &"user1".to_string(),
+    vec![
+        ("name".to_string(), "Alice".to_string()),
+        ("email".to_string(), "alice@example.com".to_string()),
+    ],
+)?;
+
+// Changes are persisted to WAL and automatically recovered on crash
+```
+
+### Configuration
+
+```rust
+let config = PersistConfig {
+    snapshot_threshold: 1000,      // Create snapshot every 1000 changes
+    auto_cleanup_snapshots: Some(3), // Keep 3 most recent snapshots
+    max_batch_size: Some(10000),    // Auto-flush batch at 10k changes
+};
+```
+
+### Hook System
+
+The persistence layer provides three types of hooks for integration with backup systems, network layers, etc:
+
+#### Post-Operation Hook
+
+Called after changes are written to WAL (before fsync). Use for broadcasting changes to other nodes:
+
+```rust
+use std::sync::mpsc::Sender;
+
+let (tx, rx) = std::sync::mpsc::channel();
+
+pcrdt.add_post_hook(Box::new(move |changes| {
+    // Send to network layer for broadcast
+    let _ = tx.send(changes.to_vec());
+}));
+```
+
+#### Snapshot Hook
+
+Called after a snapshot is created and sealed. Use for uploading to cloud storage:
+
+```rust
+pcrdt.add_snapshot_hook(Box::new(move |snapshot_path| {
+    let path = snapshot_path.clone();
+
+    // Spawn async upload task
+    tokio::spawn(async move {
+        let data = tokio::fs::read(&path).await.unwrap();
+        // Upload to R2, S3, etc.
+        // r2.put(format!("snapshots/{}", path.file_name()?), data).await?;
+
+        // Mark as uploaded for safe cleanup
+        // pcrdt.lock().unwrap().mark_snapshot_uploaded(path);
+    });
+}));
+```
+
+#### WAL Segment Hook
+
+Called after a WAL segment is sealed (rotated). Use for archival:
+
+```rust
+pcrdt.add_wal_segment_hook(Box::new(move |segment_path| {
+    let path = segment_path.clone();
+
+    tokio::spawn(async move {
+        let data = tokio::fs::read(&path).await.unwrap();
+        // Archive to cloud storage
+        // r2.put(format!("wal/{}", path.file_name()?), data).await?;
+    });
+}));
+```
+
+### Batch Collector
+
+Accumulate changes for efficient network broadcasting:
+
+```rust
+// Perform multiple operations
+pcrdt.insert_or_update(&"user1".to_string(), fields1)?;
+pcrdt.insert_or_update(&"user2".to_string(), fields2)?;
+
+// Collect all changes since last call
+let batch = pcrdt.take_batch();
+
+// Broadcast to other nodes
+broadcast_to_peers(batch);
+```
+
+**Auto-flush protection:** By default, the batch is cleared when it reaches 10,000 changes to prevent OOM. Call `take_batch()` regularly to avoid losing changes.
+
+### Upload Tracking and Cleanup
+
+For cloud backup workflows, track which files have been uploaded before deleting them:
+
+```rust
+// After successful upload
+pcrdt.mark_snapshot_uploaded(snapshot_path);
+pcrdt.mark_wal_segment_uploaded(segment_path);
+
+// Cleanup only uploaded files (safe - won't lose data)
+pcrdt.cleanup_old_snapshots(2, true)?; // Keep 2, require uploaded
+pcrdt.cleanup_old_wal_segments(5, true)?; // Keep 5, require uploaded
+
+// Or cleanup all old files (after snapshot creation)
+pcrdt.cleanup_old_snapshots(2, false)?; // Unconditional cleanup
+```
+
+### Crash Recovery
+
+Recovery is automatic on `open()`:
+
+```rust
+// After crash, simply open again
+let pcrdt = PersistedCRDT::<String, String, String>::open(
+    PathBuf::from("./data"),
+    1,
+    PersistConfig::default(),
+)?;
+
+// All data is recovered from snapshot + WAL replay
+```
+
+### Durability Guarantees
+
+**Design choice:** WAL writes are flushed to OS but NOT fsynced per-operation for CRDT performance:
+
+- ✅ Changes written to WAL before broadcast (minimizes network latency)
+- ✅ Changes fsynced during snapshot creation (periodic durability)
+- ⚠️ Crash before snapshot = possible local data loss
+- ✅ Peers have the data from broadcast (system-wide consistency maintained)
+
+This design prioritizes CRDT convergence over local durability. For stronger durability guarantees, decrease `snapshot_threshold`.
+
+### Tombstone Compaction
+
+After all nodes acknowledge a version, compact tombstones to reclaim memory:
+
+```rust
+// Track acknowledgments from all nodes
+let min_acknowledged = get_min_ack_from_all_nodes();
+
+// Atomically compact tombstones and cleanup WAL
+pcrdt.compact_tombstones(min_acknowledged)?;
+```
+
+**Critical:** Only compact after ALL nodes acknowledge the version, or deleted records will reappear (zombie records).
+
+### Examples
+
+See working examples in the repository:
+- `examples/persistence_example.rs` - Basic persistence with hooks
+- `examples/r2_backup_example.rs` - Cloud backup workflow with R2
+
+Run with:
+```bash
+cargo run --example persistence_example --features persist
+cargo run --example r2_backup_example --features persist
+```
+
 ## Synchronization
 
 ### Basic Sync Protocol
@@ -558,12 +755,18 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 ### Completed
 - [x] `serde` integration for serialization (v0.2.0)
 - [x] WebAssembly support via `no_std` + `alloc` (v0.2.0)
+- [x] Persistence layer with WAL and snapshots (v0.5.0)
+- [x] Hook system for post-operation, snapshot, and WAL events (v0.5.0)
+- [x] Batch collector for efficient network broadcasting (v0.5.0)
 
 ## Testing
 
 ```bash
-# Rust
+# Rust - All tests
 cargo test
+
+# Rust - Persistence layer tests
+cargo test --features persist
 
 # C++ - Column CRDT
 g++ -std=c++20 tests.cpp -o tests && ./tests
