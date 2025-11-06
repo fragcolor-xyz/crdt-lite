@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = PathBuf::from("./r2_backup_example_data");
     let config = PersistConfig {
         snapshot_threshold: 3, // Snapshot every 3 changes for demo
-        enable_compression: false,
         auto_cleanup_snapshots: None, // Manual cleanup after upload verification
+        max_batch_size: Some(10000), // Default auto-flush limit
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(
@@ -106,7 +106,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    Local snapshots: {}", snapshot_count_before);
 
     // Keep only last 2 snapshots locally (rest are in R2)
-    pcrdt.cleanup_old_snapshots(2)?;
+    // Note: In a real implementation, use require_uploaded=true and track uploads with mark_snapshot_uploaded()
+    // For this demo, we use false to cleanup all old snapshots
+    pcrdt.cleanup_old_snapshots(2, false)?;
 
     let snapshot_count_after = std::fs::read_dir(&data_dir)?
         .filter_map(|e| e.ok())

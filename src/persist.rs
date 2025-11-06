@@ -92,19 +92,21 @@ use wal::WalWriter;
 pub struct PersistConfig {
     /// Number of changes before automatic snapshot creation (default: 1000)
     pub snapshot_threshold: usize,
-    /// Whether to enable compression for snapshots and WAL files (default: false)
-    pub enable_compression: bool,
     /// Auto-cleanup old snapshots after rotation (None = manual cleanup only, Some(N) = keep N most recent)
     /// Default: Some(3) to prevent unbounded disk growth
     pub auto_cleanup_snapshots: Option<usize>,
+    /// Maximum number of changes to accumulate in batch_collector before auto-flush
+    /// Default: Some(10000) to prevent unbounded memory growth
+    /// Set to None to disable auto-flush (you MUST call take_batch() periodically)
+    pub max_batch_size: Option<usize>,
 }
 
 impl Default for PersistConfig {
     fn default() -> Self {
         Self {
             snapshot_threshold: 1000,
-            enable_compression: false,
             auto_cleanup_snapshots: Some(3),
+            max_batch_size: Some(10000),
         }
     }
 }
@@ -194,6 +196,8 @@ where
     batch_collector: Vec<Change<K, C, V>>,
     /// Snapshots that have been successfully uploaded (for safe auto-cleanup)
     uploaded_snapshots: HashSet<PathBuf>,
+    /// WAL segments that have been successfully uploaded (for safe auto-cleanup)
+    uploaded_wal_segments: HashSet<PathBuf>,
 }
 
 impl<K, C, V> PersistedCRDT<K, C, V>
@@ -242,6 +246,7 @@ where
             base_path,
             batch_collector: Vec::new(),
             uploaded_snapshots: HashSet::new(),
+            uploaded_wal_segments: HashSet::new(),
         })
     }
 
@@ -278,22 +283,22 @@ where
 
     /// Returns the accumulated batch of changes and clears the collector.
     ///
-    /// **IMPORTANT**: You MUST call this method periodically to prevent unbounded memory growth.
-    /// The batch collector accumulates ALL changes from every operation until `take_batch()` is called.
+    /// # Auto-Flush Protection
     ///
-    /// # Memory Usage
+    /// By default (`max_batch_size: Some(10000)`), the batch is automatically cleared when it reaches
+    /// 10,000 changes to prevent OOM. **Changes are discarded silently** when this happens!
+    ///
+    /// To prevent losing changes:
+    /// - Call `take_batch()` regularly (every 100-1000 ops or 1-10 seconds)
+    /// - Monitor batch size with `peek_batch().len()`
+    /// - Set `max_batch_size: None` if you have a reliable polling loop
+    ///
+    /// # Memory Usage Without Auto-Flush
     ///
     /// At 1000 ops/sec with typical changes (~200 bytes each):
     /// - After 1 second: ~200 KB
     /// - After 1 minute: ~12 MB
-    /// - After 1 hour: ~720 MB
-    ///
-    /// # Recommended Usage
-    ///
-    /// Call `take_batch()`:
-    /// - Every 100-1000 operations (depending on your network batch size)
-    /// - Or every 1-10 seconds (depending on your latency requirements)
-    /// - Before snapshots (to ensure all changes are broadcast)
+    /// - After 1 hour: ~720 MB (exceeds default limit after 10 seconds)
     ///
     /// # Example
     ///
@@ -366,6 +371,38 @@ where
         self.uploaded_snapshots.insert(snapshot_path);
     }
 
+    /// Mark a WAL segment as successfully uploaded.
+    ///
+    /// Used in conjunction with `cleanup_old_wal_segments(keep_count, true)` to ensure
+    /// only uploaded segments are deleted.
+    ///
+    /// # Example with R2 Upload
+    ///
+    /// ```ignore
+    /// struct R2Uploader {
+    ///     pcrdt: Arc<Mutex<PersistedCRDT<String, String, String>>>,
+    /// }
+    ///
+    /// impl WalSegmentHook for R2Uploader {
+    ///     fn on_wal_sealed(&self, segment_path: &PathBuf) {
+    ///         let path = segment_path.clone();
+    ///         let pcrdt = self.pcrdt.clone();
+    ///
+    ///         // Spawn async upload task
+    ///         tokio::spawn(async move {
+    ///             // Upload to R2...
+    ///             // r2.put(segment_path, data).await?;
+    ///
+    ///             // Mark as uploaded for safe cleanup
+    ///             pcrdt.lock().unwrap().mark_wal_segment_uploaded(path);
+    ///         });
+    ///     }
+    /// }
+    /// ```
+    pub fn mark_wal_segment_uploaded(&mut self, segment_path: PathBuf) {
+        self.uploaded_wal_segments.insert(segment_path);
+    }
+
     /// Manually trigger a snapshot.
     ///
     /// This writes the current CRDT state to disk, fsyncs it, and rotates the WAL.
@@ -381,12 +418,23 @@ where
 
     /// Deletes old snapshot files, keeping only the N most recent.
     ///
-    /// **IMPORTANT**: Only deletes snapshots that have been marked as uploaded via
-    /// `mark_snapshot_uploaded()`. This prevents data loss if upload hooks fail.
-    ///
     /// # Arguments
     ///
-    /// * `keep_count` - Number of most recent snapshots to keep (among uploaded ones)
+    /// * `keep_count` - Number of most recent snapshots to keep
+    /// * `require_uploaded` - If `true`, only delete snapshots marked via `mark_snapshot_uploaded()`.
+    ///                        If `false`, delete ALL old snapshots (used by auto-cleanup).
+    ///
+    /// # When to Use Each Mode
+    ///
+    /// **`require_uploaded: false`** (default for auto-cleanup):
+    /// - Prevents unbounded disk growth automatically
+    /// - Safe when snapshots are expendable (can recover from WAL)
+    /// - Used by `auto_cleanup_snapshots` config option
+    ///
+    /// **`require_uploaded: true`** (for R2 backup workflows):
+    /// - Only deletes snapshots that have been successfully uploaded
+    /// - Prevents data loss if upload hooks fail
+    /// - Call after verifying remote backup success
     ///
     /// # Example
     ///
@@ -396,15 +444,19 @@ where
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
     /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
-    /// // After uploading to R2 and marking as uploaded, keep only last 2 snapshots locally
-    /// pcrdt.cleanup_old_snapshots(2)?;
+    /// // Auto-cleanup: delete all old snapshots (default behavior)
+    /// pcrdt.cleanup_old_snapshots(2, false)?;
+    ///
+    /// // R2 workflow: only delete uploaded snapshots
+    /// // (after marking them with mark_snapshot_uploaded)
+    /// pcrdt.cleanup_old_snapshots(2, true)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn cleanup_old_snapshots(&mut self, keep_count: usize) -> Result<(), PersistError> {
+    pub fn cleanup_old_snapshots(&mut self, keep_count: usize, require_uploaded: bool) -> Result<(), PersistError> {
         let mut snapshots = Vec::new();
 
-        // Find all snapshot files that have been marked as uploaded
+        // Find all snapshot files
         if let Ok(entries) = std::fs::read_dir(&self.base_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -412,8 +464,14 @@ where
                 let filename_str = filename.to_string_lossy();
 
                 if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
-                    // Only include snapshots that have been marked as successfully uploaded
-                    if self.uploaded_snapshots.contains(&path) {
+                    // Include based on require_uploaded setting
+                    let should_include = if require_uploaded {
+                        self.uploaded_snapshots.contains(&path)
+                    } else {
+                        true // Include all snapshots
+                    };
+
+                    if should_include {
                         if let Some(num_str) = filename_str
                             .strip_prefix("snapshot_")
                             .and_then(|s| s.strip_suffix(".bin"))
@@ -430,10 +488,10 @@ where
         // Sort by version (newest first)
         snapshots.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Delete all except the most recent N (only among uploaded snapshots)
+        // Delete all except the most recent N
         for (_, path) in snapshots.iter().skip(keep_count) {
             std::fs::remove_file(path)?;
-            // Remove from tracking set
+            // Remove from tracking set if present
             self.uploaded_snapshots.remove(path);
         }
 
@@ -442,11 +500,23 @@ where
 
     /// Deletes old WAL segment files, keeping only the N most recent.
     ///
-    /// Call this after successfully uploading WAL segments to remote storage.
-    ///
     /// # Arguments
     ///
     /// * `keep_count` - Number of most recent segments to keep
+    /// * `require_uploaded` - If `true`, only delete segments marked via `mark_wal_segment_uploaded()`.
+    ///                        If `false`, delete ALL old segments (used for cleanup after compaction).
+    ///
+    /// # When to Use Each Mode
+    ///
+    /// **`require_uploaded: false`** (for compaction cleanup):
+    /// - Deletes all old WAL segments unconditionally
+    /// - Safe after snapshot creation (snapshot contains all data)
+    /// - Used by `compact_tombstones()` to clean up after compaction
+    ///
+    /// **`require_uploaded: true`** (for R2 backup workflows):
+    /// - Only deletes segments that have been successfully uploaded
+    /// - Prevents data loss if upload hooks fail
+    /// - Call after verifying remote backup success
     ///
     /// # Example
     ///
@@ -456,26 +526,40 @@ where
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
     /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
-    /// // After uploading to R2, keep only last 3 WAL segments locally
-    /// pcrdt.cleanup_old_wal_segments(3)?;
+    /// // Compaction cleanup: delete all old segments (after snapshot)
+    /// pcrdt.cleanup_old_wal_segments(0, false)?;
+    ///
+    /// // R2 workflow: only delete uploaded segments
+    /// // (after marking them with mark_wal_segment_uploaded)
+    /// pcrdt.cleanup_old_wal_segments(3, true)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn cleanup_old_wal_segments(&self, keep_count: usize) -> Result<(), PersistError> {
+    pub fn cleanup_old_wal_segments(&mut self, keep_count: usize, require_uploaded: bool) -> Result<(), PersistError> {
         let mut segments = Vec::new();
 
         // Find all WAL segment files
         if let Ok(entries) = std::fs::read_dir(&self.base_path) {
             for entry in entries.flatten() {
+                let path = entry.path();
                 let filename = entry.file_name();
                 let filename_str = filename.to_string_lossy();
                 if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
-                    if let Some(num_str) = filename_str
-                        .strip_prefix("wal_")
-                        .and_then(|s| s.strip_suffix(".bin"))
-                    {
-                        if let Ok(segment_num) = num_str.parse::<u64>() {
-                            segments.push((segment_num, entry.path()));
+                    // Include based on require_uploaded setting
+                    let should_include = if require_uploaded {
+                        self.uploaded_wal_segments.contains(&path)
+                    } else {
+                        true // Include all segments
+                    };
+
+                    if should_include {
+                        if let Some(num_str) = filename_str
+                            .strip_prefix("wal_")
+                            .and_then(|s| s.strip_suffix(".bin"))
+                        {
+                            if let Ok(segment_num) = num_str.parse::<u64>() {
+                                segments.push((segment_num, path));
+                            }
                         }
                     }
                 }
@@ -488,6 +572,8 @@ where
         // Delete all except the most recent N
         for (_, path) in segments.iter().skip(keep_count) {
             std::fs::remove_file(path)?;
+            // Remove from tracking set if present
+            self.uploaded_wal_segments.remove(path);
         }
 
         Ok(())
@@ -632,8 +718,9 @@ where
         let _ = self.wal.rotate(&self.base_path, &self.wal_segment_hooks)?;
 
         // Auto-cleanup old snapshots if configured
+        // Use require_uploaded=false to actually delete old snapshots (prevents disk bloat)
         if let Some(keep_count) = self.config.auto_cleanup_snapshots {
-            let _ = self.cleanup_old_snapshots(keep_count);
+            let _ = self.cleanup_old_snapshots(keep_count, false);
         }
 
         // Reset counter
@@ -660,6 +747,15 @@ where
 
         // Add to batch collector
         self.batch_collector.extend_from_slice(changes);
+
+        // Check if batch size limit exceeded and auto-flush if needed
+        if let Some(max_size) = self.config.max_batch_size {
+            if self.batch_collector.len() >= max_size {
+                // Auto-flush: clear the batch to prevent OOM
+                // Applications should call take_batch() before this happens
+                self.batch_collector.clear();
+            }
+        }
 
         // Call post-hooks
         for hook in &self.post_hooks {
@@ -807,25 +903,8 @@ where
 
     /// Compacts tombstones that have been acknowledged by all nodes.
     ///
-    /// **IMPORTANT**: Only call this after verifying all nodes have acknowledged
-    /// the `min_acknowledged_version`. Otherwise, deleted records may reappear.
-    ///
-    /// **CRITICAL**: After calling this method, you MUST call `cleanup_old_wal_segments(0)`
-    /// to delete old WAL segments that contain tombstone records. Failure to do so will
-    /// cause zombie records to reappear on recovery (WAL replay will restore deleted records).
-    ///
-    /// For safer automatic cleanup, use `compact_tombstones_with_cleanup()` instead.
-    pub fn compact_tombstones(&mut self, min_acknowledged_version: u64) -> Result<(), PersistError> {
-        self.crdt.compact_tombstones(min_acknowledged_version);
-        // Force snapshot after compaction to persist the cleaned state
-        self.create_snapshot()?;
-        Ok(())
-    }
-
-    /// Compacts tombstones and automatically cleans up old WAL segments.
-    ///
-    /// This is the safe, atomic version of tombstone compaction that prevents zombie records.
-    /// It performs:
+    /// This method performs atomic tombstone compaction with automatic WAL cleanup
+    /// to prevent zombie records. It performs:
     /// 1. Tombstone compaction in memory
     /// 2. Snapshot creation with compacted state
     /// 3. Deletion of old WAL segments (which contain tombstone records)
@@ -850,11 +929,11 @@ where
     /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
     /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
     /// // After confirming all nodes have acknowledged version 1000
-    /// pcrdt.compact_tombstones_with_cleanup(1000)?;
+    /// pcrdt.compact_tombstones(1000)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn compact_tombstones_with_cleanup(&mut self, min_acknowledged_version: u64) -> Result<(), PersistError> {
+    pub fn compact_tombstones(&mut self, min_acknowledged_version: u64) -> Result<(), PersistError> {
         // Compact tombstones in memory
         self.crdt.compact_tombstones(min_acknowledged_version);
 
@@ -863,7 +942,8 @@ where
 
         // CRITICAL: Delete old WAL segments that contain tombstone records
         // Failure to do this causes zombie records to reappear on recovery
-        self.cleanup_old_wal_segments(0)?;
+        // Use require_uploaded=false to unconditionally delete all old segments
+        self.cleanup_old_wal_segments(0, false)?;
 
         Ok(())
     }

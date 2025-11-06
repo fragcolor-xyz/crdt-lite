@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = PathBuf::from("./example_data");
     let config = PersistConfig {
         snapshot_threshold: 5, // Snapshot every 5 changes
-        enable_compression: false,
         auto_cleanup_snapshots: Some(3), // Keep 3 most recent snapshots
+        max_batch_size: Some(1000), // Auto-flush batch after 1000 changes
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(
