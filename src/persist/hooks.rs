@@ -43,10 +43,10 @@ impl std::error::Error for HookError {}
 ///
 /// ```
 /// use crdt_lite::persist::{PreOpHook, HookError};
-/// use crdt_lite::Change;
+/// use crdt_lite::{Change, NodeId};
 ///
 /// struct ValidateNodeId {
-///     allowed_nodes: Vec<u64>,
+///     allowed_nodes: Vec<NodeId>,
 /// }
 ///
 /// impl PreOpHook<String, String, String> for ValidateNodeId {
