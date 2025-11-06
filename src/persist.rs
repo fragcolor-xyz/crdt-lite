@@ -35,7 +35,7 @@
 mod hooks;
 mod wal;
 
-pub use hooks::{HookError, PostOpHook, PreOpHook, SnapshotHook, WalSegmentHook};
+pub use hooks::{PostOpHook, SnapshotHook, WalSegmentHook};
 
 use crate::{Change, DefaultMergeRule, MergeRule, NodeId, CRDT};
 use std::collections::HashSet;
@@ -71,8 +71,6 @@ pub enum PersistError {
     Codec(bincode::error::EncodeError),
     /// Deserialization error
     Decode(bincode::error::DecodeError),
-    /// Hook rejected the operation
-    HookRejection(HookError),
     /// Invalid persistence directory structure
     InvalidDirectory(String),
 }
@@ -83,7 +81,6 @@ impl std::fmt::Display for PersistError {
             PersistError::Io(e) => write!(f, "I/O error: {}", e),
             PersistError::Codec(e) => write!(f, "Encoding error: {}", e),
             PersistError::Decode(e) => write!(f, "Decoding error: {}", e),
-            PersistError::HookRejection(e) => write!(f, "Hook rejected operation: {}", e),
             PersistError::InvalidDirectory(msg) => write!(f, "Invalid directory: {}", msg),
         }
     }
@@ -106,12 +103,6 @@ impl From<bincode::error::EncodeError> for PersistError {
 impl From<bincode::error::DecodeError> for PersistError {
     fn from(e: bincode::error::DecodeError) -> Self {
         PersistError::Decode(e)
-    }
-}
-
-impl From<HookError> for PersistError {
-    fn from(e: HookError) -> Self {
-        PersistError::HookRejection(e)
     }
 }
 
@@ -140,8 +131,6 @@ where
     wal: WalWriter<K, C, V>,
     /// Persistence configuration
     config: PersistConfig,
-    /// Pre-operation hooks (validation)
-    pre_hooks: Vec<Box<dyn PreOpHook<K, C, V>>>,
     /// Post-operation hooks (broadcasting)
     post_hooks: Vec<Box<dyn PostOpHook<K, C, V>>>,
     /// Snapshot hooks (backup/replication)
@@ -196,7 +185,6 @@ where
             crdt,
             wal,
             config,
-            pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
             snapshot_hooks: Vec::new(),
             wal_segment_hooks: Vec::new(),
@@ -212,14 +200,6 @@ where
     /// Use this for queries that don't modify the CRDT state.
     pub fn crdt(&self) -> &CRDT<K, C, V> {
         &self.crdt
-    }
-
-    /// Adds a pre-operation hook for validation.
-    ///
-    /// Pre-hooks are called before any operation is applied to the CRDT.
-    /// If any hook returns an error, the operation is rejected.
-    pub fn add_pre_hook(&mut self, hook: Box<dyn PreOpHook<K, C, V>>) {
-        self.pre_hooks.push(hook);
     }
 
     /// Adds a post-operation hook for broadcasting.

@@ -407,6 +407,9 @@ fn test_compact_tombstones_with_persistence() {
     // Tombstone should be gone
     assert_eq!(pcrdt.crdt().tombstone_count(), 0);
 
+    // Cleanup old WAL segments (which contain the tombstone) to persist the compaction
+    pcrdt.cleanup_old_wal_segments(0).unwrap();
+
     // Reopen and verify compaction persisted
     let pcrdt =
         PersistedCRDT::<String, String, String>::open(dir.clone(), 1, PersistConfig::default())

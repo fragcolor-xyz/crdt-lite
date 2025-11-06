@@ -1,76 +1,14 @@
-//! Hook system for pre-operation and post-operation callbacks.
+//! Hook system for post-operation callbacks and file sealing notifications.
 //!
 //! Hooks enable:
-//! - Pre-operation validation (can reject operations)
 //! - Post-operation broadcasting (notify after successful operations)
 //! - Snapshot notifications (for backup/replication)
 //! - WAL segment sealing (for archival)
 //! - Integration with network layers
-//! - Custom business logic enforcement
 
 use crate::Change;
 use std::hash::Hash;
 use std::path::PathBuf;
-
-/// Error type for hook rejections.
-#[derive(Debug, Clone)]
-pub struct HookError {
-    pub message: String,
-}
-
-impl HookError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for HookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for HookError {}
-
-/// Pre-operation hook for validation.
-///
-/// Called before an operation is applied to the CRDT. If any pre-hook
-/// returns an error, the operation is rejected and not applied.
-///
-/// # Example
-///
-/// ```
-/// use crdt_lite::persist::{PreOpHook, HookError};
-/// use crdt_lite::{Change, NodeId};
-///
-/// struct ValidateNodeId {
-///     allowed_nodes: Vec<NodeId>,
-/// }
-///
-/// impl PreOpHook<String, String, String> for ValidateNodeId {
-///     fn before_op(&self, changes: &[Change<String, String, String>]) -> Result<(), HookError> {
-///         for change in changes {
-///             if !self.allowed_nodes.contains(&change.node_id) {
-///                 return Err(HookError::new(format!("Node {} not allowed", change.node_id)));
-///             }
-///         }
-///         Ok(())
-///     }
-/// }
-/// ```
-pub trait PreOpHook<K, C, V>
-where
-    K: Hash + Eq + Clone,
-    C: Hash + Eq + Clone,
-    V: Clone,
-{
-    /// Called before changes are applied.
-    ///
-    /// Return `Ok(())` to allow the operation, or `Err(HookError)` to reject it.
-    fn before_op(&self, changes: &[Change<K, C, V>]) -> Result<(), HookError>;
-}
 
 /// Post-operation hook for broadcasting.
 ///
@@ -176,18 +114,6 @@ pub trait WalSegmentHook {
 
 // Convenience implementations for closures
 
-impl<K, C, V, F> PreOpHook<K, C, V> for F
-where
-    K: Hash + Eq + Clone,
-    C: Hash + Eq + Clone,
-    V: Clone,
-    F: Fn(&[Change<K, C, V>]) -> Result<(), HookError>,
-{
-    fn before_op(&self, changes: &[Change<K, C, V>]) -> Result<(), HookError> {
-        self(changes)
-    }
-}
-
 impl<K, C, V, F> PostOpHook<K, C, V> for F
 where
     K: Hash + Eq + Clone,
@@ -245,42 +171,5 @@ mod tests {
         hook.after_op(&changes);
 
         assert_eq!(*counter.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn test_pre_hook_rejection() {
-        let hook = |changes: &[Change<String, String, String>]| {
-            for change in changes {
-                if change.node_id == 999 {
-                    return Err(HookError::new("Invalid node"));
-                }
-            }
-            Ok(())
-        };
-
-        let good_change = vec![Change {
-            record_id: "rec1".to_string(),
-            col_name: Some("field1".to_string()),
-            value: Some("value1".to_string()),
-            col_version: 1,
-            db_version: 1,
-            node_id: 1,
-            local_db_version: 1,
-            flags: 0,
-        }];
-
-        let bad_change = vec![Change {
-            record_id: "rec1".to_string(),
-            col_name: Some("field1".to_string()),
-            value: Some("value1".to_string()),
-            col_version: 1,
-            db_version: 1,
-            node_id: 999,
-            local_db_version: 1,
-            flags: 0,
-        }];
-
-        assert!(hook.before_op(&good_change).is_ok());
-        assert!(hook.before_op(&bad_change).is_err());
     }
 }

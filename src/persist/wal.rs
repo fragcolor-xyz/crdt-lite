@@ -99,13 +99,14 @@ where
         Ok(())
     }
 
-    /// Rotates to a new WAL segment, sealing and cleaning up old ones.
+    /// Rotates to a new WAL segment, sealing old ones.
     ///
-    /// Called after snapshot creation. Calls hooks on sealed segments, then deletes them.
-    /// Returns paths of sealed segments (before deletion, for info purposes).
+    /// Called after snapshot creation. Fsyncs current segment, calls hooks on sealed segments.
+    /// Returns paths of sealed segments. Does NOT delete them - use cleanup_old_wal_segments() after successful upload.
     pub fn rotate(&mut self, base_path: &Path, hooks: &[Box<dyn super::hooks::WalSegmentHook>]) -> io::Result<Vec<PathBuf>> {
-        // Flush current file
+        // Flush and fsync current file to ensure data is on disk before hooks fire
         self.current_file.flush()?;
+        self.current_file.get_ref().sync_all()?;
 
         // Collect all existing WAL segment paths (these are now sealed)
         let mut sealed_segments = Vec::new();
@@ -132,18 +133,16 @@ where
         // Replace the current BufWriter, dropping the old one and closing the old file handle
         self.current_file = BufWriter::new(new_file);
 
-        // Now it's safe to call hooks and delete old segments (old file is closed)
+        // Now call hooks on sealed segments (old file is closed, data is fsynced)
         for segment_path in &sealed_segments {
             for hook in hooks {
                 hook.on_wal_sealed(segment_path);
             }
         }
 
-        // Delete old segments (they're redundant with snapshot)
-        for segment_path in &sealed_segments {
-            let _ = std::fs::remove_file(segment_path);
-        }
-
+        // Return sealed segment paths for tracking
+        // NOTE: Segments are NOT deleted here - caller should use cleanup_old_wal_segments()
+        // after confirming successful upload to avoid data loss if hooks fail
         Ok(sealed_segments)
     }
 
@@ -273,8 +272,8 @@ mod tests {
         let hooks: Vec<Box<dyn WalSegmentHook>> = Vec::new();
         writer.rotate(&temp_dir, &hooks).unwrap();
 
-        // Old segment should be deleted, new segment 2 should exist
-        assert!(!temp_dir.join("wal_000001.bin").exists(), "Old segment should be deleted");
+        // Old segment should still exist (not auto-deleted), new segment 2 should exist
+        assert!(temp_dir.join("wal_000001.bin").exists(), "Old segment should still exist");
         assert!(temp_dir.join("wal_000002.bin").exists(), "New segment should exist");
 
         // Write to new segment
