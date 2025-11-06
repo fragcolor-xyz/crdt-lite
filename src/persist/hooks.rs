@@ -57,7 +57,7 @@ use std::path::PathBuf;
 ///     }
 /// }
 /// ```
-pub trait PostOpHook<K, C, V>
+pub trait PostOpHook<K, C, V>: Send + Sync
 where
     K: Hash + Eq + Clone,
     C: Hash + Eq + Clone,
@@ -107,7 +107,7 @@ where
 ///     }
 /// }
 /// ```
-pub trait SnapshotHook {
+pub trait SnapshotHook: Send + Sync {
     /// Called after a snapshot has been created and sealed.
     ///
     /// The snapshot file is immutable and safe for async upload.
@@ -146,7 +146,7 @@ pub trait SnapshotHook {
 ///     }
 /// }
 /// ```
-pub trait WalSegmentHook {
+pub trait WalSegmentHook: Send + Sync {
     /// Called after a WAL segment has been sealed (no longer active).
     ///
     /// The segment file is immutable and safe for async upload.
@@ -160,7 +160,7 @@ where
     K: Hash + Eq + Clone,
     C: Hash + Eq + Clone,
     V: Clone,
-    F: Fn(&[Change<K, C, V>]),
+    F: Fn(&[Change<K, C, V>]) + Send + Sync,
 {
     fn after_op(&self, changes: &[Change<K, C, V>]) {
         self(changes)
@@ -169,7 +169,7 @@ where
 
 impl<F> SnapshotHook for F
 where
-    F: Fn(&PathBuf),
+    F: Fn(&PathBuf) + Send + Sync,
 {
     fn on_snapshot(&self, snapshot_path: &PathBuf) {
         self(snapshot_path)
@@ -178,7 +178,7 @@ where
 
 impl<F> WalSegmentHook for F
 where
-    F: Fn(&PathBuf),
+    F: Fn(&PathBuf) + Send + Sync,
 {
     fn on_wal_sealed(&self, segment_path: &PathBuf) {
         self(segment_path)
