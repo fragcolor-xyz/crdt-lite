@@ -122,6 +122,7 @@ fn test_snapshot_rotation() {
     let config = PersistConfig {
         snapshot_threshold: 5,
         enable_compression: false,
+        auto_cleanup_snapshots: None, // Manual cleanup for testing
     };
 
     let mut pcrdt =

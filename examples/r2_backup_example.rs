@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = PersistConfig {
         snapshot_threshold: 3, // Snapshot every 3 changes for demo
         enable_compression: false,
+        auto_cleanup_snapshots: None, // Manual cleanup after upload verification
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(

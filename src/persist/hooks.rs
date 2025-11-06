@@ -15,6 +15,13 @@ use std::path::PathBuf;
 /// Called after an operation has been successfully applied and persisted.
 /// Post-hooks cannot reject operations and should not block for long periods.
 ///
+/// # Safety Contract
+///
+/// Hooks MUST NOT:
+/// - Panic (will crash the application)
+/// - Block for extended periods (will delay all CRDT operations)
+/// - Perform synchronous I/O (use async channels instead)
+///
 /// # Example
 ///
 /// ```no_run
@@ -51,6 +58,13 @@ where
 /// Called after a snapshot has been created and fsynced to disk.
 /// The snapshot file is immutable (sealed) and safe to copy/upload.
 ///
+/// # Safety Contract
+///
+/// Hooks MUST NOT:
+/// - Panic (will crash the application)
+/// - Block for extended periods (will delay snapshot creation)
+/// - Perform synchronous I/O (use async channels/tasks instead)
+///
 /// # Example
 ///
 /// ```ignore
@@ -85,6 +99,13 @@ pub trait SnapshotHook {
 ///
 /// Called after a WAL segment has been sealed (rotated out).
 /// The segment file is immutable and safe to copy/upload.
+///
+/// # Safety Contract
+///
+/// Hooks MUST NOT:
+/// - Panic (will crash the application)
+/// - Block for extended periods (will delay WAL rotation)
+/// - Perform synchronous I/O (use async channels/tasks instead)
 ///
 /// # Example
 ///

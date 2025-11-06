@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = PersistConfig {
         snapshot_threshold: 5, // Snapshot every 5 changes
         enable_compression: false,
+        auto_cleanup_snapshots: Some(3), // Keep 3 most recent snapshots
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(

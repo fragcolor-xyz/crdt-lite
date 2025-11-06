@@ -6,6 +6,13 @@
 //! - Provides hooks for post-operation broadcasting and file sealing notifications
 //! - Returns changes from all operations for async network propagation
 //!
+//! # Platform Notes
+//!
+//! **Windows**: File locking is stricter than Unix. The implementation includes 10ms sleeps
+//! after file handle releases to allow the OS to propagate lock releases. Under heavy load
+//! or slow systems, this may still fail. If you encounter `PermissionDenied` errors on Windows,
+//! consider adding retry logic in your application.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -51,6 +58,9 @@ pub struct PersistConfig {
     pub snapshot_threshold: usize,
     /// Whether to enable compression for snapshots and WAL files (default: false)
     pub enable_compression: bool,
+    /// Auto-cleanup old snapshots after rotation (None = manual cleanup only, Some(N) = keep N most recent)
+    /// Default: Some(3) to prevent unbounded disk growth
+    pub auto_cleanup_snapshots: Option<usize>,
 }
 
 impl Default for PersistConfig {
@@ -58,6 +68,7 @@ impl Default for PersistConfig {
         Self {
             snapshot_threshold: 1000,
             enable_compression: false,
+            auto_cleanup_snapshots: Some(3),
         }
     }
 }
@@ -431,8 +442,16 @@ where
             })
             .collect();
 
-        // Sort by filename to replay in order
-        wal_files.sort_by_key(|entry| entry.file_name());
+        // Sort by segment number (parse numerically for correctness)
+        wal_files.sort_by_key(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix("wal_")
+                .and_then(|s| s.strip_suffix(".bin"))
+                .and_then(|num| num.parse::<u64>().ok())
+                .unwrap_or(0)
+        });
 
         // Replay each WAL file
         for entry in wal_files {
@@ -471,7 +490,10 @@ where
             drop(file);
         }
 
-        // On Windows, give OS time to release file locks
+        // On Windows, give OS time to release file locks after explicit drop()
+        // Windows file system operations are asynchronous at kernel level - even after drop(),
+        // the handle may not be fully released immediately, causing subsequent directory ops to fail.
+        // 10ms is typically sufficient, but under heavy load this could still fail.
         #[cfg(target_os = "windows")]
         std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -480,8 +502,14 @@ where
             hook.on_snapshot(&snapshot_path);
         }
 
-        // Rotate WAL (seals old segments, calls hooks, deletes them, starts new one)
+        // Rotate WAL (seals old segments, calls hooks, starts new segment)
+        // Note: Old segments are NOT auto-deleted - call cleanup_old_wal_segments() after upload
         let _ = self.wal.rotate(&self.base_path, &self.wal_segment_hooks)?;
+
+        // Auto-cleanup old snapshots if configured
+        if let Some(keep_count) = self.config.auto_cleanup_snapshots {
+            let _ = self.cleanup_old_snapshots(keep_count);
+        }
 
         // Reset counter
         self.changes_since_snapshot = 0;

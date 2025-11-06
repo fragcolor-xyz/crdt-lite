@@ -122,6 +122,9 @@ where
         self.current_file = BufWriter::new(new_file);
 
         // On Windows, give OS time to release file locks before directory operations
+        // Windows file system operations are asynchronous at kernel level - even after replacing
+        // BufWriter (which drops old file), the handle may not be fully released immediately.
+        // 10ms is typically sufficient, but under heavy load this could still fail.
         #[cfg(target_os = "windows")]
         std::thread::sleep(std::time::Duration::from_millis(10));
 
