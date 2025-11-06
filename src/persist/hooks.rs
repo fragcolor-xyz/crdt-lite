@@ -12,8 +12,25 @@ use std::path::PathBuf;
 
 /// Post-operation hook for broadcasting.
 ///
-/// Called after an operation has been successfully applied and persisted.
-/// Post-hooks cannot reject operations and should not block for long periods.
+/// Called after an operation has been successfully applied and **written to WAL**
+/// (but before fsync). This timing is intentional for CRDT broadcast semantics:
+/// minimizing network propagation delay is more important than local durability.
+///
+/// ## Timing Guarantees
+///
+/// When this hook fires:
+/// - ✅ Changes applied to in-memory CRDT
+/// - ✅ Changes written to WAL file
+/// - ✅ WAL buffer flushed to OS page cache
+/// - ❌ NOT yet fsynced to disk (happens during snapshot creation)
+///
+/// **Why before fsync?** For distributed CRDTs:
+/// - Faster broadcast = smaller conflict windows
+/// - If local node crashes before fsync, peers have the data
+/// - On recovery, local node syncs from peers and gets changes back
+/// - System-wide convergence maintained despite local data loss
+///
+/// See module-level docs for full durability discussion.
 ///
 /// # Safety Contract
 ///
@@ -46,7 +63,10 @@ where
     C: Hash + Eq + Clone,
     V: Clone,
 {
-    /// Called after changes have been applied and persisted.
+    /// Called after changes have been applied and written (but not fsynced).
+    ///
+    /// This fires immediately after WAL write to minimize broadcast latency.
+    /// Local fsync is deferred to snapshot time for CRDT performance.
     ///
     /// This should be fast and non-blocking. For network I/O, send changes
     /// to an async task rather than blocking here.

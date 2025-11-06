@@ -6,7 +6,43 @@
 //! - Provides hooks for post-operation broadcasting and file sealing notifications
 //! - Returns changes from all operations for async network propagation
 //!
-//! # Platform Notes
+//! # Durability Guarantees (Important for CRDT Design)
+//!
+//! **By design, WAL writes are NOT fsynced immediately.** This is an intentional design choice
+//! optimized for distributed CRDTs, where eventual consistency is more important than single-node
+//! durability.
+//!
+//! ## What This Means
+//!
+//! - **Crash Safety**: Process crashes are recoverable (data in OS page cache is preserved)
+//! - **Power Failure**: Recent writes (up to `snapshot_threshold` operations, default 1000) may be lost
+//! - **Distributed Safety**: Changes broadcast to network peers are preserved system-wide
+//! - **Fsync Only on Snapshot**: Durability guaranteed every `snapshot_threshold` operations
+//!
+//! ## Why No Fsync Per Write?
+//!
+//! 1. **Performance**: Fsync is expensive (10-100x slower than buffered writes)
+//! 2. **CRDT Semantics**: Eventual consistency means data loss on one node is recoverable
+//!    - If this node crashes before fsync, peers have the data
+//!    - On recovery, this node syncs from peers and gets the changes back
+//!    - System-wide convergence is maintained
+//! 3. **Broadcast First**: Hooks fire before fsync to minimize network propagation delay
+//!    - Faster propagation = smaller conflict windows
+//!    - Local durability deferred to batch fsync during snapshot
+//!
+//! ## When This Design Is Appropriate
+//!
+//! ✅ **Multi-node CRDT deployments** (recommended use case)
+//! - Changes replicate to peers before local fsync
+//! - Crash recovery syncs from network
+//! - No data loss from distributed system perspective
+//!
+//! ⚠️ **Single-node deployments** (not recommended)
+//! - Power failure can lose up to 1000 operations
+//! - No peers to recover from
+//! - Consider reducing `snapshot_threshold` to 10-50 for more frequent fsync
+//!
+//! ## Platform Notes
 //!
 //! **Windows**: File locking is stricter than Unix. The implementation includes 10ms sleeps
 //! after file handle releases to allow the OS to propagate lock releases. Under heavy load
@@ -156,6 +192,8 @@ where
     base_path: PathBuf,
     /// Changes collected for batch operations
     batch_collector: Vec<Change<K, C, V>>,
+    /// Snapshots that have been successfully uploaded (for safe auto-cleanup)
+    uploaded_snapshots: HashSet<PathBuf>,
 }
 
 impl<K, C, V> PersistedCRDT<K, C, V>
@@ -203,6 +241,7 @@ where
             snapshot_version,
             base_path,
             batch_collector: Vec::new(),
+            uploaded_snapshots: HashSet::new(),
         })
     }
 
@@ -239,14 +278,92 @@ where
 
     /// Returns the accumulated batch of changes and clears the collector.
     ///
-    /// Useful for batching multiple operations before network broadcast.
+    /// **IMPORTANT**: You MUST call this method periodically to prevent unbounded memory growth.
+    /// The batch collector accumulates ALL changes from every operation until `take_batch()` is called.
+    ///
+    /// # Memory Usage
+    ///
+    /// At 1000 ops/sec with typical changes (~200 bytes each):
+    /// - After 1 second: ~200 KB
+    /// - After 1 minute: ~12 MB
+    /// - After 1 hour: ~720 MB
+    ///
+    /// # Recommended Usage
+    ///
+    /// Call `take_batch()`:
+    /// - Every 100-1000 operations (depending on your network batch size)
+    /// - Or every 1-10 seconds (depending on your latency requirements)
+    /// - Before snapshots (to ensure all changes are broadcast)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use crdt_lite::persist::{PersistedCRDT, PersistConfig};
+    /// # use std::path::PathBuf;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
+    /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
+    /// // Perform operations...
+    /// for i in 0..100 {
+    ///     pcrdt.insert_or_update(&format!("rec{}", i),
+    ///         [("field".to_string(), "value".to_string())].into_iter())?;
+    /// }
+    ///
+    /// // Take batch and broadcast to network
+    /// let batch = pcrdt.take_batch();
+    /// // network.broadcast(batch);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn take_batch(&mut self) -> Vec<Change<K, C, V>> {
         std::mem::take(&mut self.batch_collector)
     }
 
     /// Returns a reference to the current batch without clearing it.
+    ///
+    /// **WARNING**: This does NOT clear the batch. Memory will continue to grow until
+    /// `take_batch()` is called. See `take_batch()` documentation for memory usage warnings.
     pub fn peek_batch(&self) -> &[Change<K, C, V>] {
         &self.batch_collector
+    }
+
+    /// Marks a snapshot as successfully uploaded.
+    ///
+    /// Call this from a `SnapshotHook` after successfully uploading the snapshot to remote storage.
+    /// Only snapshots marked as uploaded will be eligible for auto-cleanup (if configured).
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_path` - Path to the snapshot file that was uploaded
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// # use crdt_lite::persist::{PersistedCRDT, PersistConfig, SnapshotHook};
+    /// # use std::path::PathBuf;
+    /// # use std::sync::{Arc, Mutex};
+    /// struct R2Uploader {
+    ///     pcrdt: Arc<Mutex<PersistedCRDT<String, String, String>>>,
+    /// }
+    ///
+    /// impl SnapshotHook for R2Uploader {
+    ///     fn on_snapshot(&self, snapshot_path: &PathBuf) {
+    ///         let path = snapshot_path.clone();
+    ///         let pcrdt = self.pcrdt.clone();
+    ///
+    ///         // Spawn async upload task
+    ///         tokio::spawn(async move {
+    ///             // Upload to R2...
+    ///             // r2.put(snapshot_path, data).await?;
+    ///
+    ///             // Mark as uploaded for safe cleanup
+    ///             pcrdt.lock().unwrap().mark_snapshot_uploaded(path);
+    ///         });
+    ///     }
+    /// }
+    /// ```
+    pub fn mark_snapshot_uploaded(&mut self, snapshot_path: PathBuf) {
+        self.uploaded_snapshots.insert(snapshot_path);
     }
 
     /// Manually trigger a snapshot.
@@ -264,11 +381,12 @@ where
 
     /// Deletes old snapshot files, keeping only the N most recent.
     ///
-    /// Call this after successfully uploading snapshots to remote storage.
+    /// **IMPORTANT**: Only deletes snapshots that have been marked as uploaded via
+    /// `mark_snapshot_uploaded()`. This prevents data loss if upload hooks fail.
     ///
     /// # Arguments
     ///
-    /// * `keep_count` - Number of most recent snapshots to keep
+    /// * `keep_count` - Number of most recent snapshots to keep (among uploaded ones)
     ///
     /// # Example
     ///
@@ -278,26 +396,31 @@ where
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
     /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
-    /// // After uploading to R2, keep only last 2 snapshots locally
+    /// // After uploading to R2 and marking as uploaded, keep only last 2 snapshots locally
     /// pcrdt.cleanup_old_snapshots(2)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn cleanup_old_snapshots(&self, keep_count: usize) -> Result<(), PersistError> {
+    pub fn cleanup_old_snapshots(&mut self, keep_count: usize) -> Result<(), PersistError> {
         let mut snapshots = Vec::new();
 
-        // Find all snapshot files
+        // Find all snapshot files that have been marked as uploaded
         if let Ok(entries) = std::fs::read_dir(&self.base_path) {
             for entry in entries.flatten() {
+                let path = entry.path();
                 let filename = entry.file_name();
                 let filename_str = filename.to_string_lossy();
+
                 if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
-                    if let Some(num_str) = filename_str
-                        .strip_prefix("snapshot_")
-                        .and_then(|s| s.strip_suffix(".bin"))
-                    {
-                        if let Ok(version) = num_str.parse::<u64>() {
-                            snapshots.push((version, entry.path()));
+                    // Only include snapshots that have been marked as successfully uploaded
+                    if self.uploaded_snapshots.contains(&path) {
+                        if let Some(num_str) = filename_str
+                            .strip_prefix("snapshot_")
+                            .and_then(|s| s.strip_suffix(".bin"))
+                        {
+                            if let Ok(version) = num_str.parse::<u64>() {
+                                snapshots.push((version, path));
+                            }
                         }
                     }
                 }
@@ -307,9 +430,11 @@ where
         // Sort by version (newest first)
         snapshots.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Delete all except the most recent N
+        // Delete all except the most recent N (only among uploaded snapshots)
         for (_, path) in snapshots.iter().skip(keep_count) {
             std::fs::remove_file(path)?;
+            // Remove from tracking set
+            self.uploaded_snapshots.remove(path);
         }
 
         Ok(())
@@ -684,10 +809,62 @@ where
     ///
     /// **IMPORTANT**: Only call this after verifying all nodes have acknowledged
     /// the `min_acknowledged_version`. Otherwise, deleted records may reappear.
+    ///
+    /// **CRITICAL**: After calling this method, you MUST call `cleanup_old_wal_segments(0)`
+    /// to delete old WAL segments that contain tombstone records. Failure to do so will
+    /// cause zombie records to reappear on recovery (WAL replay will restore deleted records).
+    ///
+    /// For safer automatic cleanup, use `compact_tombstones_with_cleanup()` instead.
     pub fn compact_tombstones(&mut self, min_acknowledged_version: u64) -> Result<(), PersistError> {
         self.crdt.compact_tombstones(min_acknowledged_version);
         // Force snapshot after compaction to persist the cleaned state
         self.create_snapshot()?;
+        Ok(())
+    }
+
+    /// Compacts tombstones and automatically cleans up old WAL segments.
+    ///
+    /// This is the safe, atomic version of tombstone compaction that prevents zombie records.
+    /// It performs:
+    /// 1. Tombstone compaction in memory
+    /// 2. Snapshot creation with compacted state
+    /// 3. Deletion of old WAL segments (which contain tombstone records)
+    ///
+    /// **IMPORTANT**: Only call this after verifying all nodes have acknowledged
+    /// the `min_acknowledged_version`. Otherwise, deleted records may reappear.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_acknowledged_version` - The minimum db_version acknowledged by all nodes
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or `PersistError` if snapshot creation or cleanup fails.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use crdt_lite::persist::{PersistedCRDT, PersistConfig};
+    /// # use std::path::PathBuf;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let mut pcrdt = PersistedCRDT::<String, String, String>::open(
+    /// #     PathBuf::from("./data"), 1, PersistConfig::default())?;
+    /// // After confirming all nodes have acknowledged version 1000
+    /// pcrdt.compact_tombstones_with_cleanup(1000)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn compact_tombstones_with_cleanup(&mut self, min_acknowledged_version: u64) -> Result<(), PersistError> {
+        // Compact tombstones in memory
+        self.crdt.compact_tombstones(min_acknowledged_version);
+
+        // Force snapshot after compaction to persist the cleaned state
+        self.create_snapshot()?;
+
+        // CRITICAL: Delete old WAL segments that contain tombstone records
+        // Failure to do this causes zombie records to reappear on recovery
+        self.cleanup_old_wal_segments(0)?;
+
         Ok(())
     }
 

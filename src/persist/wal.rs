@@ -1,9 +1,17 @@
 //! Write-Ahead Log (WAL) implementation for CRDT persistence.
 //!
 //! The WAL provides append-only storage for CRDT changes with:
-//! - Fast writes without fsync (OS buffering)
+//! - **Fast writes without per-operation fsync** (OS buffering for performance)
 //! - Segmented files for efficient rotation
 //! - Bincode serialization for compact binary format
+//!
+//! # Durability Design
+//!
+//! WAL writes are buffered by the OS and NOT fsynced immediately. This is intentional:
+//! - Fsync only happens during WAL rotation (at snapshot time)
+//! - Process crashes are safe (OS page cache preserved)
+//! - Power failures may lose recent writes (acceptable for distributed CRDTs)
+//! - See parent module docs for full durability discussion
 
 use crate::Change;
 use bincode::config;

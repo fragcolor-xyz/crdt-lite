@@ -400,16 +400,13 @@ fn test_compact_tombstones_with_persistence() {
     assert!(pcrdt.crdt().is_tombstoned(&"rec1".to_string()));
     assert_eq!(pcrdt.crdt().tombstone_count(), 1);
 
-    // Compact tombstones (forces snapshot)
+    // Compact tombstones using the safe atomic method
     // Use a version higher than current to ensure tombstone is compacted
     let clock_time = pcrdt.get_clock_time() + 1;
-    pcrdt.compact_tombstones(clock_time).unwrap();
+    pcrdt.compact_tombstones_with_cleanup(clock_time).unwrap();
 
     // Tombstone should be gone
     assert_eq!(pcrdt.crdt().tombstone_count(), 0);
-
-    // Cleanup old WAL segments (which contain the tombstone) to persist the compaction
-    pcrdt.cleanup_old_wal_segments(0).unwrap();
 
     // Reopen and verify compaction persisted
     let pcrdt =
@@ -417,6 +414,83 @@ fn test_compact_tombstones_with_persistence() {
             .unwrap();
 
     assert_eq!(pcrdt.crdt().tombstone_count(), 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_zombie_record_prevention() {
+    // This test demonstrates that compact_tombstones_with_cleanup() prevents zombie records
+    // whereas compact_tombstones() without cleanup can cause them to reappear on recovery
+    let dir = temp_dir("zombie_prevention");
+
+    // Create a record, delete it, and compact WITHOUT cleanup
+    {
+        let mut pcrdt =
+            PersistedCRDT::<String, String, String>::open(dir.clone(), 1, PersistConfig::default())
+                .unwrap();
+
+        // Create and delete a record
+        pcrdt
+            .insert_or_update(
+                &"zombie".to_string(),
+                [("data".to_string(), "will_resurrect".to_string())].into_iter(),
+            )
+            .unwrap();
+
+        pcrdt.delete_record(&"zombie".to_string()).unwrap();
+
+        // Verify tombstone exists
+        assert!(pcrdt.crdt().is_tombstoned(&"zombie".to_string()));
+        assert_eq!(pcrdt.crdt().tombstone_count(), 1);
+
+        // Compact WITHOUT cleanup (unsafe!)
+        let clock_time = pcrdt.get_clock_time() + 1;
+        pcrdt.compact_tombstones(clock_time).unwrap();
+
+        // Tombstone is gone from memory
+        assert_eq!(pcrdt.crdt().tombstone_count(), 0);
+
+        // But old WAL segments still contain the deletion!
+        // Simulating crash by dropping without cleanup
+    }
+
+    // Reopen and verify zombie record DOES reappear (because old WAL is replayed)
+    {
+        let pcrdt =
+            PersistedCRDT::<String, String, String>::open(dir.clone(), 1, PersistConfig::default())
+                .unwrap();
+
+        // Without cleanup, the tombstone reappears from WAL replay
+        // This is the zombie record problem!
+        assert_eq!(pcrdt.crdt().tombstone_count(), 1,
+            "Zombie record appeared! This demonstrates why cleanup_old_wal_segments() is required");
+        assert!(pcrdt.crdt().is_tombstoned(&"zombie".to_string()));
+    }
+
+    // Now test the safe version
+    {
+        let mut pcrdt =
+            PersistedCRDT::<String, String, String>::open(dir.clone(), 1, PersistConfig::default())
+                .unwrap();
+
+        // Use the safe atomic method
+        let clock_time = pcrdt.get_clock_time() + 1;
+        pcrdt.compact_tombstones_with_cleanup(clock_time).unwrap();
+
+        // Tombstone should be gone
+        assert_eq!(pcrdt.crdt().tombstone_count(), 0);
+    }
+
+    // Reopen again - tombstone should STAY gone (no zombie)
+    {
+        let pcrdt =
+            PersistedCRDT::<String, String, String>::open(dir.clone(), 1, PersistConfig::default())
+                .unwrap();
+
+        // With cleanup, tombstone stays gone - no zombie!
+        assert_eq!(pcrdt.crdt().tombstone_count(), 0);
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
