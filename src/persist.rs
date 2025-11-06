@@ -481,9 +481,11 @@ where
             .join(format!("snapshot_{:06}.bin", self.snapshot_version));
         std::fs::write(&snapshot_path, &bytes)?;
 
-        // fsync the snapshot
-        let file = std::fs::File::open(&snapshot_path)?;
-        file.sync_all()?;
+        // fsync the snapshot (scope to ensure file is closed on Windows)
+        {
+            let file = std::fs::File::open(&snapshot_path)?;
+            file.sync_all()?;
+        } // file is dropped here, releasing any locks
 
         // Call snapshot hooks (file is now sealed and immutable)
         for hook in &self.snapshot_hooks {
