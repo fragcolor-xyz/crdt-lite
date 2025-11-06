@@ -104,7 +104,7 @@ where
     /// Called after snapshot creation. Calls hooks on sealed segments, then deletes them.
     /// Returns paths of sealed segments (before deletion, for info purposes).
     pub fn rotate(&mut self, base_path: &Path, hooks: &[Box<dyn super::hooks::WalSegmentHook>]) -> io::Result<Vec<PathBuf>> {
-        // Flush and close current file
+        // Flush current file
         self.current_file.flush()?;
 
         // Collect all existing WAL segment paths (these are now sealed)
@@ -119,7 +119,20 @@ where
             }
         }
 
-        // Call hooks on sealed segments (for backup/archival)
+        // Create new segment BEFORE deleting old ones (to release the old file handle)
+        self.segment_number += 1;
+        let new_wal_path = Self::segment_path(base_path, self.segment_number);
+
+        let new_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(new_wal_path)?;
+
+        // Replace the current BufWriter, dropping the old one and closing the old file handle
+        self.current_file = BufWriter::new(new_file);
+
+        // Now it's safe to call hooks and delete old segments (old file is closed)
         for segment_path in &sealed_segments {
             for hook in hooks {
                 hook.on_wal_sealed(segment_path);
@@ -130,18 +143,6 @@ where
         for segment_path in &sealed_segments {
             let _ = std::fs::remove_file(segment_path);
         }
-
-        // Start new segment (increment from current)
-        self.segment_number += 1;
-        let wal_path = Self::segment_path(base_path, self.segment_number);
-
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(wal_path)?;
-
-        self.current_file = BufWriter::new(file);
 
         Ok(sealed_segments)
     }
