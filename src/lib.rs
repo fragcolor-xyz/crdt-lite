@@ -20,6 +20,7 @@
 //! - `serde` - Enables Serde support for all CRDT types
 //! - `json` - Enables JSON serialization (includes `serde` + `serde_json`)
 //! - `binary` - Enables binary serialization (includes `serde` + `bincode`)
+//! - `persist` - Enables persistence layer with WAL and hooks (includes `binary` + `std`)
 //! - `node-id-u128` - Uses u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 //!
 //! ### no_std Support
@@ -83,6 +84,10 @@
 //! nodes that haven't received the deletion yet.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+
+// Persistence module (requires "persist" feature)
+#[cfg(feature = "persist")]
+pub mod persist;
 
 // Ensure valid feature combination: either std or alloc must be enabled
 #[cfg(not(any(feature = "std", feature = "alloc")))]

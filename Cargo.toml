@@ -34,6 +34,8 @@ alloc = ["dep:hashbrown"]
 serde = ["dep:serde"]
 json = ["serde", "dep:serde_json"]
 binary = ["serde", "dep:bincode"]
+# Persistence layer with WAL and hooks (requires std for file I/O)
+persist = ["binary", "std"]
 # Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 node-id-u128 = []
 
