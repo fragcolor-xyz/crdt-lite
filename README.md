@@ -75,16 +75,16 @@ The Rust implementation supports `no_std` environments with allocator support.
 ```toml
 [dependencies]
 # For no_std with basic CRDT functionality (requires alloc feature)
-crdt-lite = { version = "0.3", default-features = false, features = ["alloc"] }
+crdt-lite = { version = "0.5", default-features = false, features = ["alloc"] }
 
 # For no_std with JSON serialization
-crdt-lite = { version = "0.3", default-features = false, features = ["alloc", "json"] }
+crdt-lite = { version = "0.5", default-features = false, features = ["alloc", "json"] }
 
 # For no_std with binary serialization (bincode)
-crdt-lite = { version = "0.3", default-features = false, features = ["alloc", "binary"] }
+crdt-lite = { version = "0.5", default-features = false, features = ["alloc", "binary"] }
 
 # For standard environments (default, uses std::collections::HashMap)
-crdt-lite = { version = "0.3", features = ["json"] }
+crdt-lite = { version = "0.5", features = ["json"] }
 ```
 
 **Implementation Notes:**
@@ -100,7 +100,7 @@ By default, `NodeId` is `u64`. For applications using UUID-based node identifier
 
 ```toml
 [dependencies]
-crdt-lite = { version = "0.4", features = ["node-id-u128"] }
+crdt-lite = { version = "0.5", features = ["node-id-u128"] }
 ```
 
 **Why u128?**
@@ -115,7 +115,7 @@ crdt-lite = { version = "0.4", features = ["node-id-u128"] }
 
 ```bash
 cargo add crdt-lite  # (when published)
-# or add to Cargo.toml: crdt-lite = "0.3"
+# or add to Cargo.toml: crdt-lite = "0.5"
 ```
 
 ```rust
