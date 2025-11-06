@@ -1,6 +1,6 @@
 [package]
 name = "crdt-lite"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["CRDT Contributors"]
 description = "A lightweight, column-based CRDT implementation in Rust"
@@ -34,6 +34,8 @@ alloc = ["dep:hashbrown"]
 serde = ["dep:serde"]
 json = ["serde", "dep:serde_json"]
 binary = ["serde", "dep:bincode"]
+# Persistence layer with WAL and hooks (requires std for file I/O)
+persist = ["binary", "std"]
 # Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 node-id-u128 = []
 
