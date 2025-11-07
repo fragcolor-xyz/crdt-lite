@@ -2,7 +2,7 @@
 //!
 //! This module provides a `PersistedCRDT` wrapper around the core `CRDT` type that:
 //! - Maintains an append-only Write-Ahead Log (WAL) for durability
-//! - Automatically creates snapshots to prevent unbounded WAL growth
+//! - Automatically creates snapshots based on change count OR time elapsed
 //! - Provides hooks for post-operation broadcasting and file sealing notifications
 //! - Returns changes from all operations for async network propagation
 //!
@@ -41,8 +41,14 @@
 //! - **Guaranteed persistence**: Fsynced to disk (survives power failure)
 //! - **Bounded recovery time**: No need to replay thousands of WAL operations
 //! - **WAL compaction**: Can safely delete old segments after snapshot
+//! - **Hook triggering**: Ensures backup hooks fire even during low activity
 //!
-//! Snapshots are about **efficiency and certainty**, not basic crash safety.
+//! Snapshots are triggered by either:
+//! - **Change count** (default: 1000 operations) - for high-activity nodes
+//! - **Time elapsed** (default: 5 minutes) - for low-activity nodes
+//!
+//! This dual-trigger ensures backup hooks fire regularly even if a node sees only a few changes
+//! per day, preventing backup gaps in distributed storage scenarios.
 //!
 //! ## When This Design Is Appropriate
 //!
@@ -54,12 +60,12 @@
 //! ✅ **Single-node deployments with process isolation**
 //! - Process crashes are fully recoverable (page cache intact)
 //! - Kernel writeback provides reasonable power failure protection (~30s window)
-//! - Consider reducing `snapshot_threshold` to 10-50 for tighter bounds
+//! - Time-based snapshots (default: 5 min) ensure regular backup hook triggering
 //!
 //! ⚠️ **Single-node deployments without power protection**
-//! - Power failure can lose up to `snapshot_threshold` operations (default 1000)
+//! - Power failure can lose up to 5 minutes of data (default `snapshot_interval_secs`)
 //! - No peers to recover from
-//! - Mitigation: Use UPS, reduce `snapshot_threshold`, or accept risk
+//! - Mitigation: Use UPS, reduce `snapshot_interval_secs` to 60s, or accept risk
 //!
 //! ## Platform Notes
 //!
@@ -104,6 +110,7 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 use wal::WalWriter;
 
 /// Configuration for the persistence layer.
@@ -111,6 +118,10 @@ use wal::WalWriter;
 pub struct PersistConfig {
     /// Number of changes before automatic snapshot creation (default: 1000)
     pub snapshot_threshold: usize,
+    /// Time interval in seconds before automatic snapshot creation (default: Some(300) = 5 minutes)
+    /// Set to None to disable time-based snapshots
+    /// Used to ensure snapshot hooks fire even during low activity
+    pub snapshot_interval_secs: Option<u64>,
     /// Auto-cleanup old snapshots after rotation (None = manual cleanup only, Some(N) = keep N most recent)
     /// Default: Some(3) to prevent unbounded disk growth
     pub auto_cleanup_snapshots: Option<usize>,
@@ -124,6 +135,7 @@ impl Default for PersistConfig {
     fn default() -> Self {
         Self {
             snapshot_threshold: 1000,
+            snapshot_interval_secs: Some(300), // 5 minutes
             auto_cleanup_snapshots: Some(3),
             max_batch_size: Some(10000),
         }
@@ -217,6 +229,8 @@ where
     uploaded_snapshots: HashSet<PathBuf>,
     /// WAL segments that have been successfully uploaded (for safe auto-cleanup)
     uploaded_wal_segments: HashSet<PathBuf>,
+    /// Time of last snapshot (for time-based snapshots)
+    last_snapshot_time: Instant,
 }
 
 impl<K, C, V> PersistedCRDT<K, C, V>
@@ -266,6 +280,7 @@ where
             batch_collector: Vec::new(),
             uploaded_snapshots: HashSet::new(),
             uploaded_wal_segments: HashSet::new(),
+            last_snapshot_time: Instant::now(),
         })
     }
 
@@ -742,15 +757,27 @@ where
             let _ = self.cleanup_old_snapshots(keep_count, false);
         }
 
-        // Reset counter
+        // Reset counter and timer
         self.changes_since_snapshot = 0;
+        self.last_snapshot_time = Instant::now();
 
         Ok(())
     }
 
     /// Checks if automatic snapshot threshold is reached and creates snapshot if needed.
+    /// Snapshots are triggered by either:
+    /// - Change count reaching snapshot_threshold (default: 1000)
+    /// - Time elapsed reaching snapshot_interval_secs (default: 300 = 5 minutes)
     fn check_auto_snapshot(&mut self) -> Result<(), PersistError> {
-        if self.changes_since_snapshot >= self.config.snapshot_threshold {
+        let should_snapshot =
+            // Change count threshold
+            self.changes_since_snapshot >= self.config.snapshot_threshold ||
+            // Time-based threshold
+            self.config.snapshot_interval_secs
+                .map(|interval| self.last_snapshot_time.elapsed().as_secs() >= interval)
+                .unwrap_or(false);
+
+        if should_snapshot {
             self.create_snapshot()?;
         }
         Ok(())
