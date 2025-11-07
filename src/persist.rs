@@ -386,14 +386,14 @@ where
     /// }
     ///
     /// impl SnapshotHook for R2Uploader {
-    ///     fn on_snapshot(&self, snapshot_path: &PathBuf) {
+    ///     fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
     ///         let path = snapshot_path.clone();
     ///         let pcrdt = self.pcrdt.clone();
     ///
     ///         // Spawn async upload task
     ///         tokio::spawn(async move {
     ///             // Upload to R2...
-    ///             // r2.put(snapshot_path, data).await?;
+    ///             // r2.put(format!("snapshots/{}/v{}", path.file_name()?, version), data).await?;
     ///
     ///             // Mark as uploaded for safe cleanup
     ///             pcrdt.lock().unwrap().mark_snapshot_uploaded(path);
@@ -743,8 +743,9 @@ where
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Call snapshot hooks (file is now sealed and immutable)
+        let current_db_version = self.crdt.get_clock().current_time();
         for hook in &self.snapshot_hooks {
-            hook.on_snapshot(&snapshot_path);
+            hook.on_snapshot(&snapshot_path, current_db_version);
         }
 
         // Rotate WAL (seals old segments, calls hooks, starts new segment)

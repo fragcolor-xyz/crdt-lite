@@ -96,13 +96,13 @@ where
 /// }
 ///
 /// impl SnapshotHook for R2Uploader {
-///     fn on_snapshot(&self, snapshot_path: &PathBuf) {
+///     fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
 ///         // Async upload to R2 (spawn task)
 ///         let path = snapshot_path.clone();
 ///         let project = self.project_id.clone();
 ///         tokio::spawn(async move {
 ///             let data = tokio::fs::read(&path).await.unwrap();
-///             // r2.put(format!("projects/{}/snapshots/{}", project, path.file_name()?), data).await
+///             // r2.put(format!("projects/{}/snapshots/{}/v{}", project, path.file_name()?, version), data).await
 ///         });
 ///     }
 /// }
@@ -112,7 +112,12 @@ pub trait SnapshotHook: Send + Sync {
     ///
     /// The snapshot file is immutable and safe for async upload.
     /// This is called synchronously but should spawn async tasks for I/O.
-    fn on_snapshot(&self, snapshot_path: &PathBuf);
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_path` - Path to the fsynced snapshot file
+    /// * `version` - CRDT logical clock version (db_version) at snapshot time
+    fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64);
 }
 
 /// WAL segment hook for archival.
@@ -169,10 +174,10 @@ where
 
 impl<F> SnapshotHook for F
 where
-    F: Fn(&PathBuf) + Send + Sync,
+    F: Fn(&PathBuf, u64) + Send + Sync,
 {
-    fn on_snapshot(&self, snapshot_path: &PathBuf) {
-        self(snapshot_path)
+    fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
+        self(snapshot_path, version)
     }
 }
 
