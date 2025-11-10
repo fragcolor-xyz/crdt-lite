@@ -1311,6 +1311,109 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     Ok(result)
   }
 
+  /// Serializes the CRDT to bytes using MessagePack.
+  ///
+  /// MessagePack supports schema evolution - fields can be added with `#[serde(default)]`
+  /// without breaking compatibility with older snapshots.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "msgpack")]
+  pub fn to_msgpack_bytes(&self) -> Result<Vec<u8>, rmp_serde::encode::Error>
+  where
+    K: serde::Serialize,
+    C: serde::Serialize,
+    V: serde::Serialize,
+  {
+    rmp_serde::to_vec(self)
+  }
+
+  /// Deserializes a CRDT from MessagePack bytes.
+  ///
+  /// MessagePack supports schema evolution - older snapshots can be loaded even if
+  /// the CRDT structure has new fields with `#[serde(default)]`.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "msgpack")]
+  pub fn from_msgpack_bytes(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error>
+  where
+    K: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    rmp_serde::from_slice(bytes)
+  }
+
+  /// Gets records and tombstones that have changed since a specific version.
+  ///
+  /// This is used for creating incremental snapshots, which only contain
+  /// records that have been modified since the base snapshot.
+  ///
+  /// # Arguments
+  ///
+  /// * `since_version` - Only return changes after this db_version
+  ///
+  /// # Returns
+  ///
+  /// Tuple of (changed_records, new_tombstones)
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// // Get all changes since version 1000
+  /// let (records, tombstones) = crdt.get_changed_since(1000);
+  /// // records contains only records modified after version 1000
+  /// // tombstones contains only records deleted after version 1000
+  /// ```
+  #[cfg(feature = "std")]
+  pub fn get_changed_since(&self, since_version: u64) -> (
+    HashMap<K, Record<C, V>>,
+    HashMap<K, TombstoneInfo>,
+  ) {
+    let records = self.data
+      .iter()
+      .filter(|(_, record)| record.highest_local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+
+    let tombstones = self.tombstones
+      .iter()
+      .filter(|(_, info)| info.local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+
+    (records, tombstones)
+  }
+
+  /// Gets records and tombstones that have changed since a specific version (no_std version).
+  #[cfg(not(feature = "std"))]
+  pub fn get_changed_since(&self, since_version: u64) -> (
+    hashbrown::HashMap<K, Record<C, V>>,
+    hashbrown::HashMap<K, TombstoneInfo>,
+  ) {
+    let records = self.data
+      .iter()
+      .filter(|(_, record)| record.highest_local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+
+    let tombstones = self.tombstones
+      .iter()
+      .filter(|(_, info)| info.local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+
+    (records, tombstones)
+  }
+
   // Helper methods
 
   fn is_record_tombstoned(&self, record_id: &K, ignore_parent: bool) -> bool {

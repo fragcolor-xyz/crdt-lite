@@ -105,13 +105,78 @@ mod wal;
 
 pub use hooks::{PostOpHook, SnapshotHook, WalSegmentHook};
 
-use crate::{Change, DefaultMergeRule, MergeRule, NodeId, CRDT};
+use crate::{Change, DefaultMergeRule, MergeRule, NodeId, Record, TombstoneInfo, CRDT};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::Hash;
 use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
 use wal::WalWriter;
+
+/// Snapshot format type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SnapshotFormat {
+    /// Legacy bincode format (no schema evolution)
+    Bincode,
+    /// MessagePack format (supports schema evolution)
+    MessagePack,
+}
+
+/// Snapshot type - either full or incremental.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SnapshotType {
+    /// Full snapshot containing entire CRDT state
+    Full,
+    /// Incremental snapshot containing only changes since a base version
+    Incremental {
+        /// The base version this incremental builds on
+        base_version: u64,
+    },
+}
+
+/// Metadata for snapshots (both full and incremental).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SnapshotMetadata {
+    /// Type of snapshot (full or incremental)
+    pub snapshot_type: SnapshotType,
+    /// The logical clock version this snapshot represents
+    pub version: u64,
+    /// Format used for serialization
+    pub format: SnapshotFormat,
+    /// Timestamp when snapshot was created
+    pub created_at: u64,
+}
+
+/// Full snapshot structure for MessagePack serialization.
+#[cfg(feature = "msgpack")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+pub struct FullSnapshot<K, C, V> {
+    pub metadata: SnapshotMetadata,
+    pub crdt: CRDT<K, C, V>,
+}
+
+/// Incremental snapshot structure for MessagePack serialization.
+#[cfg(feature = "msgpack")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+pub struct IncrementalSnapshot<K, C, V> {
+    pub metadata: SnapshotMetadata,
+    /// Only records that changed since base version
+    pub changed_records: HashMap<K, Record<C, V>>,
+    /// Only tombstones added since base version
+    pub new_tombstones: HashMap<K, TombstoneInfo>,
+    /// Updated logical clock
+    pub clock_version: u64,
+}
 
 /// Configuration for the persistence layer.
 #[derive(Debug, Clone)]
@@ -129,6 +194,18 @@ pub struct PersistConfig {
     /// Default: Some(10000) to prevent unbounded memory growth
     /// Set to None to disable auto-flush (you MUST call take_batch() periodically)
     pub max_batch_size: Option<usize>,
+    /// Snapshot format (Bincode or MessagePack)
+    /// Default: MessagePack (supports schema evolution)
+    pub snapshot_format: SnapshotFormat,
+    /// Enable incremental snapshots (only available with MessagePack)
+    /// Default: true
+    pub enable_incremental_snapshots: bool,
+    /// Number of incremental snapshots before creating a full snapshot
+    /// Default: 10 (balance between recovery time and I/O savings)
+    pub full_snapshot_interval: usize,
+    /// Enable compression (zstd) for snapshots
+    /// Default: false (can be enabled for further size reduction)
+    pub enable_compression: bool,
 }
 
 impl Default for PersistConfig {
@@ -138,6 +215,10 @@ impl Default for PersistConfig {
             snapshot_interval_secs: Some(300), // 5 minutes
             auto_cleanup_snapshots: Some(3),
             max_batch_size: Some(10000),
+            snapshot_format: SnapshotFormat::MessagePack,
+            enable_incremental_snapshots: true,
+            full_snapshot_interval: 10,
+            enable_compression: false,
         }
     }
 }
@@ -147,21 +228,39 @@ impl Default for PersistConfig {
 pub enum PersistError {
     /// I/O error during file operations
     Io(io::Error),
-    /// Serialization/deserialization error
-    Codec(bincode::error::EncodeError),
-    /// Deserialization error
-    Decode(bincode::error::DecodeError),
+    /// Bincode serialization error
+    BincodeEncode(bincode::error::EncodeError),
+    /// Bincode deserialization error
+    BincodeDecode(bincode::error::DecodeError),
+    /// MessagePack encoding error
+    #[cfg(feature = "msgpack")]
+    MsgpackEncode(rmp_serde::encode::Error),
+    /// MessagePack decoding error
+    #[cfg(feature = "msgpack")]
+    MsgpackDecode(rmp_serde::decode::Error),
+    /// Compression error
+    #[cfg(feature = "compression")]
+    Compression(std::io::Error),
     /// Invalid persistence directory structure
     InvalidDirectory(String),
+    /// Unsupported feature (e.g., incremental snapshots with bincode)
+    UnsupportedFeature(String),
 }
 
 impl std::fmt::Display for PersistError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PersistError::Io(e) => write!(f, "I/O error: {}", e),
-            PersistError::Codec(e) => write!(f, "Encoding error: {}", e),
-            PersistError::Decode(e) => write!(f, "Decoding error: {}", e),
+            PersistError::BincodeEncode(e) => write!(f, "Bincode encoding error: {}", e),
+            PersistError::BincodeDecode(e) => write!(f, "Bincode decoding error: {}", e),
+            #[cfg(feature = "msgpack")]
+            PersistError::MsgpackEncode(e) => write!(f, "MessagePack encoding error: {}", e),
+            #[cfg(feature = "msgpack")]
+            PersistError::MsgpackDecode(e) => write!(f, "MessagePack decoding error: {}", e),
+            #[cfg(feature = "compression")]
+            PersistError::Compression(e) => write!(f, "Compression error: {}", e),
             PersistError::InvalidDirectory(msg) => write!(f, "Invalid directory: {}", msg),
+            PersistError::UnsupportedFeature(msg) => write!(f, "Unsupported feature: {}", msg),
         }
     }
 }
@@ -176,13 +275,27 @@ impl From<io::Error> for PersistError {
 
 impl From<bincode::error::EncodeError> for PersistError {
     fn from(e: bincode::error::EncodeError) -> Self {
-        PersistError::Codec(e)
+        PersistError::BincodeEncode(e)
     }
 }
 
 impl From<bincode::error::DecodeError> for PersistError {
     fn from(e: bincode::error::DecodeError) -> Self {
-        PersistError::Decode(e)
+        PersistError::BincodeDecode(e)
+    }
+}
+
+#[cfg(feature = "msgpack")]
+impl From<rmp_serde::encode::Error> for PersistError {
+    fn from(e: rmp_serde::encode::Error) -> Self {
+        PersistError::MsgpackEncode(e)
+    }
+}
+
+#[cfg(feature = "msgpack")]
+impl From<rmp_serde::decode::Error> for PersistError {
+    fn from(e: rmp_serde::decode::Error) -> Self {
+        PersistError::MsgpackDecode(e)
     }
 }
 
