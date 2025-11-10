@@ -641,7 +641,8 @@ pcrdt.add_snapshot_hook(Box::new(move |snapshot_path, db_version| {
         let data = tokio::fs::read(&path).await.unwrap();
 
         // Upload to R2, S3, etc.
-        // r2.put(format!("snapshots/{}", path.file_name().unwrap()), data).await?;
+        // let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
+        // r2.put(format!("snapshots/{}", filename), data).await?;
 
         // Mark as uploaded for safe cleanup
         // pcrdt.lock().unwrap().mark_snapshot_uploaded(path);
@@ -664,7 +665,8 @@ pcrdt.add_wal_segment_hook(Box::new(move |segment_path| {
     tokio::spawn(async move {
         let data = tokio::fs::read(&path).await.unwrap();
         // Archive to cloud storage
-        // r2.put(format!("wal/{}", path.file_name().unwrap()), data).await?;
+        // let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("wal");
+        // r2.put(format!("wal/{}", filename), data).await?;
     });
 }));
 ```

@@ -453,3 +453,142 @@ fn test_size_reduction() {
         "Incremental snapshot should be significantly smaller"
     );
 }
+
+/// CRITICAL TEST: Verifies that tombstone node_id is preserved during incremental snapshot recovery.
+///
+/// This test ensures that when a tombstone is saved in an incremental snapshot and later recovered
+/// by a different node, the tombstone retains its original node_id. This is critical for correct
+/// conflict resolution.
+///
+/// Bug scenario (if not fixed):
+/// 1. Node 1 deletes record "user1" → tombstone with node_id=1
+/// 2. Incremental snapshot created
+/// 3. Node 2 recovers from snapshot
+/// 4. Tombstone incorrectly reconstructed with node_id=2
+/// 5. Node 3 creates "user1" → conflict resolution uses wrong node_id → incorrect winner
+#[test]
+fn test_incremental_tombstone_preserves_node_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().to_path_buf();
+
+    // Node 1: Create record and delete it
+    let mut config = PersistConfig::default();
+    config.snapshot_format = SnapshotFormat::MessagePack;
+    config.enable_incremental_snapshots = true;
+    config.snapshot_threshold = 3;
+    config.full_snapshot_interval = 10;
+
+    let mut node1 = PersistedCRDT::<String, String, String>::open(
+        base_path.clone(),
+        1, // node_id = 1
+        config.clone(),
+    )
+    .unwrap();
+
+    // Create initial records to trigger full snapshot
+    node1
+        .insert_or_update(
+            &"user0".to_string(),
+            [("name".to_string(), "Alice".to_string())].into_iter(),
+        )
+        .unwrap();
+    node1
+        .insert_or_update(
+            &"user1".to_string(),
+            [("name".to_string(), "Bob".to_string())].into_iter(),
+        )
+        .unwrap();
+    node1
+        .insert_or_update(
+            &"user2".to_string(),
+            [("name".to_string(), "Charlie".to_string())].into_iter(),
+        )
+        .unwrap();
+
+    // Full snapshot should have been created
+    let full_snapshots: Vec<_> = std::fs::read_dir(&base_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("snapshot_full_")
+        })
+        .collect();
+    assert_eq!(full_snapshots.len(), 1, "Should have 1 full snapshot");
+
+    // Delete user1 on node 1 (creates tombstone with node_id=1)
+    node1.delete_record(&"user1".to_string()).unwrap();
+
+    // Trigger incremental snapshot
+    node1
+        .insert_or_update(
+            &"user3".to_string(),
+            [("name".to_string(), "Dave".to_string())].into_iter(),
+        )
+        .unwrap();
+    node1
+        .insert_or_update(
+            &"user4".to_string(),
+            [("name".to_string(), "Eve".to_string())].into_iter(),
+        )
+        .unwrap();
+
+    // Incremental snapshot should now exist
+    let incr_snapshots: Vec<_> = std::fs::read_dir(&base_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("snapshot_incr_")
+        })
+        .collect();
+    assert!(
+        incr_snapshots.len() >= 1,
+        "Should have at least 1 incremental snapshot"
+    );
+
+    // Get the tombstone info from node1
+    let user1_tombstone = node1.crdt().get_tombstone(&"user1".to_string());
+    assert!(user1_tombstone.is_some(), "user1 should be tombstoned");
+    let original_node_id = user1_tombstone.unwrap().node_id;
+    assert_eq!(
+        original_node_id, 1,
+        "Original tombstone should have node_id=1"
+    );
+
+    drop(node1);
+
+    // Node 2: Recover from snapshots
+    let node2 = PersistedCRDT::<String, String, String>::open(
+        base_path.clone(),
+        2, // Different node_id
+        config,
+    )
+    .unwrap();
+
+    // Verify user1 is still tombstoned on node2
+    let recovered_tombstone = node2.crdt().get_tombstone(&"user1".to_string());
+    assert!(
+        recovered_tombstone.is_some(),
+        "user1 tombstone should be recovered on node2"
+    );
+
+    // CRITICAL ASSERTION: Tombstone should still have node_id=1 (not node_id=2)
+    let recovered_node_id = recovered_tombstone.unwrap().node_id;
+    assert_eq!(
+        recovered_node_id, original_node_id,
+        "Tombstone node_id should be preserved (should be 1, not 2)"
+    );
+
+    // Verify other records were recovered correctly
+    let user0 = node2.crdt().get_record(&"user0".to_string());
+    assert!(user0.is_some(), "user0 should exist");
+
+    let user2 = node2.crdt().get_record(&"user2".to_string());
+    assert!(user2.is_some(), "user2 should exist");
+
+    let user3 = node2.crdt().get_record(&"user3".to_string());
+    assert!(user3.is_some(), "user3 should exist");
+}

@@ -823,11 +823,16 @@ where
                 // Load full snapshot
                 let bytes = std::fs::read(&full_path)?;
 
-                // Try to decompress (attempt decompression, fall back to raw bytes if it fails)
+                // Decompress if needed
                 let decompressed = {
                     #[cfg(feature = "compression")]
                     {
-                        zstd::decode_all(&bytes[..]).unwrap_or(bytes)
+                        // Try to detect if data is compressed by checking for zstd magic bytes
+                        if bytes.len() >= 4 && &bytes[0..4] == b"\x28\xb5\x2f\xfd" {
+                            zstd::decode_all(&bytes[..]).map_err(PersistError::Compression)?
+                        } else {
+                            bytes
+                        }
                     }
                     #[cfg(not(feature = "compression"))]
                     {
@@ -856,7 +861,12 @@ where
                             let incr_decompressed = {
                                 #[cfg(feature = "compression")]
                                 {
-                                    zstd::decode_all(&incr_bytes[..]).unwrap_or(incr_bytes)
+                                    // Try to detect if data is compressed by checking for zstd magic bytes
+                                    if incr_bytes.len() >= 4 && &incr_bytes[0..4] == b"\x28\xb5\x2f\xfd" {
+                                        zstd::decode_all(&incr_bytes[..]).map_err(PersistError::Compression)?
+                                    } else {
+                                        incr_bytes
+                                    }
                                 }
                                 #[cfg(not(feature = "compression"))]
                                 {
@@ -888,15 +898,15 @@ where
                             }
 
                             // Add tombstone changes
-                            for (key, _tombstone) in incremental.new_tombstones {
+                            for (key, tombstone) in incremental.new_tombstones {
                                 changes.push(Change {
                                     record_id: key,
                                     col_name: None,
                                     value: None,
                                     col_version: 0,
-                                    db_version: incremental.clock_version,
-                                    node_id,
-                                    local_db_version: incremental.clock_version,
+                                    db_version: tombstone.db_version,
+                                    node_id: tombstone.node_id,
+                                    local_db_version: tombstone.local_db_version,
                                     flags: 1, // Tombstone flag
                                 });
                             }
@@ -1099,6 +1109,10 @@ where
         // Get changes since last snapshot
         let (changed_records, new_tombstones) =
             self.crdt.get_changed_since(self.last_snapshot_crdt_version);
+
+        // Skip creating snapshot if no changes (optimization)
+        // Note: We still create the snapshot even if empty to track logical clock progression
+        // This is intentional for consistency tracking across nodes
 
         // Increment snapshot version
         self.snapshot_version += 1;
