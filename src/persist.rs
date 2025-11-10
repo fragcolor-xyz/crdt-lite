@@ -574,7 +574,7 @@ where
     ///
     /// * `keep_count` - Number of most recent snapshots to keep
     /// * `require_uploaded` - If `true`, only delete snapshots marked via `mark_snapshot_uploaded()`.
-    ///                        If `false`, delete ALL old snapshots (used by auto-cleanup).
+    ///   If `false`, delete ALL old snapshots (used by auto-cleanup).
     ///
     /// # When to Use Each Mode
     ///
@@ -656,7 +656,7 @@ where
     ///
     /// * `keep_count` - Number of most recent segments to keep
     /// * `require_uploaded` - If `true`, only delete segments marked via `mark_wal_segment_uploaded()`.
-    ///                        If `false`, delete ALL old segments (used for cleanup after compaction).
+    ///   If `false`, delete ALL old segments (used for cleanup after compaction).
     ///
     /// # When to Use Each Mode
     ///
@@ -742,6 +742,7 @@ where
     /// Discovers all snapshots in the base directory and returns the latest full snapshot
     /// and any incremental snapshots that build on it.
     #[cfg(feature = "msgpack")]
+    #[allow(clippy::type_complexity)]
     fn discover_snapshots(
         base_path: &PathBuf,
     ) -> Result<(Option<(PathBuf, u64)>, Vec<(PathBuf, u64)>), PersistError> {
@@ -805,6 +806,7 @@ where
     }
 
     /// Recovers CRDT state from disk: loads snapshot + replays WAL files.
+    #[allow(clippy::type_complexity)]
     fn recover(
         base_path: &PathBuf,
         node_id: NodeId,
@@ -893,7 +895,7 @@ where
                                     value: None,
                                     col_version: 0,
                                     db_version: incremental.clock_version,
-                                    node_id: node_id,
+                                    node_id,
                                     local_db_version: incremental.clock_version,
                                     flags: 1, // Tombstone flag
                                 });
@@ -925,7 +927,7 @@ where
                             if let Ok(num) = num_str.parse::<u64>() {
                                 if num > max_snapshot_version {
                                     max_snapshot_version = num;
-                                    let bytes = std::fs::read(&entry.path())?;
+                                    let bytes = std::fs::read(entry.path())?;
                                     crdt = Some(CRDT::from_bytes(&bytes).map_err(PersistError::BincodeDecode)?);
                                 }
                             }
@@ -1004,6 +1006,7 @@ where
 
     /// Decompresses data using zstd if it was compressed.
     #[cfg(feature = "compression")]
+    #[allow(dead_code)]
     fn maybe_decompress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
         if self.config.enable_compression {
             zstd::decode_all(&data[..]).map_err(PersistError::Compression)
@@ -1013,6 +1016,7 @@ where
     }
 
     #[cfg(not(feature = "compression"))]
+    #[allow(dead_code)]
     fn maybe_decompress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
         Ok(data)
     }
@@ -1305,7 +1309,7 @@ where
 
         if let Some(ref c) = change {
             // Persist and notify
-            self.persist_and_notify(&[c.clone()])?;
+            self.persist_and_notify(std::slice::from_ref(c))?;
         }
 
         Ok(change)
@@ -1320,7 +1324,7 @@ where
 
         if let Some(ref c) = change {
             // Persist and notify
-            self.persist_and_notify(&[c.clone()])?;
+            self.persist_and_notify(std::slice::from_ref(c))?;
         }
 
         Ok(change)

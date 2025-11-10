@@ -1,3 +1,5 @@
+#![cfg(feature = "persist")]
+
 //! Comprehensive tests for MessagePack + Incremental Snapshots functionality
 
 use crdt_lite::persist::{PersistedCRDT, PersistConfig, SnapshotFormat};

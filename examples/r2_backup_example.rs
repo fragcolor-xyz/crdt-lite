@@ -34,26 +34,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add snapshot hook - simulates uploading to R2
     let snapshots_clone = uploaded_snapshots.clone();
-    pcrdt.add_snapshot_hook(Box::new(move |snapshot_path: &PathBuf, db_version: u64| {
+    pcrdt.add_snapshot_hook(Box::new(move |snapshot_path: &std::path::Path, db_version: u64| {
         println!("📸 Snapshot created: {:?} (db_version: {})", snapshot_path.file_name().unwrap(), db_version);
         println!("   └─ Uploading to R2...");
 
         // In real app: tokio::spawn(async move { r2.put(...) })
         // For demo: just track it
-        snapshots_clone.lock().unwrap().push(snapshot_path.clone());
+        snapshots_clone.lock().unwrap().push(snapshot_path.to_path_buf());
 
         println!("   └─ ✓ Uploaded to R2");
     }));
 
     // Add WAL segment hook - simulates uploading sealed segments to R2
     let wal_clone = uploaded_wal_segments.clone();
-    pcrdt.add_wal_segment_hook(Box::new(move |segment_path: &PathBuf| {
+    pcrdt.add_wal_segment_hook(Box::new(move |segment_path: &std::path::Path| {
         println!("📝 WAL segment sealed: {:?}", segment_path.file_name().unwrap());
         println!("   └─ Uploading to R2...");
 
         // In real app: tokio::spawn(async move { r2.put(...) })
         // For demo: just track it
-        wal_clone.lock().unwrap().push(segment_path.clone());
+        wal_clone.lock().unwrap().push(segment_path.to_path_buf());
 
         println!("   └─ ✓ Uploaded to R2");
     }));
