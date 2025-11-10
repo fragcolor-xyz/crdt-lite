@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_threshold: 5, // Snapshot every 5 changes
         auto_cleanup_snapshots: Some(3), // Keep 3 most recent snapshots
         max_batch_size: Some(1000), // Auto-flush batch after 1000 changes
+        ..Default::default() // Use defaults for new fields
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(
