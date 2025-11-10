@@ -151,24 +151,18 @@ pub struct SnapshotMetadata {
     pub created_at: u64,
 }
 
-/// Full snapshot structure for MessagePack serialization.
-#[cfg(feature = "msgpack")]
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-pub struct FullSnapshot<K, C, V> {
-    pub metadata: SnapshotMetadata,
-    pub crdt: CRDT<K, C, V>,
-}
-
 /// Incremental snapshot structure for MessagePack serialization.
 #[cfg(feature = "msgpack")]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
 #[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-pub struct IncrementalSnapshot<K, C, V> {
+pub struct IncrementalSnapshot<K, C, V>
+where
+    K: Hash + Eq + Clone,
+    C: Hash + Eq + Clone,
+    V: Clone,
+{
     pub metadata: SnapshotMetadata,
     /// Only records that changed since base version
     pub changed_records: HashMap<K, Record<C, V>>,
@@ -344,6 +338,12 @@ where
     uploaded_wal_segments: HashSet<PathBuf>,
     /// Time of last snapshot (for time-based snapshots)
     last_snapshot_time: Instant,
+    /// Number of incremental snapshots created since last full snapshot
+    incremental_snapshot_count: usize,
+    /// Version of the last full snapshot
+    last_full_snapshot_version: u64,
+    /// CRDT version at time of last snapshot (for incremental detection)
+    last_snapshot_crdt_version: u64,
 }
 
 impl<K, C, V> PersistedCRDT<K, C, V>
@@ -380,6 +380,8 @@ where
         // Try to load existing state
         let (crdt, wal, changes_since_snapshot, snapshot_version) = Self::recover(&base_path, node_id)?;
 
+        let crdt_version = crdt.get_clock().current_time();
+
         Ok(Self {
             crdt,
             wal,
@@ -394,6 +396,9 @@ where
             uploaded_snapshots: HashSet::new(),
             uploaded_wal_segments: HashSet::new(),
             last_snapshot_time: Instant::now(),
+            incremental_snapshot_count: 0,
+            last_full_snapshot_version: snapshot_version,
+            last_snapshot_crdt_version: crdt_version,
         })
     }
 
@@ -734,29 +739,44 @@ where
     C: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     V: Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
-    /// Recovers CRDT state from disk: loads snapshot + replays WAL files.
-    fn recover(
+    /// Discovers all snapshots in the base directory and returns the latest full snapshot
+    /// and any incremental snapshots that build on it.
+    #[cfg(feature = "msgpack")]
+    fn discover_snapshots(
         base_path: &PathBuf,
-        node_id: NodeId,
-    ) -> Result<(CRDT<K, C, V>, WalWriter<K, C, V>, usize, u64), PersistError> {
-        // Find the latest snapshot file (snapshot_000001.bin, snapshot_000002.bin, etc.)
-        let mut max_snapshot_version = 0u64;
-        let mut latest_snapshot_path = None;
+    ) -> Result<(Option<(PathBuf, u64)>, Vec<(PathBuf, u64)>), PersistError> {
+        let mut full_snapshots: Vec<(PathBuf, u64)> = Vec::new();
+        let mut incremental_snapshots: Vec<(PathBuf, u64, u64)> = Vec::new(); // (path, version, base_version)
 
         if let Ok(entries) = std::fs::read_dir(base_path) {
             for entry in entries.flatten() {
+                let path = entry.path();
                 let filename = entry.file_name();
                 let filename_str = filename.to_string_lossy();
-                if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
-                    // Parse version number from filename (snapshot_000001.bin)
-                    if let Some(num_str) = filename_str
-                        .strip_prefix("snapshot_")
-                        .and_then(|s| s.strip_suffix(".bin"))
+
+                // Parse full snapshots: snapshot_full_000001.msgpack
+                if filename_str.starts_with("snapshot_full_") && filename_str.ends_with(".msgpack") {
+                    if let Some(version_str) = filename_str
+                        .strip_prefix("snapshot_full_")
+                        .and_then(|s| s.strip_suffix(".msgpack"))
                     {
-                        if let Ok(num) = num_str.parse::<u64>() {
-                            if num > max_snapshot_version {
-                                max_snapshot_version = num;
-                                latest_snapshot_path = Some(entry.path());
+                        if let Ok(version) = version_str.parse::<u64>() {
+                            full_snapshots.push((path.clone(), version));
+                        }
+                    }
+                }
+
+                // Parse incremental snapshots: snapshot_incr_000002_base_000001.msgpack
+                if filename_str.starts_with("snapshot_incr_") && filename_str.ends_with(".msgpack") {
+                    let parts: Vec<&str> = filename_str.split('_').collect();
+                    if parts.len() >= 5 {
+                        // ["snapshot", "incr", "000002", "base", "000001.msgpack"]
+                        if let (Ok(version), Some(base_str)) = (
+                            parts[2].parse::<u64>(),
+                            parts[4].strip_suffix(".msgpack"),
+                        ) {
+                            if let Ok(base_version) = base_str.parse::<u64>() {
+                                incremental_snapshots.push((path.clone(), version, base_version));
                             }
                         }
                     }
@@ -764,13 +784,159 @@ where
             }
         }
 
-        // Load the latest snapshot or create new CRDT
-        let crdt = if let Some(path) = latest_snapshot_path {
-            let bytes = std::fs::read(&path)?;
-            CRDT::from_bytes(&bytes).map_err(PersistError::Decode)?
+        // Find the latest full snapshot
+        full_snapshots.sort_by_key(|(_, version)| *version);
+        let latest_full = full_snapshots.last().cloned();
+
+        // If we have a latest full, find all incrementals that build on it
+        let relevant_incrementals = if let Some((_, base_version)) = latest_full {
+            let mut relevant: Vec<(PathBuf, u64)> = incremental_snapshots
+                .into_iter()
+                .filter(|(_, _, base)| *base == base_version)
+                .map(|(path, version, _)| (path, version))
+                .collect();
+            relevant.sort_by_key(|(_, version)| *version);
+            relevant
         } else {
-            CRDT::new(node_id, None)
+            Vec::new()
         };
+
+        Ok((latest_full, relevant_incrementals))
+    }
+
+    /// Recovers CRDT state from disk: loads snapshot + replays WAL files.
+    fn recover(
+        base_path: &PathBuf,
+        node_id: NodeId,
+    ) -> Result<(CRDT<K, C, V>, WalWriter<K, C, V>, usize, u64), PersistError> {
+        let mut max_snapshot_version = 0u64;
+        let mut crdt = None;
+
+        // First, try to load MessagePack snapshots (full + incrementals)
+        #[cfg(feature = "msgpack")]
+        {
+            let (latest_full, incrementals) = Self::discover_snapshots(base_path)?;
+
+            if let Some((full_path, full_version)) = latest_full {
+                // Load full snapshot
+                let bytes = std::fs::read(&full_path)?;
+
+                // Try to decompress (attempt decompression, fall back to raw bytes if it fails)
+                let decompressed = {
+                    #[cfg(feature = "compression")]
+                    {
+                        zstd::decode_all(&bytes[..]).unwrap_or(bytes)
+                    }
+                    #[cfg(not(feature = "compression"))]
+                    {
+                        bytes
+                    }
+                };
+
+                // Parse the combined format: metadata_len (u32) + metadata + crdt_bytes
+                if decompressed.len() >= 4 {
+                    let metadata_len = u32::from_le_bytes([
+                        decompressed[0],
+                        decompressed[1],
+                        decompressed[2],
+                        decompressed[3],
+                    ]) as usize;
+
+                    if decompressed.len() >= 4 + metadata_len {
+                        let _metadata: SnapshotMetadata =
+                            rmp_serde::from_slice(&decompressed[4..4 + metadata_len])?;
+                        let crdt_bytes = &decompressed[4 + metadata_len..];
+                        let mut loaded_crdt = CRDT::from_msgpack_bytes(crdt_bytes)?;
+
+                        // Apply incremental snapshots in order
+                        for (incr_path, _) in incrementals {
+                            let incr_bytes = std::fs::read(&incr_path)?;
+                            let incr_decompressed = {
+                                #[cfg(feature = "compression")]
+                                {
+                                    zstd::decode_all(&incr_bytes[..]).unwrap_or(incr_bytes)
+                                }
+                                #[cfg(not(feature = "compression"))]
+                                {
+                                    incr_bytes
+                                }
+                            };
+
+                            let incremental: IncrementalSnapshot<K, C, V> =
+                                rmp_serde::from_slice(&incr_decompressed)?;
+
+                            // Use merge_changes to apply incremental updates
+                            // Convert changed records to changes
+                            let mut changes = Vec::new();
+                            for (key, record) in incremental.changed_records {
+                                for (col_name, value) in record.fields {
+                                    if let Some(col_version) = record.column_versions.get(&col_name) {
+                                        changes.push(Change {
+                                            record_id: key.clone(),
+                                            col_name: Some(col_name),
+                                            value: Some(value),
+                                            col_version: col_version.col_version,
+                                            db_version: col_version.db_version,
+                                            node_id: col_version.node_id,
+                                            local_db_version: col_version.local_db_version,
+                                            flags: 0,
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Add tombstone changes
+                            for (key, _tombstone) in incremental.new_tombstones {
+                                changes.push(Change {
+                                    record_id: key,
+                                    col_name: None,
+                                    value: None,
+                                    col_version: 0,
+                                    db_version: incremental.clock_version,
+                                    node_id: node_id,
+                                    local_db_version: incremental.clock_version,
+                                    flags: 1, // Tombstone flag
+                                });
+                            }
+
+                            // Apply changes using merge_changes
+                            loaded_crdt.merge_changes(changes, &DefaultMergeRule);
+                        }
+
+                        max_snapshot_version = full_version;
+                        crdt = Some(loaded_crdt);
+                    }
+                }
+            }
+        }
+
+        // Fallback to bincode snapshots if no MessagePack found
+        if crdt.is_none() {
+            if let Ok(entries) = std::fs::read_dir(base_path) {
+                for entry in entries.flatten() {
+                    let filename = entry.file_name();
+                    let filename_str = filename.to_string_lossy();
+                    if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
+                        // Parse version number from filename (snapshot_000001.bin)
+                        if let Some(num_str) = filename_str
+                            .strip_prefix("snapshot_")
+                            .and_then(|s| s.strip_suffix(".bin"))
+                        {
+                            if let Ok(num) = num_str.parse::<u64>() {
+                                if num > max_snapshot_version {
+                                    max_snapshot_version = num;
+                                    let bytes = std::fs::read(&entry.path())?;
+                                    crdt = Some(CRDT::from_bytes(&bytes).map_err(PersistError::BincodeDecode)?);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create new CRDT if no snapshot found
+        let crdt = crdt.unwrap_or_else(|| CRDT::new(node_id, None));
 
         // Create WAL writer
         let wal = WalWriter::new(base_path.clone())?;
@@ -821,51 +987,216 @@ where
         Ok((crdt, total_changes))
     }
 
-    /// Creates a snapshot of the current CRDT state and rotates the WAL.
-    fn create_snapshot(&mut self) -> Result<(), PersistError> {
-        use std::io::Write;
+    /// Compresses data using zstd if compression is enabled.
+    #[cfg(feature = "compression")]
+    fn maybe_compress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
+        if self.config.enable_compression {
+            zstd::encode_all(&data[..], 3).map_err(PersistError::Compression)
+        } else {
+            Ok(data)
+        }
+    }
 
-        // Serialize CRDT to bytes
-        let bytes = self
-            .crdt
-            .to_bytes()
-            .map_err(|e| PersistError::Codec(e))?;
+    #[cfg(not(feature = "compression"))]
+    fn maybe_compress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
+        Ok(data)
+    }
+
+    /// Decompresses data using zstd if it was compressed.
+    #[cfg(feature = "compression")]
+    fn maybe_decompress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
+        if self.config.enable_compression {
+            zstd::decode_all(&data[..]).map_err(PersistError::Compression)
+        } else {
+            Ok(data)
+        }
+    }
+
+    #[cfg(not(feature = "compression"))]
+    fn maybe_decompress(&self, data: Vec<u8>) -> Result<Vec<u8>, PersistError> {
+        Ok(data)
+    }
+
+    /// Determines whether to create a full or incremental snapshot.
+    fn should_create_full_snapshot(&self) -> bool {
+        // Always create full snapshot if:
+        // 1. Incremental snapshots are disabled
+        // 2. Using bincode format (doesn't support incrementals)
+        // 3. No previous full snapshot exists (first snapshot must be full)
+        // 4. Reached the full snapshot interval
+        !self.config.enable_incremental_snapshots
+            || self.config.snapshot_format == SnapshotFormat::Bincode
+            || self.last_full_snapshot_version == 0
+            || self.incremental_snapshot_count >= self.config.full_snapshot_interval
+    }
+
+    /// Creates a full snapshot using MessagePack format.
+    #[cfg(feature = "msgpack")]
+    fn create_full_snapshot_msgpack(&mut self) -> Result<PathBuf, PersistError> {
+        use std::io::Write;
 
         // Increment snapshot version
         self.snapshot_version += 1;
 
-        // Write to versioned snapshot file (snapshot_000001.bin, snapshot_000002.bin, etc.)
-        let snapshot_path = self
-            .base_path
-            .join(format!("snapshot_{:06}.bin", self.snapshot_version));
+        let metadata = SnapshotMetadata {
+            snapshot_type: SnapshotType::Full,
+            version: self.crdt.get_clock().current_time(),
+            format: SnapshotFormat::MessagePack,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
 
-        // Explicitly manage file handle for Windows compatibility
+        // Serialize CRDT using MessagePack (via to_msgpack_bytes which already exists)
+        let crdt_bytes = self.crdt.to_msgpack_bytes()?;
+
+        // Create a simpler snapshot structure with just metadata + crdt bytes
+        // We'll serialize them separately and combine
+        let metadata_bytes = rmp_serde::to_vec(&metadata)?;
+
+        // Combine: metadata_len (u32) + metadata + crdt_bytes
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+        combined.extend_from_slice(&metadata_bytes);
+        combined.extend_from_slice(&crdt_bytes);
+
+        let compressed = self.maybe_compress(combined)?;
+
+        // Write to file
+        let snapshot_path = self.base_path.join(format!(
+            "snapshot_full_{:06}.msgpack",
+            self.snapshot_version
+        ));
+
         {
             let mut file = std::fs::File::create(&snapshot_path)?;
-            file.write_all(&bytes)?;
+            file.write_all(&compressed)?;
             file.sync_all()?;
-            // Explicitly drop before any other operations
             drop(file);
         }
 
-        // On Windows, give OS time to release file locks after explicit drop()
-        // Windows file system operations are asynchronous at kernel level - even after drop(),
-        // the handle may not be fully released immediately, causing subsequent directory ops to fail.
-        // 10ms is typically sufficient, but under heavy load this could still fail.
         #[cfg(target_os = "windows")]
         std::thread::sleep(std::time::Duration::from_millis(10));
 
+        // Update tracking
+        self.incremental_snapshot_count = 0;
+        self.last_full_snapshot_version = self.snapshot_version;
+        self.last_snapshot_crdt_version = self.crdt.get_clock().current_time();
+
+        Ok(snapshot_path)
+    }
+
+    /// Creates an incremental snapshot using MessagePack format.
+    #[cfg(feature = "msgpack")]
+    fn create_incremental_snapshot_msgpack(&mut self) -> Result<PathBuf, PersistError> {
+        use std::io::Write;
+
+        // Get changes since last snapshot
+        let (changed_records, new_tombstones) =
+            self.crdt.get_changed_since(self.last_snapshot_crdt_version);
+
+        // Increment snapshot version
+        self.snapshot_version += 1;
+
+        let metadata = SnapshotMetadata {
+            snapshot_type: SnapshotType::Incremental {
+                base_version: self.last_full_snapshot_version,
+            },
+            version: self.crdt.get_clock().current_time(),
+            format: SnapshotFormat::MessagePack,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        let incremental_snapshot = IncrementalSnapshot {
+            metadata,
+            changed_records,
+            new_tombstones,
+            clock_version: self.crdt.get_clock().current_time(),
+        };
+
+        // Serialize to MessagePack
+        let bytes = rmp_serde::to_vec(&incremental_snapshot)?;
+        let compressed = self.maybe_compress(bytes)?;
+
+        // Write to file
+        let snapshot_path = self.base_path.join(format!(
+            "snapshot_incr_{:06}_base_{:06}.msgpack",
+            self.snapshot_version, self.last_full_snapshot_version
+        ));
+
+        {
+            let mut file = std::fs::File::create(&snapshot_path)?;
+            file.write_all(&compressed)?;
+            file.sync_all()?;
+            drop(file);
+        }
+
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Update tracking
+        self.incremental_snapshot_count += 1;
+        self.last_snapshot_crdt_version = self.crdt.get_clock().current_time();
+
+        Ok(snapshot_path)
+    }
+
+    /// Creates a snapshot of the current CRDT state and rotates the WAL.
+    fn create_snapshot(&mut self) -> Result<(), PersistError> {
+        use std::io::Write;
+
+        let snapshot_path = match self.config.snapshot_format {
+            SnapshotFormat::Bincode => {
+                // Legacy bincode format (no incrementals)
+                let bytes = self.crdt.to_bytes().map_err(PersistError::BincodeEncode)?;
+
+                self.snapshot_version += 1;
+                let path = self
+                    .base_path
+                    .join(format!("snapshot_{:06}.bin", self.snapshot_version));
+
+                {
+                    let mut file = std::fs::File::create(&path)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    drop(file);
+                }
+
+                #[cfg(target_os = "windows")]
+                std::thread::sleep(std::time::Duration::from_millis(10));
+
+                path
+            }
+            #[cfg(feature = "msgpack")]
+            SnapshotFormat::MessagePack => {
+                if self.should_create_full_snapshot() {
+                    self.create_full_snapshot_msgpack()?
+                } else {
+                    self.create_incremental_snapshot_msgpack()?
+                }
+            }
+            #[cfg(not(feature = "msgpack"))]
+            SnapshotFormat::MessagePack => {
+                return Err(PersistError::UnsupportedFeature(
+                    "MessagePack format requires 'msgpack' feature".to_string(),
+                ));
+            }
+        };
+
         // Call snapshot hooks (file is now sealed and immutable)
+        let db_version = self.crdt.get_clock().current_time();
         for hook in &self.snapshot_hooks {
-            hook.on_snapshot(&snapshot_path);
+            hook.on_snapshot(&snapshot_path, db_version);
         }
 
         // Rotate WAL (seals old segments, calls hooks, starts new segment)
-        // Note: Old segments are NOT auto-deleted - call cleanup_old_wal_segments() after upload
         let _ = self.wal.rotate(&self.base_path, &self.wal_segment_hooks)?;
 
         // Auto-cleanup old snapshots if configured
-        // Use require_uploaded=false to actually delete old snapshots (prevents disk bloat)
         if let Some(keep_count) = self.config.auto_cleanup_snapshots {
             let _ = self.cleanup_old_snapshots(keep_count, false);
         }

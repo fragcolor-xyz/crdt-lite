@@ -112,7 +112,12 @@ pub trait SnapshotHook: Send + Sync {
     ///
     /// The snapshot file is immutable and safe for async upload.
     /// This is called synchronously but should spawn async tasks for I/O.
-    fn on_snapshot(&self, snapshot_path: &PathBuf);
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_path` - Path to the sealed snapshot file
+    /// * `db_version` - The CRDT version (logical clock) at time of snapshot
+    fn on_snapshot(&self, snapshot_path: &PathBuf, db_version: u64);
 }
 
 /// WAL segment hook for archival.
@@ -169,10 +174,10 @@ where
 
 impl<F> SnapshotHook for F
 where
-    F: Fn(&PathBuf) + Send + Sync,
+    F: Fn(&PathBuf, u64) + Send + Sync,
 {
-    fn on_snapshot(&self, snapshot_path: &PathBuf) {
-        self(snapshot_path)
+    fn on_snapshot(&self, snapshot_path: &PathBuf, db_version: u64) {
+        self(snapshot_path, db_version)
     }
 }
 
