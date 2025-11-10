@@ -510,14 +510,14 @@ where
     /// }
     ///
     /// impl SnapshotHook for R2Uploader {
-    ///     fn on_snapshot(&self, snapshot_path: &PathBuf) {
+    ///     fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
     ///         let path = snapshot_path.clone();
     ///         let pcrdt = self.pcrdt.clone();
     ///
     ///         // Spawn async upload task
     ///         tokio::spawn(async move {
     ///             // Upload to R2...
-    ///             // r2.put(snapshot_path, data).await?;
+    ///             // r2.put(format!("snapshots/{}/v{}", path.file_name()?, version), data).await?;
     ///
     ///             // Mark as uploaded for safe cleanup
     ///             pcrdt.lock().unwrap().mark_snapshot_uploaded(path);

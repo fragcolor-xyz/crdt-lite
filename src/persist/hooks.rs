@@ -96,13 +96,13 @@ where
 /// }
 ///
 /// impl SnapshotHook for R2Uploader {
-///     fn on_snapshot(&self, snapshot_path: &PathBuf) {
+///     fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
 ///         // Async upload to R2 (spawn task)
 ///         let path = snapshot_path.clone();
 ///         let project = self.project_id.clone();
 ///         tokio::spawn(async move {
 ///             let data = tokio::fs::read(&path).await.unwrap();
-///             // r2.put(format!("projects/{}/snapshots/{}", project, path.file_name()?), data).await
+///             // r2.put(format!("projects/{}/snapshots/{}/v{}", project, path.file_name()?, version), data).await
 ///         });
 ///     }
 /// }
