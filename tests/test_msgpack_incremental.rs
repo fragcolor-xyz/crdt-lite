@@ -443,9 +443,13 @@ fn test_size_reduction() {
         .map(|m| m.len())
         .unwrap_or(0);
 
-    println!("Full snapshot size: {} bytes", full_size);
-    println!("Incremental snapshot size: {} bytes", incr_size);
-    println!("Reduction: {:.1}%", (1.0 - (incr_size as f64 / full_size as f64)) * 100.0);
+    // Log sizes for debugging (only if RUST_LOG is set)
+    #[cfg(test)]
+    if std::env::var("RUST_LOG").is_ok() {
+        eprintln!("Full snapshot size: {} bytes", full_size);
+        eprintln!("Incremental snapshot size: {} bytes", incr_size);
+        eprintln!("Reduction: {:.1}%", (1.0 - (incr_size as f64 / full_size as f64)) * 100.0);
+    }
 
     // Incremental should be much smaller (at least 80% smaller for 5% changes)
     assert!(
