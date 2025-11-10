@@ -599,6 +599,13 @@ let config = PersistConfig {
 4. Apply incremental snapshots in order
 5. Replay WAL files for changes after last snapshot
 
+**Memory considerations:**
+- Each incremental snapshot is loaded entirely into memory during recovery
+- Rule of thumb: ~1.5 MB per 1,000 changed records
+- With default `full_snapshot_interval: 10`, max memory ~15 MB per recovery
+- **If memory is constrained:** Reduce `full_snapshot_interval` or `snapshot_threshold`
+- **If incremental snapshots exceed 10 MB:** Your snapshot frequency is too low
+
 ### Hook System
 
 The persistence layer provides three hook types for integration with cloud storage, network layers, etc.

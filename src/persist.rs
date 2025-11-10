@@ -200,6 +200,11 @@ pub struct PersistConfig {
     /// Enable compression (zstd) for snapshots
     /// Default: false (can be enabled for further size reduction)
     pub enable_compression: bool,
+
+    /// Skip creating incremental snapshots when there are no changes
+    /// Default: true (recommended - empty snapshots provide no value)
+    /// Set to false only for testing/debugging purposes
+    pub skip_empty_incrementals: bool,
 }
 
 impl Default for PersistConfig {
@@ -213,6 +218,7 @@ impl Default for PersistConfig {
             enable_incremental_snapshots: true,
             full_snapshot_interval: 10,
             enable_compression: false,
+            skip_empty_incrementals: true,
         }
     }
 }
@@ -856,6 +862,10 @@ where
                         let mut loaded_crdt = CRDT::from_msgpack_bytes(crdt_bytes)?;
 
                         // Apply incremental snapshots in order
+                        // Note: Each incremental is loaded entirely into memory before applying.
+                        // This is acceptable because incrementals should be small (default config
+                        // creates full snapshot every 10 incrementals). If memory is constrained,
+                        // reduce full_snapshot_interval or snapshot_threshold.
                         for (incr_path, _) in incrementals {
                             let incr_bytes = std::fs::read(&incr_path)?;
                             let incr_decompressed = {
@@ -1110,9 +1120,15 @@ where
         let (changed_records, new_tombstones) =
             self.crdt.get_changed_since(self.last_snapshot_crdt_version);
 
-        // Skip creating snapshot if no changes (optimization)
-        // Note: We still create the snapshot even if empty to track logical clock progression
-        // This is intentional for consistency tracking across nodes
+        // Skip creating snapshot if no changes (configurable)
+        // Empty snapshots provide no value since WAL contains all operations anyway.
+        // Only create empty snapshots if explicitly disabled via config (for testing).
+        if self.config.skip_empty_incrementals
+            && changed_records.is_empty()
+            && new_tombstones.is_empty()
+        {
+            return Ok(PathBuf::new()); // Return empty path to indicate skipped
+        }
 
         // Increment snapshot version
         self.snapshot_version += 1;
@@ -1206,9 +1222,12 @@ where
         };
 
         // Call snapshot hooks (file is now sealed and immutable)
-        let db_version = self.crdt.get_clock().current_time();
-        for hook in &self.snapshot_hooks {
-            hook.on_snapshot(&snapshot_path, db_version);
+        // Skip calling hooks if snapshot was skipped (empty path)
+        if !snapshot_path.as_os_str().is_empty() {
+            let db_version = self.crdt.get_clock().current_time();
+            for hook in &self.snapshot_hooks {
+                hook.on_snapshot(&snapshot_path, db_version);
+            }
         }
 
         // Rotate WAL (seals old segments, calls hooks, starts new segment)
