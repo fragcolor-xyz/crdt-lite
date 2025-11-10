@@ -1099,16 +1099,24 @@ where
             format: SnapshotFormat::MessagePack,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs(),
         };
 
         // Serialize CRDT using MessagePack (via to_msgpack_bytes which already exists)
-        let crdt_bytes = self.crdt.to_msgpack_bytes()?;
+        let crdt_bytes = self.crdt.to_msgpack_bytes()
+            .map_err(|e| {
+                eprintln!("Failed to serialize CRDT for full snapshot: {}", e);
+                e
+            })?;
 
         // Create a simpler snapshot structure with just metadata + crdt bytes
         // We'll serialize them separately and combine
-        let metadata_bytes = rmp_serde::to_vec(&metadata)?;
+        let metadata_bytes = rmp_serde::to_vec(&metadata)
+            .map_err(|e| {
+                eprintln!("Failed to serialize snapshot metadata: {}", e);
+                PersistError::MsgpackEncode(e)
+            })?;
 
         // Combine: metadata_len (u32) + metadata + crdt_bytes
         let mut combined = Vec::new();
@@ -1154,6 +1162,11 @@ where
         // Skip creating snapshot if no changes (configurable)
         // Empty snapshots provide no value since WAL contains all operations anyway.
         // Only create empty snapshots if explicitly disabled via config (for testing).
+        //
+        // NOTE: When skipped, returns empty PathBuf and snapshot hooks are NOT called.
+        // This is intentional - backup systems shouldn't be notified of non-existent files.
+        // If your backup workflow requires periodic notifications even without changes,
+        // set skip_empty_incrementals = false (not recommended).
         if self.config.skip_empty_incrementals
             && changed_records.is_empty()
             && new_tombstones.is_empty()
@@ -1172,7 +1185,7 @@ where
             format: SnapshotFormat::MessagePack,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs(),
         };
 
@@ -1184,7 +1197,14 @@ where
         };
 
         // Serialize to MessagePack
-        let bytes = rmp_serde::to_vec(&incremental_snapshot)?;
+        let bytes = rmp_serde::to_vec(&incremental_snapshot)
+            .map_err(|e| {
+                eprintln!("Failed to serialize incremental snapshot: {} records, {} tombstones",
+                    incremental_snapshot.changed_records.len(),
+                    incremental_snapshot.new_tombstones.len());
+                eprintln!("Serialization error: {}", e);
+                PersistError::MsgpackEncode(e)
+            })?;
         let compressed = self.maybe_compress(bytes)?;
 
         // Write to file
