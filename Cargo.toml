@@ -17,6 +17,10 @@ serde = { version = "1.0", optional = true, default-features = false, features =
 serde_json = { version = "1.0", optional = true, default-features = false, features = ["alloc"] }
 # bincode 2.0 has proper no_std support - serde feature is needed for bincode::serde module
 bincode = { version = "2.0.1", optional = true, default-features = false, features = ["alloc", "derive", "serde"] }
+# MessagePack for schema-evolution-friendly persistence
+rmp-serde = { version = "1.3", optional = true }
+# Optional compression for snapshots
+zstd = { version = "0.13", optional = true }
 # hashbrown provides HashMap for no_std environments (it's the same implementation std uses)
 # Only included when needed for no_std + alloc environments
 hashbrown = { version = "0.15", features = ["serde"], optional = true }
@@ -24,6 +28,8 @@ hashbrown = { version = "0.15", features = ["serde"], optional = true }
 [dev-dependencies]
 serde_json = "1.0"
 bincode = "2.0.1"
+rmp-serde = "1.3"
+tempfile = "3.8"
 
 [features]
 default = ["std"]
@@ -34,8 +40,12 @@ alloc = ["dep:hashbrown"]
 serde = ["dep:serde"]
 json = ["serde", "dep:serde_json"]
 binary = ["serde", "dep:bincode"]
+msgpack = ["serde", "dep:rmp-serde"]
+compression = ["dep:zstd"]
 # Persistence layer with WAL and hooks (requires std for file I/O)
-persist = ["binary", "std"]
+persist = ["binary", "std"]  # Legacy bincode-based persistence
+persist-msgpack = ["binary", "msgpack", "std"]  # MessagePack-based persistence with bincode fallback
+persist-compressed = ["persist-msgpack", "compression"]  # MessagePack + zstd compression
 # Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 node-id-u128 = []
 

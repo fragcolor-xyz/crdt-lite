@@ -91,7 +91,7 @@ where
         for change in changes {
             // Serialize and write each change using bincode::serde
             let bytes = bincode::serde::encode_to_vec(change, config)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             // Write length prefix (for reading back)
             let len = bytes.len() as u64;

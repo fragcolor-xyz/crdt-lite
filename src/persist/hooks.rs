@@ -8,7 +8,7 @@
 
 use crate::Change;
 use std::hash::Hash;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Post-operation hook for broadcasting.
 ///
@@ -115,9 +115,9 @@ pub trait SnapshotHook: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `snapshot_path` - Path to the fsynced snapshot file
-    /// * `version` - CRDT logical clock version (db_version) at snapshot time
-    fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64);
+    /// * `snapshot_path` - Path to the sealed snapshot file
+    /// * `db_version` - The CRDT version (logical clock) at time of snapshot
+    fn on_snapshot(&self, snapshot_path: &Path, db_version: u64);
 }
 
 /// WAL segment hook for archival.
@@ -155,7 +155,7 @@ pub trait WalSegmentHook: Send + Sync {
     /// Called after a WAL segment has been sealed (no longer active).
     ///
     /// The segment file is immutable and safe for async upload.
-    fn on_wal_sealed(&self, segment_path: &PathBuf);
+    fn on_wal_sealed(&self, segment_path: &Path);
 }
 
 // Convenience implementations for closures
@@ -174,18 +174,18 @@ where
 
 impl<F> SnapshotHook for F
 where
-    F: Fn(&PathBuf, u64) + Send + Sync,
+    F: Fn(&Path, u64) + Send + Sync,
 {
-    fn on_snapshot(&self, snapshot_path: &PathBuf, version: u64) {
-        self(snapshot_path, version)
+    fn on_snapshot(&self, snapshot_path: &Path, db_version: u64) {
+        self(snapshot_path, db_version)
     }
 }
 
 impl<F> WalSegmentHook for F
 where
-    F: Fn(&PathBuf) + Send + Sync,
+    F: Fn(&Path) + Send + Sync,
 {
-    fn on_wal_sealed(&self, segment_path: &PathBuf) {
+    fn on_wal_sealed(&self, segment_path: &Path) {
         self(segment_path)
     }
 }

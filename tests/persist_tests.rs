@@ -1,4 +1,4 @@
-#![cfg(feature = "persist")]
+#![cfg(any(feature = "persist", feature = "persist-msgpack", feature = "persist-compressed"))]
 
 use crdt_lite::persist::{PersistedCRDT, PersistConfig};
 use crdt_lite::{Change, CRDT};
@@ -123,6 +123,7 @@ fn test_snapshot_rotation() {
         snapshot_threshold: 5,
         auto_cleanup_snapshots: None, // Manual cleanup for testing
         max_batch_size: Some(10000), // Default value
+        ..Default::default() // Use defaults for new fields
     };
 
     let mut pcrdt =

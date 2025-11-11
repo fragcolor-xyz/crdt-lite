@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_threshold: 3, // Snapshot every 3 changes for demo
         auto_cleanup_snapshots: None, // Manual cleanup after upload verification
         max_batch_size: Some(10000), // Default auto-flush limit
+        ..Default::default() // Use defaults for new fields
     };
 
     let mut pcrdt = PersistedCRDT::<String, String, String>::open(
@@ -33,26 +34,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add snapshot hook - simulates uploading to R2
     let snapshots_clone = uploaded_snapshots.clone();
-    pcrdt.add_snapshot_hook(Box::new(move |snapshot_path: &PathBuf| {
-        println!("📸 Snapshot created: {:?}", snapshot_path.file_name().unwrap());
+    pcrdt.add_snapshot_hook(Box::new(move |snapshot_path: &std::path::Path, db_version: u64| {
+        println!("📸 Snapshot created: {:?} (db_version: {})", snapshot_path.file_name().unwrap(), db_version);
         println!("   └─ Uploading to R2...");
 
         // In real app: tokio::spawn(async move { r2.put(...) })
         // For demo: just track it
-        snapshots_clone.lock().unwrap().push(snapshot_path.clone());
+        snapshots_clone.lock().unwrap().push(snapshot_path.to_path_buf());
 
         println!("   └─ ✓ Uploaded to R2");
     }));
 
     // Add WAL segment hook - simulates uploading sealed segments to R2
     let wal_clone = uploaded_wal_segments.clone();
-    pcrdt.add_wal_segment_hook(Box::new(move |segment_path: &PathBuf| {
+    pcrdt.add_wal_segment_hook(Box::new(move |segment_path: &std::path::Path| {
         println!("📝 WAL segment sealed: {:?}", segment_path.file_name().unwrap());
         println!("   └─ Uploading to R2...");
 
         // In real app: tokio::spawn(async move { r2.put(...) })
         // For demo: just track it
-        wal_clone.lock().unwrap().push(segment_path.clone());
+        wal_clone.lock().unwrap().push(segment_path.to_path_buf());
 
         println!("   └─ ✓ Uploaded to R2");
     }));
