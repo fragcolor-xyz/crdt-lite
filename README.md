@@ -421,6 +421,145 @@ let mut pcrdt = PersistedCRDT::<String, String, String>::open(
 - **Backwards Compatible**: Automatically falls back to bincode for old snapshot files
 - **Optimal Recovery**: Loads latest full snapshot + applies incremental updates
 
+### Schema Evolution Guide
+
+MessagePack allows you to add new fields to your data structures without breaking old snapshots. Here's how:
+
+#### Step 1: Define Your Initial Schema (v1.0)
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    name: String,
+    age: u32,
+}
+
+// Use String as value type for simplicity (store as JSON/msgpack bytes)
+type UserCRDT = PersistedCRDT<String, String, String>;
+```
+
+#### Step 2: Add New Fields (v1.1 - Schema Evolution)
+
+Later, you want to add `email` and `premium` fields:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    name: String,
+    age: u32,
+    // New fields with #[serde(default)]
+    #[serde(default)]
+    email: String,  // Defaults to "" for old snapshots
+    #[serde(default)]
+    premium: bool,  // Defaults to false for old snapshots
+}
+```
+
+#### Step 3: Load Old Snapshots (They Just Work!)
+
+```rust
+// Old snapshot with v1.0 schema loads fine
+let pcrdt = PersistedCRDT::<String, String, String>::open(
+    PathBuf::from("./data"),
+    1,
+    PersistConfig::default(),
+)?;
+
+// Records from old snapshot have default values for new fields
+let record = pcrdt.crdt().get_record(&"user1".to_string()).unwrap();
+// email = "" (default)
+// premium = false (default)
+```
+
+#### Best Practices
+
+**✅ DO:**
+```rust
+// Add new fields with #[serde(default)]
+#[serde(default)]
+email: String,
+
+// Use Option for truly optional fields
+#[serde(default)]
+phone: Option<String>,  // Defaults to None
+
+// Provide custom defaults
+#[serde(default = "default_role")]
+role: String,
+
+fn default_role() -> String {
+    "user".to_string()
+}
+```
+
+**❌ DON'T:**
+```rust
+// Without #[serde(default)] - BREAKS old snapshots!
+email: String,  // ❌ Deserialization fails on old data
+
+// Removing fields - BREAKS old snapshots!
+// (old snapshots have data for removed field)
+
+// Changing field types - BREAKS old snapshots!
+age: String,  // Was u32, now String - ❌ fails
+```
+
+#### Migration Strategy for Breaking Changes
+
+If you must make breaking changes (rename/remove fields, change types):
+
+```rust
+// Option 1: Keep old field, add new field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    #[serde(default)]
+    age_old: u32,           // Keep for compatibility
+    #[serde(default)]
+    age: String,            // New field
+    // ... rest
+}
+
+// On load, migrate old → new
+if user.age.is_empty() && user.age_old > 0 {
+    user.age = user.age_old.to_string();
+}
+
+// Option 2: Version your schema
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "version")]
+enum UserVersioned {
+    #[serde(rename = "1")]
+    V1 { name: String, age: u32 },
+    #[serde(rename = "2")]
+    V2 { name: String, age: String, email: String },
+}
+```
+
+#### MessagePack vs Bincode
+
+**MessagePack (Recommended):**
+```rust
+// v1.0 snapshot
+{ name: "Alice", age: 30 }
+
+// v1.1 code loads v1.0 snapshot
+// ✅ Works! Missing fields get defaults
+User { name: "Alice", age: 30, email: "", premium: false }
+```
+
+**Bincode (Legacy):**
+```rust
+// v1.0 snapshot
+[2 fields] "Alice" 30
+
+// v1.1 code expects 4 fields
+[4 fields] expected ← ❌ ERROR: field count mismatch
+```
+
+This is why we recommend `persist-msgpack` over `persist` (bincode) for production use.
+
 ### Hook System
 
 The persistence layer provides three types of hooks for integration with backup systems, network layers, etc:
