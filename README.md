@@ -77,16 +77,16 @@ The Rust implementation supports `no_std` environments with allocator support.
 ```toml
 [dependencies]
 # For no_std with basic CRDT functionality (requires alloc feature)
-crdt-lite = { version = "0.5", default-features = false, features = ["alloc"] }
+crdt-lite = { version = "0.7", default-features = false, features = ["alloc"] }
 
 # For no_std with JSON serialization
-crdt-lite = { version = "0.5", default-features = false, features = ["alloc", "json"] }
+crdt-lite = { version = "0.7", default-features = false, features = ["alloc", "json"] }
 
 # For no_std with binary serialization (bincode)
-crdt-lite = { version = "0.5", default-features = false, features = ["alloc", "binary"] }
+crdt-lite = { version = "0.7", default-features = false, features = ["alloc", "binary"] }
 
 # For standard environments (default, uses std::collections::HashMap)
-crdt-lite = { version = "0.5", features = ["json"] }
+crdt-lite = { version = "0.7", features = ["json"] }
 ```
 
 **Implementation Notes:**
@@ -102,7 +102,7 @@ By default, `NodeId` is `u64`. For applications using UUID-based node identifier
 
 ```toml
 [dependencies]
-crdt-lite = { version = "0.5", features = ["node-id-u128"] }
+crdt-lite = { version = "0.7", features = ["node-id-u128"] }
 ```
 
 **Why u128?**
@@ -116,8 +116,8 @@ crdt-lite = { version = "0.5", features = ["node-id-u128"] }
 ### Rust Implementation
 
 ```bash
-cargo add crdt-lite  # (when published)
-# or add to Cargo.toml: crdt-lite = "0.5"
+cargo add crdt-lite
+# or add to Cargo.toml: crdt-lite = "0.7"
 ```
 
 ```rust
@@ -355,13 +355,13 @@ The Rust implementation includes an optional persistence layer with WAL (Write-A
 ```toml
 [dependencies]
 # Basic persistence with bincode (legacy)
-crdt-lite = { version = "0.5", features = ["persist"] }
+crdt-lite = { version = "0.7", features = ["persist"] }
 
-# MessagePack persistence with schema evolution support
-crdt-lite = { version = "0.5", features = ["persist-msgpack"] }
+# MessagePack persistence with schema evolution support (recommended)
+crdt-lite = { version = "0.7", features = ["persist-msgpack"] }
 
 # With optional compression (50-70% additional size reduction)
-crdt-lite = { version = "0.5", features = ["persist-compressed"] }
+crdt-lite = { version = "0.7", features = ["persist-compressed"] }
 ```
 
 ```rust
@@ -809,6 +809,9 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 - [x] MessagePack snapshots with schema evolution support (v0.6.0)
 - [x] Incremental snapshots for 95% I/O reduction (v0.6.0)
 - [x] Optional zstd compression for snapshots (v0.6.0)
+- [x] Comprehensive test suite with 68 tests covering all features (v0.7.0)
+- [x] Fixed MessagePack snapshot cleanup (orphaned incrementals) (v0.7.0)
+- [x] Improved empty incremental handling and validation (v0.7.0)
 
 ## Testing
 
