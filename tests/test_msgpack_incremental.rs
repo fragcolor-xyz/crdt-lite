@@ -933,6 +933,89 @@ fn test_schema_evolution() {
 
 #[test]
 #[cfg(feature = "msgpack")]
+fn test_schema_evolution_add_fields() {
+    use serde::{Deserialize, Serialize};
+
+    // Simulate adding fields to a struct across versions
+    // This is the KEY test for schema evolution with MessagePack
+
+    // Version 1: Original struct with 2 fields
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct UserV1 {
+        name: String,
+        age: u32,
+    }
+
+    // Version 2: New struct with 4 fields (2 new fields with defaults)
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct UserV2 {
+        name: String,
+        age: u32,
+        #[serde(default)]
+        email: String,  // New field - defaults to ""
+        #[serde(default)]
+        premium: bool,  // New field - defaults to false
+    }
+
+    let base_path = std::env::temp_dir().join("test_schema_evolution_add_fields");
+    let _ = std::fs::remove_dir_all(&base_path);
+    std::fs::create_dir_all(&base_path).unwrap();
+
+    // Phase 1: Write data with V1 schema (2 fields)
+    {
+        let old_user = UserV1 {
+            name: "Alice".to_string(),
+            age: 30,
+        };
+
+        // Serialize to MessagePack
+        let msgpack_bytes = rmp_serde::to_vec(&old_user).unwrap();
+
+        // Write directly to snapshot file to simulate old version
+        // We'll create a minimal CRDT snapshot structure
+        let snapshot_path = base_path.join("user_v1.msgpack");
+        std::fs::write(&snapshot_path, msgpack_bytes).unwrap();
+    }
+
+    // Phase 2: Read data with V2 schema (4 fields)
+    {
+        let snapshot_path = base_path.join("user_v1.msgpack");
+        let msgpack_bytes = std::fs::read(&snapshot_path).unwrap();
+
+        // Deserialize with NEW struct that has more fields
+        let new_user: UserV2 = rmp_serde::from_slice(&msgpack_bytes).unwrap();
+
+        // Verify old fields preserved
+        assert_eq!(new_user.name, "Alice");
+        assert_eq!(new_user.age, 30);
+
+        // Verify new fields have defaults
+        assert_eq!(new_user.email, "", "New field should default to empty string");
+        assert_eq!(new_user.premium, false, "New field should default to false");
+
+        // This is the magic of MessagePack schema evolution!
+        // Old snapshot with 2 fields loads fine into struct with 4 fields.
+        // Missing fields get their #[serde(default)] values.
+    }
+
+    // Phase 3: Demonstrate bincode would FAIL this test
+    // (Commented out, but this is what would happen)
+    /*
+    {
+        let old_user = UserV1 { name: "Alice".to_string(), age: 30 };
+        let bincode_bytes = bincode::encode_to_vec(&old_user, bincode::config::standard()).unwrap();
+
+        // This would PANIC with bincode:
+        // "invalid type: found 2 fields, expected struct UserV2 with 4 fields"
+        // let new_user: UserV2 = bincode::decode_from_slice(&bincode_bytes, bincode::config::standard()).unwrap();
+    }
+    */
+
+    let _ = std::fs::remove_dir_all(&base_path);
+}
+
+#[test]
+#[cfg(feature = "msgpack")]
 fn test_corrupted_snapshot_recovery() {
     use crdt_lite::persist::{PersistedCRDT, PersistConfig, SnapshotFormat};
     use std::io::Write;
