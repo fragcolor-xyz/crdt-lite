@@ -85,8 +85,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// Persistence module (requires "persist" feature)
-#[cfg(feature = "persist")]
+// Persistence module (requires any persist-related feature)
+#[cfg(any(feature = "persist", feature = "persist-msgpack", feature = "persist-compressed"))]
 pub mod persist;
 
 // Ensure valid feature combination: either std or alloc must be enabled

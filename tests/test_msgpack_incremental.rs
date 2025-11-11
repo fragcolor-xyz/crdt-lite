@@ -1,4 +1,4 @@
-#![cfg(feature = "persist")]
+#![cfg(all(any(feature = "persist", feature = "persist-msgpack", feature = "persist-compressed"), feature = "msgpack"))]
 
 //! Comprehensive tests for MessagePack + Incremental Snapshots functionality
 

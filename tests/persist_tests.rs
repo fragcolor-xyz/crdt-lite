@@ -1,4 +1,4 @@
-#![cfg(feature = "persist")]
+#![cfg(any(feature = "persist", feature = "persist-msgpack", feature = "persist-compressed"))]
 
 use crdt_lite::persist::{PersistedCRDT, PersistConfig};
 use crdt_lite::{Change, CRDT};

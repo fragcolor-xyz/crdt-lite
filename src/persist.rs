@@ -245,7 +245,18 @@ impl Default for PersistConfig {
             snapshot_interval_secs: Some(DEFAULT_SNAPSHOT_INTERVAL_SECS),
             auto_cleanup_snapshots: Some(DEFAULT_AUTO_CLEANUP_SNAPSHOTS),
             max_batch_size: Some(DEFAULT_MAX_BATCH_SIZE),
-            snapshot_format: SnapshotFormat::MessagePack,
+            // Default to MessagePack if available (schema evolution support),
+            // otherwise fall back to Bincode (legacy persist feature)
+            snapshot_format: {
+                #[cfg(feature = "msgpack")]
+                {
+                    SnapshotFormat::MessagePack
+                }
+                #[cfg(not(feature = "msgpack"))]
+                {
+                    SnapshotFormat::Bincode
+                }
+            },
             enable_incremental_snapshots: true,
             full_snapshot_interval: DEFAULT_FULL_SNAPSHOT_INTERVAL,
             enable_compression: false,

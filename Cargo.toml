@@ -45,7 +45,7 @@ msgpack = ["serde", "dep:rmp-serde"]
 compression = ["dep:zstd"]
 # Persistence layer with WAL and hooks (requires std for file I/O)
 persist = ["binary", "std"]  # Legacy bincode-based persistence
-persist-msgpack = ["msgpack", "std"]  # MessagePack-based persistence with schema evolution
+persist-msgpack = ["binary", "msgpack", "std"]  # MessagePack-based persistence with bincode fallback
 persist-compressed = ["persist-msgpack", "compression"]  # MessagePack + zstd compression
 # Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 node-id-u128 = []
