@@ -643,30 +643,61 @@ where
     /// # }
     /// ```
     pub fn cleanup_old_snapshots(&mut self, keep_count: usize, require_uploaded: bool) -> Result<(), PersistError> {
-        let mut snapshots = Vec::new();
+        let mut full_snapshots = Vec::new();
+        let mut incremental_snapshots = Vec::new();
 
-        // Find all snapshot files
+        // Find all snapshot files (both bincode and MessagePack formats)
         if let Ok(entries) = std::fs::read_dir(&self.base_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let filename = entry.file_name();
                 let filename_str = filename.to_string_lossy();
 
-                if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
-                    // Include based on require_uploaded setting
-                    let should_include = if require_uploaded {
-                        self.uploaded_snapshots.contains(&path)
-                    } else {
-                        true // Include all snapshots
-                    };
+                // Include based on require_uploaded setting
+                let should_include = if require_uploaded {
+                    self.uploaded_snapshots.contains(&path)
+                } else {
+                    true // Include all snapshots
+                };
 
-                    if should_include {
-                        if let Some(num_str) = filename_str
-                            .strip_prefix("snapshot_")
-                            .and_then(|s| s.strip_suffix(".bin"))
-                        {
-                            if let Ok(version) = num_str.parse::<u64>() {
-                                snapshots.push((version, path));
+                if !should_include {
+                    continue;
+                }
+
+                // Legacy bincode full snapshots: snapshot_N.bin
+                if filename_str.starts_with("snapshot_") && filename_str.ends_with(".bin") {
+                    if let Some(num_str) = filename_str
+                        .strip_prefix("snapshot_")
+                        .and_then(|s| s.strip_suffix(".bin"))
+                    {
+                        if let Ok(version) = num_str.parse::<u64>() {
+                            full_snapshots.push((version, path));
+                        }
+                    }
+                }
+                // MessagePack full snapshots: snapshot_full_N.msgpack
+                else if filename_str.starts_with("snapshot_full_") && filename_str.ends_with(".msgpack") {
+                    if let Some(num_str) = filename_str
+                        .strip_prefix("snapshot_full_")
+                        .and_then(|s| s.strip_suffix(".msgpack"))
+                    {
+                        if let Ok(version) = num_str.parse::<u64>() {
+                            full_snapshots.push((version, path));
+                        }
+                    }
+                }
+                // MessagePack incremental snapshots: snapshot_incr_N_base_M.msgpack
+                else if filename_str.starts_with("snapshot_incr_") && filename_str.ends_with(".msgpack") {
+                    // Parse: snapshot_incr_VERSION_base_BASEVERSION.msgpack
+                    if let Some(remainder) = filename_str
+                        .strip_prefix("snapshot_incr_")
+                        .and_then(|s| s.strip_suffix(".msgpack"))
+                    {
+                        if let Some((version_str, base_str)) = remainder.split_once("_base_") {
+                            if let (Ok(version), Ok(base_version)) =
+                                (version_str.parse::<u64>(), base_str.parse::<u64>())
+                            {
+                                incremental_snapshots.push((version, base_version, path));
                             }
                         }
                     }
@@ -674,14 +705,40 @@ where
             }
         }
 
-        // Sort by version (newest first)
-        snapshots.sort_by(|a, b| b.0.cmp(&a.0));
+        // Sort full snapshots by version (newest first)
+        full_snapshots.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Delete all except the most recent N
-        for (_, path) in snapshots.iter().skip(keep_count) {
-            std::fs::remove_file(path)?;
-            // Remove from tracking set if present
-            self.uploaded_snapshots.remove(path);
+        // Determine which full snapshot versions to keep
+        let keep_versions: std::collections::HashSet<u64> = full_snapshots
+            .iter()
+            .take(keep_count)
+            .map(|(v, _)| *v)
+            .collect();
+
+        // Delete old full snapshots
+        for (version, path) in &full_snapshots {
+            if !keep_versions.contains(version) {
+                if let Err(e) = std::fs::remove_file(path) {
+                    eprintln!("Failed to delete old full snapshot {:?}: {}", path, e);
+                }
+                // Remove from tracking set if present
+                self.uploaded_snapshots.remove(path);
+            }
+        }
+
+        // Delete incrementals whose base version is not in keep set (orphaned incrementals)
+        // or whose own version makes them superseded by a newer full snapshot
+        for (version, base_version, path) in &incremental_snapshots {
+            let should_delete = !keep_versions.contains(base_version)  // Base snapshot was deleted
+                || keep_versions.iter().any(|&v| v > *version);        // Superseded by newer full
+
+            if should_delete {
+                if let Err(e) = std::fs::remove_file(path) {
+                    eprintln!("Failed to delete old incremental snapshot {:?}: {}", path, e);
+                }
+                // Remove from tracking set if present
+                self.uploaded_snapshots.remove(path);
+            }
         }
 
         Ok(())
@@ -834,6 +891,30 @@ where
                 .map(|(path, version, _)| (path, version))
                 .collect();
             relevant.sort_by_key(|(_, version)| *version);
+
+            // Validate incremental chain integrity
+            if !relevant.is_empty() {
+                let versions: Vec<u64> = relevant.iter().map(|(_, v)| *v).collect();
+
+                // Check 1: Incrementals should start immediately after base
+                if versions[0] != base_version + 1 {
+                    eprintln!(
+                        "WARNING: Incremental chain gap detected. Base version: {}, first incremental: {}",
+                        base_version, versions[0]
+                    );
+                }
+
+                // Check 2: Incrementals should be contiguous (no gaps)
+                for window in versions.windows(2) {
+                    if window[1] != window[0] + 1 {
+                        eprintln!(
+                            "WARNING: Non-contiguous incremental snapshots detected: {} -> {}",
+                            window[0], window[1]
+                        );
+                    }
+                }
+            }
+
             relevant
         } else {
             Vec::new()
@@ -1171,6 +1252,9 @@ where
             && changed_records.is_empty()
             && new_tombstones.is_empty()
         {
+            // Update last_snapshot_time to prevent repeated time-based triggers
+            // (prevents tight loop when no changes but snapshot_interval_secs is set)
+            self.last_snapshot_time = std::time::Instant::now();
             return Ok(PathBuf::new()); // Return empty path to indicate skipped
         }
 
