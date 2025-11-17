@@ -538,24 +538,12 @@ impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
 /// When the `sorted-keys` feature is enabled, the internal storage uses `BTreeMap`
 /// instead of `HashMap`, enabling ordered iteration and range queries at the cost
 /// of O(log n) operations instead of O(1).
+///
+/// Note: K must implement `Ord` to support potential future use of sorted-keys.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(all(feature = "serde", not(feature = "sorted-keys")), serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-#[cfg_attr(all(feature = "serde", feature = "sorted-keys"), serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-#[cfg(not(feature = "sorted-keys"))]
-pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
-  node_id: NodeId,
-  clock: LogicalClock,
-  data: DataMap<K, Record<C, V>>,
-  tombstones: TombstoneStorage<K>,
-  #[cfg_attr(feature = "serde", serde(skip, default))]
-  parent: Option<Arc<CRDT<K, C, V>>>,
-  #[allow(dead_code)]
-  base_version: u64,
-}
-
-#[cfg(feature = "sorted-keys")]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
 pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
@@ -569,7 +557,7 @@ pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
 
 // Implementation for non-sorted keys (HashMap)
 #[cfg(not(feature = "sorted-keys"))]
-impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
+impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Creates a new empty CRDT.
   ///
   /// # Arguments
