@@ -115,6 +115,16 @@ use core::{cmp::Ordering, hash::Hash};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use hashbrown::{HashMap, HashSet};
 
+// Conditional type aliases for sorted vs unsorted storage
+#[cfg(all(feature = "sorted-keys", feature = "std"))]
+use std::collections::BTreeMap as DataMap;
+#[cfg(all(feature = "sorted-keys", not(feature = "std"), feature = "alloc"))]
+use alloc::collections::BTreeMap as DataMap;
+#[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
+type DataMap<K, V> = HashMap<K, V>;
+#[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
+type DataMap<K, V> = HashMap<K, V>;
+
 /// Type alias for node IDs
 ///
 /// By default, NodeId is u64. Use the `node-id-u128` feature to enable u128 for UUID-based IDs:
@@ -522,14 +532,22 @@ impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
 /// Main CRDT structure, generic over key (K), column (C), and value (V) types.
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
+///
+/// # Sorted Keys Feature
+///
+/// When the `sorted-keys` feature is enabled, the internal storage uses `BTreeMap`
+/// instead of `HashMap`, enabling ordered iteration and range queries at the cost
+/// of O(log n) operations instead of O(1).
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+#[cfg_attr(all(feature = "serde", not(feature = "sorted-keys")), serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+#[cfg_attr(all(feature = "serde", feature = "sorted-keys"), serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+#[cfg(not(feature = "sorted-keys"))]
 pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
-  data: HashMap<K, Record<C, V>>,
+  data: DataMap<K, Record<C, V>>,
   tombstones: TombstoneStorage<K>,
   #[cfg_attr(feature = "serde", serde(skip, default))]
   parent: Option<Arc<CRDT<K, C, V>>>,
@@ -537,6 +555,20 @@ pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   base_version: u64,
 }
 
+#[cfg(feature = "sorted-keys")]
+pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
+  node_id: NodeId,
+  clock: LogicalClock,
+  data: DataMap<K, Record<C, V>>,
+  tombstones: TombstoneStorage<K>,
+  #[cfg_attr(feature = "serde", serde(skip, default))]
+  parent: Option<Arc<CRDT<K, C, V>>>,
+  #[allow(dead_code)]
+  base_version: u64,
+}
+
+// Implementation for non-sorted keys (HashMap)
+#[cfg(not(feature = "sorted-keys"))]
 impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Creates a new empty CRDT.
   ///
@@ -1473,6 +1505,974 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   }
 }
 
+// Implementation for sorted keys (BTreeMap)
+#[cfg(feature = "sorted-keys")]
+impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
+  /// Creates a new empty CRDT.
+  ///
+  /// # Arguments
+  ///
+  /// * `node_id` - Unique identifier for this CRDT node
+  /// * `parent` - Optional parent CRDT for hierarchical structures
+  pub fn new(node_id: NodeId, parent: Option<Arc<CRDT<K, C, V>>>) -> Self {
+    let (clock, base_version) = if let Some(ref p) = parent {
+      let parent_clock = p.clock;
+      let base = parent_clock.current_time();
+      (parent_clock, base)
+    } else {
+      (LogicalClock::new(), 0)
+    };
+
+    Self {
+      node_id,
+      clock,
+      data: DataMap::new(),
+      tombstones: TombstoneStorage::new(),
+      parent,
+      base_version,
+    }
+  }
+
+  /// Creates a CRDT from a list of changes (e.g., loaded from disk).
+  ///
+  /// # Arguments
+  ///
+  /// * `node_id` - The unique identifier for this CRDT node
+  /// * `changes` - A list of changes to apply to reconstruct the CRDT state
+  pub fn from_changes(node_id: NodeId, changes: Vec<Change<K, C, V>>) -> Self {
+    let mut crdt = Self::new(node_id, None);
+    crdt.apply_changes(changes);
+    crdt
+  }
+
+  /// Resets the CRDT to a state as if it was constructed with the given changes.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - A list of changes to apply to reconstruct the CRDT state
+  pub fn reset(&mut self, changes: Vec<Change<K, C, V>>) {
+    self.data.clear();
+    self.tombstones.clear();
+    self.clock = LogicalClock::new();
+    self.apply_changes(changes);
+  }
+
+  /// Applies a list of changes to reconstruct the CRDT state.
+  fn apply_changes(&mut self, changes: Vec<Change<K, C, V>>) {
+    // Determine the maximum db_version from the changes
+    let max_db_version = changes
+      .iter()
+      .map(|c| c.db_version.max(c.local_db_version))
+      .max()
+      .unwrap_or(0);
+
+    // Set the logical clock to the maximum db_version
+    self.clock.set_time(max_db_version);
+
+    // Apply each change to reconstruct the CRDT state
+    for change in changes {
+      let record_id = change.record_id.clone();
+      let col_name = change.col_name.clone();
+      let remote_col_version = change.col_version;
+      let remote_db_version = change.db_version;
+      let remote_node_id = change.node_id;
+      let remote_local_db_version = change.local_db_version;
+      let remote_value = change.value;
+
+      if col_name.is_none() {
+        // Handle deletion
+        self.data.remove(&record_id);
+
+        // Store deletion information in tombstones
+        self.tombstones.insert_or_assign(
+          record_id,
+          TombstoneInfo::new(remote_db_version, remote_node_id, remote_local_db_version),
+        );
+      } else if let Some(col_key) = col_name {
+        // Handle insertion or update
+        if !self.is_record_tombstoned(&record_id, false) {
+          let record = self.get_or_create_record_unchecked(&record_id, false);
+
+          // Insert or update the field value
+          if let Some(value) = remote_value {
+            record.fields.insert(col_key.clone(), value);
+          }
+
+          // Update the column version info
+          let col_ver = ColumnVersion::new(
+            remote_col_version,
+            remote_db_version,
+            remote_node_id,
+            remote_local_db_version,
+          );
+          record.column_versions.insert(col_key, col_ver);
+
+          // Update version boundaries
+          if remote_local_db_version < record.lowest_local_db_version {
+            record.lowest_local_db_version = remote_local_db_version;
+          }
+          if remote_local_db_version > record.highest_local_db_version {
+            record.highest_local_db_version = remote_local_db_version;
+          }
+        }
+      }
+    }
+  }
+
+  /// Inserts a new record or updates an existing record in the CRDT.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `fields` - An iterator of (column_name, value) pairs
+  ///
+  /// # Returns
+  ///
+  /// A vector of changes created by this operation
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn insert_or_update<I>(&mut self, record_id: &K, fields: I) -> Vec<Change<K, C, V>>
+  where
+    I: IntoIterator<Item = (C, V)>,
+  {
+    self.insert_or_update_with_flags(record_id, 0, fields)
+  }
+
+  /// Inserts a new record or updates an existing record with flags.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `flags` - Flags to indicate the type of change
+  /// * `fields` - An iterator of (column_name, value) pairs
+  ///
+  /// # Returns
+  ///
+  /// A vector of changes created by this operation
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn insert_or_update_with_flags<I>(
+    &mut self,
+    record_id: &K,
+    flags: u32,
+    fields: I,
+  ) -> Vec<Change<K, C, V>>
+  where
+    I: IntoIterator<Item = (C, V)>,
+  {
+    let db_version = self.clock.tick();
+
+    // Check if the record is tombstoned
+    if self.is_record_tombstoned(record_id, false) {
+      return Vec::new();
+    }
+
+    let mut changes = Vec::new();
+    let node_id = self.node_id; // Store node_id before mutable borrow
+    let record = self.get_or_create_record_unchecked(record_id, false);
+
+    for (col_name, value) in fields {
+      let col_version = if let Some(col_info) = record.column_versions.get_mut(&col_name) {
+        col_info.col_version += 1;
+        col_info.db_version = db_version;
+        col_info.node_id = node_id;
+        col_info.local_db_version = db_version;
+        col_info.col_version
+      } else {
+        record.column_versions.insert(
+          col_name.clone(),
+          ColumnVersion::new(1, db_version, node_id, db_version),
+        );
+        1
+      };
+
+      // Update record version boundaries
+      if db_version < record.lowest_local_db_version {
+        record.lowest_local_db_version = db_version;
+      }
+      if db_version > record.highest_local_db_version {
+        record.highest_local_db_version = db_version;
+      }
+
+      record.fields.insert(col_name.clone(), value.clone());
+      changes.push(Change::new(
+        record_id.clone(),
+        Some(col_name),
+        Some(value),
+        col_version,
+        db_version,
+        node_id,
+        db_version,
+        flags,
+      ));
+    }
+
+    changes
+  }
+
+  /// Deletes a record by marking it as tombstoned.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the deletion
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_record(&mut self, record_id: &K) -> Option<Change<K, C, V>> {
+    self.delete_record_with_flags(record_id, 0)
+  }
+
+  /// Deletes a record with flags.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `flags` - Flags to indicate the type of change
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the deletion
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_record_with_flags(&mut self, record_id: &K, flags: u32) -> Option<Change<K, C, V>> {
+    if self.is_record_tombstoned(record_id, false) {
+      return None;
+    }
+
+    let db_version = self.clock.tick();
+
+    // Mark as tombstone and remove data
+    self.data.remove(record_id);
+
+    // Store deletion information in tombstones
+    self.tombstones.insert_or_assign(
+      record_id.clone(),
+      TombstoneInfo::new(db_version, self.node_id, db_version),
+    );
+
+    Some(Change::new(
+      record_id.clone(),
+      None,
+      None,
+      TOMBSTONE_COL_VERSION,
+      db_version,
+      self.node_id,
+      db_version,
+      flags,
+    ))
+  }
+
+  /// Deletes a specific field from a record.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `field_name` - The name of the field to delete
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the field deletion. Returns None if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_field(&mut self, record_id: &K, field_name: &C) -> Option<Change<K, C, V>> {
+    self.delete_field_with_flags(record_id, field_name, 0)
+  }
+
+  /// Deletes a specific field from a record with flags.
+  ///
+  /// # Arguments
+  ///
+  /// * `record_id` - The unique identifier for the record
+  /// * `field_name` - The name of the field to delete
+  /// * `flags` - Flags to indicate the type of change
+  ///
+  /// # Returns
+  ///
+  /// An optional Change representing the field deletion. Returns None if:
+  /// - The record is tombstoned
+  /// - The record doesn't exist
+  /// - The field doesn't exist in the record
+  #[must_use = "changes should be propagated to other nodes"]
+  pub fn delete_field_with_flags(
+    &mut self,
+    record_id: &K,
+    field_name: &C,
+    flags: u32,
+  ) -> Option<Change<K, C, V>> {
+    // Check if the record is tombstoned
+    if self.is_record_tombstoned(record_id, false) {
+      return None;
+    }
+
+    // Get the record (return None if it doesn't exist)
+    let record = self.data.get_mut(record_id)?;
+
+    // Check if the field exists
+    if !record.fields.contains_key(field_name) {
+      return None;
+    }
+
+    let db_version = self.clock.tick();
+
+    // Get or create column version and increment it
+    let col_version = if let Some(col_info) = record.column_versions.get_mut(field_name) {
+      col_info.col_version += 1;
+      col_info.db_version = db_version;
+      col_info.node_id = self.node_id;
+      col_info.local_db_version = db_version;
+      col_info.col_version
+    } else {
+      // This shouldn't happen if the field exists, but handle it gracefully
+      record.column_versions.insert(
+        field_name.clone(),
+        ColumnVersion::new(1, db_version, self.node_id, db_version),
+      );
+      1
+    };
+
+    // Update record version boundaries
+    if db_version < record.lowest_local_db_version {
+      record.lowest_local_db_version = db_version;
+    }
+    if db_version > record.highest_local_db_version {
+      record.highest_local_db_version = db_version;
+    }
+
+    // Remove the field from the record (but keep the ColumnVersion as field tombstone)
+    record.fields.remove(field_name);
+
+    Some(Change::new(
+      record_id.clone(),
+      Some(field_name.clone()),
+      None, // None value indicates field deletion
+      col_version,
+      db_version,
+      self.node_id,
+      db_version,
+      flags,
+    ))
+  }
+
+  /// Merges incoming changes into the CRDT.
+  ///
+  /// # Arguments
+  ///
+  /// * `changes` - Vector of changes to merge
+  /// * `merge_rule` - The merge rule to use for conflict resolution
+  ///
+  /// # Returns
+  ///
+  /// Vector of accepted changes (if requested)
+  pub fn merge_changes<R: MergeRule<K, C, V>>(
+    &mut self,
+    changes: Vec<Change<K, C, V>>,
+    merge_rule: &R,
+  ) -> Vec<Change<K, C, V>> {
+    self.merge_changes_impl(changes, false, merge_rule)
+  }
+
+  fn merge_changes_impl<R: MergeRule<K, C, V>>(
+    &mut self,
+    changes: Vec<Change<K, C, V>>,
+    ignore_parent: bool,
+    merge_rule: &R,
+  ) -> Vec<Change<K, C, V>> {
+    let mut accepted_changes = Vec::new();
+
+    if changes.is_empty() {
+      return accepted_changes;
+    }
+
+    for change in changes {
+      // Move values from change to avoid unnecessary clones
+      let Change {
+        record_id,
+        col_name,
+        value: remote_value,
+        col_version: remote_col_version,
+        db_version: remote_db_version,
+        node_id: remote_node_id,
+        flags,
+        ..
+      } = change;
+
+      // Always update the logical clock to maintain causal consistency
+      let new_local_db_version = self.clock.update(remote_db_version);
+
+      // Skip all changes for tombstoned records
+      if self.is_record_tombstoned(&record_id, ignore_parent) {
+        continue;
+      }
+
+      // Retrieve local column version information
+      let local_col_info = if col_name.is_none() {
+        // For deletions, check tombstones
+        self
+          .tombstones
+          .find(&record_id)
+          .map(|info| info.as_column_version())
+      } else if let Some(ref col) = col_name {
+        // For column updates, check the record
+        self
+          .get_record_ptr(&record_id, ignore_parent)
+          .and_then(|record| record.column_versions.get(col).copied())
+      } else {
+        None
+      };
+
+      // Determine whether to accept the remote change
+      let should_accept = if let Some(local_info) = local_col_info {
+        merge_rule.should_accept(
+          local_info.col_version,
+          local_info.db_version,
+          local_info.node_id,
+          remote_col_version,
+          remote_db_version,
+          remote_node_id,
+        )
+      } else {
+        true
+      };
+
+      if should_accept {
+        if let Some(col_key) = col_name {
+          // Handle insertion or update
+          let record = self.get_or_create_record_unchecked(&record_id, ignore_parent);
+
+          // Update field value
+          if let Some(value) = remote_value.clone() {
+            record.fields.insert(col_key.clone(), value);
+          } else {
+            // If remote_value is None, remove the field
+            record.fields.remove(&col_key);
+          }
+
+          // Update the column version info and record version boundaries
+          record.column_versions.insert(
+            col_key.clone(),
+            ColumnVersion::new(
+              remote_col_version,
+              remote_db_version,
+              remote_node_id,
+              new_local_db_version,
+            ),
+          );
+
+          // Update version boundaries
+          if new_local_db_version < record.lowest_local_db_version {
+            record.lowest_local_db_version = new_local_db_version;
+          }
+          if new_local_db_version > record.highest_local_db_version {
+            record.highest_local_db_version = new_local_db_version;
+          }
+
+          accepted_changes.push(Change::new(
+            record_id,
+            Some(col_key),
+            remote_value,
+            remote_col_version,
+            remote_db_version,
+            remote_node_id,
+            new_local_db_version,
+            flags,
+          ));
+        } else {
+          // Handle deletion
+          self.data.remove(&record_id);
+
+          // Store deletion information in tombstones
+          self.tombstones.insert_or_assign(
+            record_id.clone(),
+            TombstoneInfo::new(remote_db_version, remote_node_id, new_local_db_version),
+          );
+
+          accepted_changes.push(Change::new(
+            record_id,
+            None,
+            None,
+            remote_col_version,
+            remote_db_version,
+            remote_node_id,
+            new_local_db_version,
+            flags,
+          ));
+        }
+      }
+    }
+
+    accepted_changes
+  }
+
+  /// Retrieves all changes since a given `last_db_version`.
+  ///
+  /// # Arguments
+  ///
+  /// * `last_db_version` - The database version to retrieve changes since
+  ///
+  /// # Returns
+  ///
+  /// A vector of changes
+  #[must_use]
+  pub fn get_changes_since(&self, last_db_version: u64) -> Vec<Change<K, C, V>>
+  where
+    C: Ord,
+  {
+    self.get_changes_since_excluding(last_db_version, &HashSet::new())
+  }
+
+  /// Retrieves all changes since a given `last_db_version`, excluding specific nodes.
+  pub fn get_changes_since_excluding(
+    &self,
+    last_db_version: u64,
+    excluding: &HashSet<NodeId>,
+  ) -> Vec<Change<K, C, V>>
+  where
+    C: Ord,
+  {
+    let mut changes = Vec::new();
+
+    // Get changes from parent
+    if let Some(ref parent) = self.parent {
+      let parent_changes = parent.get_changes_since_excluding(last_db_version, excluding);
+      changes.extend(parent_changes);
+    }
+
+    // Get changes from regular records
+    for (record_id, record) in &self.data {
+      // Skip records that haven't changed since last_db_version
+      if record.highest_local_db_version <= last_db_version {
+        continue;
+      }
+
+      for (col_name, clock_info) in &record.column_versions {
+        if clock_info.local_db_version > last_db_version && !excluding.contains(&clock_info.node_id)
+        {
+          let value = record.fields.get(col_name).cloned();
+
+          changes.push(Change::new(
+            record_id.clone(),
+            Some(col_name.clone()),
+            value,
+            clock_info.col_version,
+            clock_info.db_version,
+            clock_info.node_id,
+            clock_info.local_db_version,
+            0,
+          ));
+        }
+      }
+    }
+
+    // Get deletion changes from tombstones
+    for (record_id, tombstone_info) in self.tombstones.iter() {
+      if tombstone_info.local_db_version > last_db_version
+        && !excluding.contains(&tombstone_info.node_id)
+      {
+        changes.push(Change::new(
+          record_id.clone(),
+          None,
+          None,
+          TOMBSTONE_COL_VERSION,
+          tombstone_info.db_version,
+          tombstone_info.node_id,
+          tombstone_info.local_db_version,
+          0,
+        ));
+      }
+    }
+
+    if self.parent.is_some() {
+      // Compress changes to remove redundant operations
+      Self::compress_changes(&mut changes);
+    }
+
+    changes
+  }
+
+  /// Compresses a vector of changes in-place by removing redundant changes.
+  ///
+  /// Changes are sorted and then compressed using a two-pointer technique.
+  ///
+  /// # Performance
+  ///
+  /// This method uses `sort_unstable_by` which provides O(n log n) average time complexity
+  /// but does not preserve the relative order of equal elements. Since the comparator
+  /// provides a total ordering, stability is not required.
+  pub fn compress_changes(changes: &mut Vec<Change<K, C, V>>)
+  where
+    C: Ord,
+  {
+    if changes.is_empty() {
+      return;
+    }
+
+    // Sort changes using the DefaultChangeComparator
+    // Use sort_unstable for better performance since we don't need stable sorting
+    let comparator = DefaultChangeComparator;
+    changes.sort_unstable_by(|a, b| comparator.compare(a, b));
+
+    // Use two-pointer technique to compress in-place
+    let mut write = 0;
+    for read in 1..changes.len() {
+      if changes[read].record_id != changes[write].record_id {
+        // New record, always keep it
+        write += 1;
+        if write != read {
+          changes[write] = changes[read].clone();
+        }
+      } else if changes[read].col_name.is_none() && changes[write].col_name.is_some() {
+        // Current read is a deletion, backtrack to first change for this record
+        // and replace it with the deletion, effectively discarding all field updates
+        let mut first_pos = write;
+        while first_pos > 0 && changes[first_pos - 1].record_id == changes[read].record_id {
+          first_pos -= 1;
+        }
+        changes[first_pos] = changes[read].clone();
+        write = first_pos;
+      } else if changes[read].col_name != changes[write].col_name
+        && changes[write].col_name.is_some()
+      {
+        // New column for the same record
+        write += 1;
+        if write != read {
+          changes[write] = changes[read].clone();
+        }
+      }
+      // Else: same record and column, keep the existing one (most recent due to sorting)
+    }
+
+    changes.truncate(write + 1);
+  }
+
+  /// Retrieves a reference to a record if it exists.
+  pub fn get_record(&self, record_id: &K) -> Option<&Record<C, V>> {
+    self.get_record_ptr(record_id, false)
+  }
+
+  /// Checks if a record is tombstoned.
+  pub fn is_tombstoned(&self, record_id: &K) -> bool {
+    self.is_record_tombstoned(record_id, false)
+  }
+
+  /// Gets tombstone information for a record.
+  pub fn get_tombstone(&self, record_id: &K) -> Option<TombstoneInfo> {
+    if let Some(info) = self.tombstones.find(record_id) {
+      return Some(info);
+    }
+
+    if let Some(ref parent) = self.parent {
+      return parent.get_tombstone(record_id);
+    }
+
+    None
+  }
+
+  /// Removes tombstones older than the specified version.
+  ///
+  /// # Safety and DoS Mitigation
+  ///
+  /// **IMPORTANT**: Only call this method when ALL participating nodes have acknowledged
+  /// the `min_acknowledged_version`. Compacting too early may cause deleted records to
+  /// reappear on nodes that haven't received the deletion yet.
+  ///
+  /// To prevent DoS via tombstone accumulation:
+  /// - Call this method periodically as part of your sync protocol
+  /// - Track which versions have been acknowledged by all nodes
+  /// - Consider implementing a tombstone limit and rejecting operations when exceeded
+  ///
+  /// # Arguments
+  ///
+  /// * `min_acknowledged_version` - Tombstones with db_version < this value will be removed
+  ///
+  /// # Returns
+  ///
+  /// The number of tombstones removed
+  pub fn compact_tombstones(&mut self, min_acknowledged_version: u64) -> usize {
+    self.tombstones.compact(min_acknowledged_version)
+  }
+
+  /// Gets the number of tombstones currently stored.
+  pub fn tombstone_count(&self) -> usize {
+    self.tombstones.len()
+  }
+
+  /// Gets the current logical clock.
+  pub fn get_clock(&self) -> &LogicalClock {
+    &self.clock
+  }
+
+  /// Gets a reference to the internal data map.
+  pub fn get_data(&self) -> &DataMap<K, Record<C, V>> {
+    &self.data
+  }
+
+  /// Serializes the CRDT to a JSON string.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "json")]
+  pub fn to_json(&self) -> Result<String, serde_json::Error>
+  where
+    K: serde::Serialize,
+    C: serde::Serialize,
+    V: serde::Serialize,
+  {
+    serde_json::to_string(self)
+  }
+
+  /// Deserializes a CRDT from a JSON string.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "json")]
+  pub fn from_json(json: &str) -> Result<Self, serde_json::Error>
+  where
+    K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    serde_json::from_str(json)
+  }
+
+  /// Serializes the CRDT to bytes using bincode.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "binary")]
+  pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError>
+  where
+    K: serde::Serialize,
+    C: serde::Serialize,
+    V: serde::Serialize,
+  {
+    bincode::serde::encode_to_vec(self, bincode::config::standard())
+  }
+
+  /// Deserializes a CRDT from bytes using bincode.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "binary")]
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError>
+  where
+    K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    let (result, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+    Ok(result)
+  }
+
+  /// Serializes the CRDT to bytes using MessagePack.
+  ///
+  /// MessagePack supports schema evolution - fields can be added with `#[serde(default)]`
+  /// without breaking compatibility with older snapshots.
+  ///
+  /// Note: The parent relationship is not serialized and must be rebuilt after deserialization.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if serialization fails.
+  #[cfg(feature = "msgpack")]
+  pub fn to_msgpack_bytes(&self) -> Result<Vec<u8>, rmp_serde::encode::Error>
+  where
+    K: serde::Serialize,
+    C: serde::Serialize,
+    V: serde::Serialize,
+  {
+    rmp_serde::to_vec(self)
+  }
+
+  /// Deserializes a CRDT from MessagePack bytes.
+  ///
+  /// MessagePack supports schema evolution - older snapshots can be loaded even if
+  /// the CRDT structure has new fields with `#[serde(default)]`.
+  ///
+  /// Note: The parent relationship is not deserialized and will be `None`.
+  /// Applications must rebuild parent-child relationships if needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if deserialization fails.
+  #[cfg(feature = "msgpack")]
+  pub fn from_msgpack_bytes(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error>
+  where
+    K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone,
+    C: serde::de::DeserializeOwned + Hash + Eq + Clone,
+    V: serde::de::DeserializeOwned + Clone,
+  {
+    rmp_serde::from_slice(bytes)
+  }
+
+  /// Gets records and tombstones that have changed since a specific version.
+  ///
+  /// This is used for creating incremental snapshots, which only contain
+  /// records that have been modified since the base snapshot.
+  ///
+  /// # Arguments
+  ///
+  /// * `since_version` - Only return changes after this db_version
+  ///
+  /// # Returns
+  ///
+  /// Tuple of (changed_records, new_tombstones)
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// // Get all changes since version 1000
+  /// let (records, tombstones) = crdt.get_changed_since(1000);
+  /// // records contains only records modified after version 1000
+  /// // tombstones contains only records deleted after version 1000
+  /// ```
+  #[cfg(feature = "std")]
+  pub fn get_changed_since(&self, since_version: u64) -> (
+    DataMap<K, Record<C, V>>,
+    HashMap<K, TombstoneInfo>,
+  ) {
+    let records = self.data
+      .iter()
+      .filter(|(_, record)| record.highest_local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+
+    let tombstones = self.tombstones
+      .iter()
+      .filter(|(_, info)| info.local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+
+    (records, tombstones)
+  }
+
+  /// Gets records and tombstones that have changed since a specific version (no_std version).
+  #[cfg(not(feature = "std"))]
+  pub fn get_changed_since(&self, since_version: u64) -> (
+    DataMap<K, Record<C, V>>,
+    hashbrown::HashMap<K, TombstoneInfo>,
+  ) {
+    let records = self.data
+      .iter()
+      .filter(|(_, record)| record.highest_local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+
+    let tombstones = self.tombstones
+      .iter()
+      .filter(|(_, info)| info.local_db_version > since_version)
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+
+    (records, tombstones)
+  }
+
+  /// Query records within a specific key range (only available with sorted-keys feature).
+  ///
+  /// This method leverages BTreeMap's range query capability to efficiently retrieve
+  /// all records whose keys fall within the specified range.
+  ///
+  /// # Arguments
+  ///
+  /// * `range` - A range of keys to query (e.g., `"session-abc-".."session-abd-"`)
+  ///
+  /// # Returns
+  ///
+  /// An iterator over key-value pairs within the range
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// // Get all records for a specific session
+  /// for (key, record) in crdt.range("session-abc-".."session-abd-") {
+  ///     println!("Found record: {:?}", record);
+  /// }
+  ///
+  /// // Get all records with a specific prefix
+  /// for (key, record) in crdt.range("user-".."user/") {
+  ///     // Keys starting with "user-" (using "user/" as exclusive upper bound)
+  /// }
+  /// ```
+  pub fn range<R>(&self, range: R) -> impl Iterator<Item = (&K, &Record<C, V>)>
+  where
+    R: std::ops::RangeBounds<K>,
+  {
+    self.data.range(range)
+  }
+
+  // Helper methods
+
+  fn is_record_tombstoned(&self, record_id: &K, ignore_parent: bool) -> bool {
+    if self.tombstones.find(record_id).is_some() {
+      return true;
+    }
+
+    if !ignore_parent {
+      if let Some(ref parent) = self.parent {
+        return parent.is_record_tombstoned(record_id, false);
+      }
+    }
+
+    false
+  }
+
+  fn get_or_create_record_unchecked(
+    &mut self,
+    record_id: &K,
+    ignore_parent: bool,
+  ) -> &mut Record<C, V> {
+    #[cfg(feature = "std")]
+    use std::collections::btree_map::Entry;
+    #[cfg(all(not(feature = "std"), feature = "alloc"))]
+    use alloc::collections::btree_map::Entry;
+
+    match self.data.entry(record_id.clone()) {
+      Entry::Occupied(e) => e.into_mut(),
+      Entry::Vacant(e) => {
+        let record = if !ignore_parent {
+          self
+            .parent
+            .as_ref()
+            .and_then(|p| p.get_record_ptr(record_id, false))
+            .cloned()
+            .unwrap_or_else(Record::new)
+        } else {
+          Record::new()
+        };
+        e.insert(record)
+      }
+    }
+  }
+
+  fn get_record_ptr(&self, record_id: &K, ignore_parent: bool) -> Option<&Record<C, V>> {
+    if let Some(record) = self.data.get(record_id) {
+      return Some(record);
+    }
+
+    if !ignore_parent {
+      if let Some(ref parent) = self.parent {
+        return parent.get_record_ptr(record_id, false);
+      }
+    }
+
+    None
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1739,5 +2739,54 @@ mod tests {
       // Verify parent's data is NOT in deserialized child
       assert!(deserialized.get_record(&"parent_record".to_string()).is_none());
     }
+  }
+
+  #[test]
+  #[cfg(feature = "sorted-keys")]
+  fn test_sorted_keys_range_queries() {
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
+
+    // Insert records with composite keys
+    let _ = crdt.insert_or_update(
+      &"session-abc-001".to_string(),
+      vec![("data".to_string(), "first".to_string())],
+    );
+    let _ = crdt.insert_or_update(
+      &"session-abc-002".to_string(),
+      vec![("data".to_string(), "second".to_string())],
+    );
+    let _ = crdt.insert_or_update(
+      &"session-abc-003".to_string(),
+      vec![("data".to_string(), "third".to_string())],
+    );
+    let _ = crdt.insert_or_update(
+      &"session-xyz-001".to_string(),
+      vec![("data".to_string(), "other".to_string())],
+    );
+    let _ = crdt.insert_or_update(
+      &"user-001".to_string(),
+      vec![("name".to_string(), "Alice".to_string())],
+    );
+
+    // Test range query for session-abc records
+    let session_abc_records: Vec<_> = crdt
+      .range("session-abc-".to_string().."session-abd-".to_string())
+      .collect();
+
+    assert_eq!(session_abc_records.len(), 3);
+    assert!(session_abc_records
+      .iter()
+      .all(|(k, _)| k.starts_with("session-abc-")));
+
+    // Test that we can iterate in sorted order
+    let all_keys: Vec<String> = crdt.get_data().keys().cloned().collect();
+    let mut sorted_keys = all_keys.clone();
+    sorted_keys.sort();
+    assert_eq!(all_keys, sorted_keys, "Keys should be in sorted order");
+
+    // Test range query boundaries
+    let range_from_user: Vec<_> = crdt.range("user-".to_string()..).collect();
+    assert_eq!(range_from_user.len(), 1);
+    assert_eq!(range_from_user[0].0, "user-001");
   }
 }

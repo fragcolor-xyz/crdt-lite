@@ -136,6 +136,72 @@ pub struct CRDT<K, V> {
 - `diff()`: Compute changes between two CRDTs
 - Child sees parent data but maintains separate modifications
 
+#### 6. Sorted Keys (Optional Feature)
+
+The Rust implementation supports an optional `sorted-keys` feature that replaces the internal HashMap with BTreeMap for sorted key storage and range queries.
+
+**Enable in Cargo.toml:**
+```toml
+[dependencies]
+crdt-lite = { version = "0.7", features = ["sorted-keys"] }
+```
+
+**Use Cases:**
+- **Composite Keys:** Use lexicographic ordering for hierarchical keys like `"session-{uuid}-{index}"` or `"user-{id}-{timestamp}"`
+- **Range Queries:** Efficiently query all records within a key range
+- **Ordered Iteration:** Iterate over records in sorted key order
+
+**Performance:**
+- **HashMap (default):** O(1) lookups, unordered iteration
+- **BTreeMap (sorted-keys):** O(log n) lookups, ordered iteration, range queries
+- **Verdict:** Log n overhead is negligible compared to network sync and persistence I/O
+
+**Range Query API:**
+```rust
+// Get all records for a specific session
+for (key, record) in crdt.range("session-abc-".."session-abd-") {
+    println!("Found: {:?}", record);
+}
+
+// Get all records with keys >= "user-100"
+for (key, record) in crdt.range("user-100"..) {
+    // Process records
+}
+
+// Iterate in sorted order
+for (key, record) in crdt.get_data().iter() {
+    // Keys are guaranteed to be in sorted order
+}
+```
+
+**Example:**
+```rust
+use crdt_lite::CRDT;
+
+let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
+
+// Insert records with composite keys
+crdt.insert_or_update(&"session-abc-001".to_string(),
+    vec![("data".to_string(), "first".to_string())]);
+crdt.insert_or_update(&"session-abc-002".to_string(),
+    vec![("data".to_string(), "second".to_string())]);
+crdt.insert_or_update(&"session-xyz-001".to_string(),
+    vec![("data".to_string(), "other".to_string())]);
+
+// Range query - get all session-abc records
+let session_records: Vec<_> = crdt
+    .range("session-abc-".."session-abd-")
+    .collect();
+
+assert_eq!(session_records.len(), 2);
+```
+
+**Important Notes:**
+- Requires `K: Ord` trait bound (most common types like `String`, `u64`, etc. already implement this)
+- Tombstones still use HashMap (no benefit from sorting)
+- All CRDT operations work identically - only storage and query capabilities change
+- Cannot combine with non-comparable key types
+
 ## Column-Based CRDT Details
 
 ### Key Operations

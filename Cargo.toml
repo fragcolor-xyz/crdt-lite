@@ -48,6 +48,8 @@ persist-msgpack = ["binary", "msgpack", "std"]  # MessagePack-based persistence 
 persist-compressed = ["persist-msgpack", "compression"]  # MessagePack + zstd compression
 # Use u128 for NodeId instead of u64 (useful for UUID-based node IDs)
 node-id-u128 = []
+# Use BTreeMap instead of HashMap for sorted keys and range queries
+sorted-keys = []
 
 [lib]
 name = "crdt_lite"
