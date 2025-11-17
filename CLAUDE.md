@@ -204,7 +204,10 @@ assert_eq!(session_records.len(), 3);
 - This is consistent with PersistedCRDT which also requires K: Ord for serialization
 - Tombstones still use HashMap (no benefit from sorting)
 - All CRDT operations work identically - only storage and query capabilities change
-- **Parent-child limitation**: `range()` only queries local records, not parent CRDT. For parent-aware queries, use `get_data().iter()` and call `get_record()` for each key
+- **Parent-child limitation**: `range()` only queries the local CRDT's data, not parent records. If you need parent-aware range queries:
+  1. Use `range()` to get local keys in the range
+  2. For each key, call `get_record()` (which checks parent)
+  3. **Important**: This won't discover keys that exist only in the parent within the range - you'd need to iterate the parent's full key set and filter
 
 ## Column-Based CRDT Details
 

@@ -115,6 +115,7 @@ use std::time::Instant;
 use wal::WalWriter;
 
 // Conditional type alias for data storage
+// Note: persist module requires std (uses PathBuf, File, etc.), so we always use std::collections
 #[cfg(not(feature = "sorted-keys"))]
 type DataMap<K, V> = HashMap<K, V>;
 #[cfg(feature = "sorted-keys")]
