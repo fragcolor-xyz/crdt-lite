@@ -118,7 +118,7 @@ use wal::WalWriter;
 #[cfg(not(feature = "sorted-keys"))]
 type DataMap<K, V> = HashMap<K, V>;
 #[cfg(feature = "sorted-keys")]
-use std::collections::BTreeMap as DataMap;
+type DataMap<K, V> = std::collections::BTreeMap<K, V>;
 
 /// Snapshot format type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

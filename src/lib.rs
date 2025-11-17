@@ -117,9 +117,9 @@ use hashbrown::{HashMap, HashSet};
 
 // Conditional type aliases for sorted vs unsorted storage
 #[cfg(all(feature = "sorted-keys", feature = "std"))]
-use std::collections::BTreeMap as DataMap;
+type DataMap<K, V> = std::collections::BTreeMap<K, V>;
 #[cfg(all(feature = "sorted-keys", not(feature = "std"), feature = "alloc"))]
-use alloc::collections::BTreeMap as DataMap;
+type DataMap<K, V> = alloc::collections::BTreeMap<K, V>;
 #[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
 type DataMap<K, V> = HashMap<K, V>;
 #[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
