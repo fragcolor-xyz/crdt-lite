@@ -28,6 +28,7 @@ Both Rust and C++ implementations share the same core algorithms and maintain AP
 - ✅ **Custom merge rules** - Implement your own conflict resolution strategies
 - ✅ **Change compression** - Optimized transmission by removing redundant changes
 - ✅ **Efficient sync** - Track version boundaries to skip unchanged records
+- ✅ **Sorted keys (optional)** - BTreeMap storage for ordered iteration and range queries
 
 ### Text CRDT
 
@@ -77,16 +78,16 @@ The Rust implementation supports `no_std` environments with allocator support.
 ```toml
 [dependencies]
 # For no_std with basic CRDT functionality (requires alloc feature)
-crdt-lite = { version = "0.7", default-features = false, features = ["alloc"] }
+crdt-lite = { version = "0.8", default-features = false, features = ["alloc"] }
 
 # For no_std with JSON serialization
-crdt-lite = { version = "0.7", default-features = false, features = ["alloc", "json"] }
+crdt-lite = { version = "0.8", default-features = false, features = ["alloc", "json"] }
 
 # For no_std with binary serialization (bincode)
-crdt-lite = { version = "0.7", default-features = false, features = ["alloc", "binary"] }
+crdt-lite = { version = "0.8", default-features = false, features = ["alloc", "binary"] }
 
 # For standard environments (default, uses std::collections::HashMap)
-crdt-lite = { version = "0.7", features = ["json"] }
+crdt-lite = { version = "0.8", features = ["json"] }
 ```
 
 **Implementation Notes:**
@@ -102,7 +103,7 @@ By default, `NodeId` is `u64`. For applications using UUID-based node identifier
 
 ```toml
 [dependencies]
-crdt-lite = { version = "0.7", features = ["node-id-u128"] }
+crdt-lite = { version = "0.8", features = ["node-id-u128"] }
 ```
 
 **Why u128?**
@@ -111,13 +112,57 @@ crdt-lite = { version = "0.7", features = ["node-id-u128"] }
 - `u128` provides 2^128 unique IDs, eliminating collision concerns for UUID-based systems
 - C++ implementation allows customizing `CrdtNodeId` via preprocessor (see `crdt.hpp`)
 
+### Sorted Keys (Optional Feature)
+
+By default, records are stored in a `HashMap` for O(1) operations. Enable the `sorted-keys` feature to use `BTreeMap` for ordered iteration and range queries:
+
+```toml
+[dependencies]
+crdt-lite = { version = "0.8", features = ["sorted-keys"] }
+```
+
+**Use Cases:**
+- **Composite Keys**: Lexicographic ordering for hierarchical keys like `"session-{uuid}-{index}"`
+- **Range Queries**: Efficiently query all records within a key range
+- **Ordered Iteration**: Iterate over records in sorted key order
+
+**Example:**
+```rust
+use crdt_lite::CRDT;
+
+let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
+
+// Insert records with composite keys
+crdt.insert_or_update(&"session-abc-001".to_string(),
+    vec![("data".to_string(), "first".to_string())]);
+crdt.insert_or_update(&"session-abc-002".to_string(),
+    vec![("data".to_string(), "second".to_string())]);
+crdt.insert_or_update(&"session-xyz-001".to_string(),
+    vec![("data".to_string(), "other".to_string())]);
+
+// Range query - get all session-abc records
+for (key, record) in crdt.range("session-abc-".."session-abd-") {
+    println!("Found: {:?}", record);
+}
+```
+
+**Performance:**
+- HashMap (default): O(1) lookups, unordered iteration
+- BTreeMap (sorted-keys): O(log n) lookups, ordered iteration, range queries
+- Log n overhead is negligible compared to network sync and persistence I/O
+
+**Important Notes:**
+- Requires `K: Ord` trait bound (String, u64, etc. already implement this)
+- `range()` only queries local records (not parent CRDT in hierarchies)
+- All CRDT operations work identically - only storage and query capabilities change
+
 ## Quick Start
 
 ### Rust Implementation
 
 ```bash
 cargo add crdt-lite
-# or add to Cargo.toml: crdt-lite = "0.7"
+# or add to Cargo.toml: crdt-lite = "0.8"
 ```
 
 ```rust
@@ -355,13 +400,13 @@ The Rust implementation includes an optional persistence layer with WAL (Write-A
 ```toml
 [dependencies]
 # Basic persistence with bincode (legacy)
-crdt-lite = { version = "0.7", features = ["persist"] }
+crdt-lite = { version = "0.8", features = ["persist"] }
 
 # MessagePack persistence with schema evolution support (recommended)
-crdt-lite = { version = "0.7", features = ["persist-msgpack"] }
+crdt-lite = { version = "0.8", features = ["persist-msgpack"] }
 
 # With optional compression (50-70% additional size reduction)
-crdt-lite = { version = "0.7", features = ["persist-compressed"] }
+crdt-lite = { version = "0.8", features = ["persist-compressed"] }
 ```
 
 ```rust
@@ -951,6 +996,7 @@ The `AutoMergingTextRule` is currently broken and violates CRDT convergence guar
 - [x] Comprehensive test suite with 68 tests covering all features (v0.7.0)
 - [x] Fixed MessagePack snapshot cleanup (orphaned incrementals) (v0.7.0)
 - [x] Improved empty incremental handling and validation (v0.7.0)
+- [x] Sorted keys feature with BTreeMap and range queries (v0.8.0)
 
 ## Testing
 

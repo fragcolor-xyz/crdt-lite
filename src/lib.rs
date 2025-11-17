@@ -115,6 +115,26 @@ use core::{cmp::Ordering, hash::Hash};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 use hashbrown::{HashMap, HashSet};
 
+// Conditional type aliases for sorted vs unsorted storage
+#[cfg(all(feature = "sorted-keys", feature = "std"))]
+type DataMap<K, V> = std::collections::BTreeMap<K, V>;
+#[cfg(all(feature = "sorted-keys", not(feature = "std"), feature = "alloc"))]
+type DataMap<K, V> = alloc::collections::BTreeMap<K, V>;
+#[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
+type DataMap<K, V> = HashMap<K, V>;
+#[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
+type DataMap<K, V> = HashMap<K, V>;
+
+// Conditional Entry type aliases to match DataMap
+#[cfg(all(feature = "sorted-keys", feature = "std"))]
+type DataMapEntry<'a, K, V> = std::collections::btree_map::Entry<'a, K, V>;
+#[cfg(all(feature = "sorted-keys", not(feature = "std"), feature = "alloc"))]
+type DataMapEntry<'a, K, V> = alloc::collections::btree_map::Entry<'a, K, V>;
+#[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
+type DataMapEntry<'a, K, V> = std::collections::hash_map::Entry<'a, K, V>;
+#[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
+type DataMapEntry<'a, K, V> = hashbrown::hash_map::Entry<'a, K, V, hashbrown::DefaultHashBuilder>;
+
 /// Type alias for node IDs
 ///
 /// By default, NodeId is u64. Use the `node-id-u128` feature to enable u128 for UUID-based IDs:
@@ -522,14 +542,28 @@ impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
 /// Main CRDT structure, generic over key (K), column (C), and value (V) types.
 ///
 /// This implements a column-based CRDT with last-write-wins semantics.
+///
+/// # Sorted Keys Feature
+///
+/// When the `sorted-keys` feature is enabled, the internal storage uses `BTreeMap`
+/// instead of `HashMap`, enabling ordered iteration and range queries at the cost
+/// of O(log n) operations instead of O(1).
+///
+/// # Type Requirements
+///
+/// K (record key) must implement `Ord + Hash + Eq + Clone`:
+/// - `Ord` is required for potential use with sorted-keys feature (BTreeMap)
+/// - Even without sorted-keys, requiring `Ord` keeps the API consistent and enables
+///   seamless feature toggling. Most common types (String, u64, etc.) already implement Ord.
+/// - This is consistent with PersistedCRDT which also requires K: Ord for serialization.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
-pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
-  data: HashMap<K, Record<C, V>>,
+  data: DataMap<K, Record<C, V>>,
   tombstones: TombstoneStorage<K>,
   #[cfg_attr(feature = "serde", serde(skip, default))]
   parent: Option<Arc<CRDT<K, C, V>>>,
@@ -537,7 +571,8 @@ pub struct CRDT<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   base_version: u64,
 }
 
-impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
+// Main implementation (works with both HashMap and BTreeMap via DataMap alias)
+impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Creates a new empty CRDT.
   ///
   /// # Arguments
@@ -556,7 +591,7 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     Self {
       node_id,
       clock,
-      data: HashMap::new(),
+      data: DataMap::new(),
       tombstones: TombstoneStorage::new(),
       parent,
       base_version,
@@ -1236,7 +1271,7 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   }
 
   /// Gets a reference to the internal data map.
-  pub fn get_data(&self) -> &HashMap<K, Record<C, V>> {
+  pub fn get_data(&self) -> &DataMap<K, Record<C, V>> {
     &self.data
   }
 
@@ -1375,7 +1410,7 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// ```
   #[cfg(feature = "std")]
   pub fn get_changed_since(&self, since_version: u64) -> (
-    HashMap<K, Record<C, V>>,
+    DataMap<K, Record<C, V>>,
     HashMap<K, TombstoneInfo>,
   ) {
     let records = self.data
@@ -1396,8 +1431,8 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Gets records and tombstones that have changed since a specific version (no_std version).
   #[cfg(not(feature = "std"))]
   pub fn get_changed_since(&self, since_version: u64) -> (
-    hashbrown::HashMap<K, Record<C, V>>,
-    hashbrown::HashMap<K, TombstoneInfo>,
+    DataMap<K, Record<C, V>>,
+    HashMap<K, TombstoneInfo>,
   ) {
     let records = self.data
       .iter()
@@ -1435,14 +1470,9 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     record_id: &K,
     ignore_parent: bool,
   ) -> &mut Record<C, V> {
-    #[cfg(feature = "std")]
-    use std::collections::hash_map::Entry;
-    #[cfg(all(not(feature = "std"), feature = "alloc"))]
-    use hashbrown::hash_map::Entry;
-
     match self.data.entry(record_id.clone()) {
-      Entry::Occupied(e) => e.into_mut(),
-      Entry::Vacant(e) => {
+      DataMapEntry::Occupied(e) => e.into_mut(),
+      DataMapEntry::Vacant(e) => {
         let record = if !ignore_parent {
           self
             .parent
@@ -1473,9 +1503,53 @@ impl<K: Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   }
 }
 
+// Additional methods requiring Ord (sorted-keys feature only)
+#[cfg(feature = "sorted-keys")]
+impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
+  /// Query records within a specific key range (only available with sorted-keys feature).
+  ///
+  /// This method leverages BTreeMap's range query capability to efficiently retrieve
+  /// all records whose keys fall within the specified range.
+  ///
+  /// **IMPORTANT**: This method only queries the local CRDT's data. If this CRDT has a parent,
+  /// parent records are NOT included in the range query results. For parent-aware queries,
+  /// iterate over the full range and use `get_record()` for each key.
+  ///
+  /// # Arguments
+  ///
+  /// * `range` - A range of keys to query (e.g., `"session-abc-".."session-abd-"`)
+  ///
+  /// # Returns
+  ///
+  /// An iterator over key-value pairs within the range (local records only)
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// // Get all records for a specific session
+  /// for (key, record) in crdt.range("session-abc-".."session-abd-") {
+  ///     println!("Found record: {:?}", record);
+  /// }
+  ///
+  /// // Get all records with a specific prefix
+  /// for (key, record) in crdt.range("user-".."user/") {
+  ///     // Keys starting with "user-" (using "user/" as exclusive upper bound)
+  /// }
+  /// ```
+  pub fn range<R>(&self, range: R) -> impl Iterator<Item = (&K, &Record<C, V>)>
+  where
+    R: core::ops::RangeBounds<K>,
+  {
+    self.data.range(range)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(not(feature = "std"))]
+  use alloc::{string::ToString, vec};
 
   #[test]
   fn test_logical_clock() {
@@ -1739,5 +1813,54 @@ mod tests {
       // Verify parent's data is NOT in deserialized child
       assert!(deserialized.get_record(&"parent_record".to_string()).is_none());
     }
+  }
+
+  #[test]
+  #[cfg(feature = "sorted-keys")]
+  fn test_sorted_keys_range_queries() {
+    let mut crdt: CRDT<String, String, String> = CRDT::new(1, None);
+
+    // Insert records with composite keys
+    let _ = crdt.insert_or_update(
+      &String::from("session-abc-001"),
+      vec![(String::from("data"), String::from("first"))],
+    );
+    let _ = crdt.insert_or_update(
+      &String::from("session-abc-002"),
+      vec![(String::from("data"), String::from("second"))],
+    );
+    let _ = crdt.insert_or_update(
+      &String::from("session-abc-003"),
+      vec![(String::from("data"), String::from("third"))],
+    );
+    let _ = crdt.insert_or_update(
+      &String::from("session-xyz-001"),
+      vec![(String::from("data"), String::from("other"))],
+    );
+    let _ = crdt.insert_or_update(
+      &String::from("user-001"),
+      vec![(String::from("name"), String::from("Alice"))],
+    );
+
+    // Test range query for session-abc records
+    let session_abc_records: Vec<_> = crdt
+      .range(String::from("session-abc-")..String::from("session-abd-"))
+      .collect();
+
+    assert_eq!(session_abc_records.len(), 3);
+    assert!(session_abc_records
+      .iter()
+      .all(|(k, _)| k.starts_with("session-abc-")));
+
+    // Test that we can iterate in sorted order
+    let all_keys: Vec<String> = crdt.get_data().keys().cloned().collect();
+    let mut sorted_keys = all_keys.clone();
+    sorted_keys.sort();
+    assert_eq!(all_keys, sorted_keys, "Keys should be in sorted order");
+
+    // Test range query boundaries
+    let range_from_user: Vec<_> = crdt.range(String::from("user-")..).collect();
+    assert_eq!(range_from_user.len(), 1);
+    assert_eq!(range_from_user[0].0, "user-001");
   }
 }

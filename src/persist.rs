@@ -114,6 +114,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 use wal::WalWriter;
 
+// Conditional type alias for data storage
+// Note: persist module requires std (uses PathBuf, File, etc.), so we always use std::collections
+#[cfg(not(feature = "sorted-keys"))]
+type DataMap<K, V> = HashMap<K, V>;
+#[cfg(feature = "sorted-keys")]
+type DataMap<K, V> = std::collections::BTreeMap<K, V>;
+
 /// Snapshot format type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -156,16 +163,16 @@ pub struct SnapshotMetadata {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
 pub struct IncrementalSnapshot<K, C, V>
 where
-    K: Hash + Eq + Clone,
+    K: Ord + Hash + Eq + Clone,
     C: Hash + Eq + Clone,
     V: Clone,
 {
     pub metadata: SnapshotMetadata,
     /// Only records that changed since base version
-    pub changed_records: HashMap<K, Record<C, V>>,
+    pub changed_records: DataMap<K, Record<C, V>>,
     /// Only tombstones added since base version
     pub new_tombstones: HashMap<K, TombstoneInfo>,
     /// Updated logical clock
@@ -223,7 +230,7 @@ pub struct PersistConfig {
     pub snapshot_interval_secs: Option<u64>,
     /// Auto-cleanup old snapshots after rotation (None = manual cleanup only, Some(N) = keep N most recent)
     pub auto_cleanup_snapshots: Option<usize>,
-    /// Maximum number of changes to accumulate in batch_collector before auto-flush
+    /// Maximum number of changes to accumulate in batch before auto-flush
     /// Set to None to disable auto-flush (you MUST call take_batch() periodically)
     pub max_batch_size: Option<usize>,
     /// Snapshot format (Bincode or MessagePack)
@@ -351,12 +358,12 @@ impl From<rmp_serde::decode::Error> for PersistError {
 ///
 /// # Type Parameters
 ///
-/// - `K`: Record key type (must be `Hash + Eq + Clone`)
+/// - `K`: Record key type (must be `Ord + Hash + Eq + Clone`)
 /// - `C`: Column/field key type (must be `Hash + Eq + Clone`)
 /// - `V`: Value type (must be `Clone`)
 pub struct PersistedCRDT<K, C, V>
 where
-    K: Hash + Eq + Clone,
+    K: Ord + Hash + Eq + Clone,
     C: Hash + Eq + Clone,
     V: Clone,
 {
@@ -377,18 +384,18 @@ where
     /// Current snapshot version number
     snapshot_version: u64,
     /// Base directory for persistence files
-    base_path: PathBuf,
-    /// Changes collected for batch operations
-    batch_collector: Vec<Change<K, C, V>>,
-    /// Snapshots that have been successfully uploaded (for safe auto-cleanup)
+    base_dir: std::path::PathBuf,
+    /// Uploaded snapshots tracking (for safe cleanup)
     uploaded_snapshots: HashSet<PathBuf>,
-    /// WAL segments that have been successfully uploaded (for safe auto-cleanup)
+    /// Uploaded WAL segments tracking (for safe cleanup)
     uploaded_wal_segments: HashSet<PathBuf>,
-    /// Time of last snapshot (for time-based snapshots)
-    last_snapshot_time: Instant,
+    /// Batch change collector for network broadcasting
+    batch: Vec<Change<K, C, V>>,
+    /// Last time snapshot was created (for time-based snapshots)
+    last_snapshot_time: std::time::Instant,
     /// Number of incremental snapshots created since last full snapshot
     incremental_snapshot_count: usize,
-    /// Version of the last full snapshot
+    /// Tracker for base snapshot version for incrementals
     last_full_snapshot_version: u64,
     /// CRDT version at time of last snapshot (for incremental detection)
     last_snapshot_crdt_version: u64,
@@ -396,7 +403,7 @@ where
 
 impl<K, C, V> PersistedCRDT<K, C, V>
 where
-    K: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
+    K: Ord + Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     C: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     V: Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -407,7 +414,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `base_path` - Directory for persistence files (created if doesn't exist)
+    /// * `base_dir` - Directory for persistence files (created if doesn't exist)
     /// * `node_id` - Unique identifier for this node
     /// * `config` - Persistence configuration
     ///
@@ -418,15 +425,15 @@ where
     /// - Existing files are corrupted
     /// - I/O errors occur
     pub fn open(
-        base_path: PathBuf,
+        base_dir: PathBuf,
         node_id: NodeId,
         config: PersistConfig,
     ) -> Result<Self, PersistError> {
         // Create directory if it doesn't exist
-        std::fs::create_dir_all(&base_path)?;
+        std::fs::create_dir_all(&base_dir)?;
 
         // Try to load existing state
-        let (crdt, wal, changes_since_snapshot, snapshot_version) = Self::recover(&base_path, node_id)?;
+        let (crdt, wal, changes_since_snapshot, snapshot_version) = Self::recover(&base_dir, node_id)?;
 
         let crdt_version = crdt.get_clock().current_time();
 
@@ -439,8 +446,8 @@ where
             wal_segment_hooks: Vec::new(),
             changes_since_snapshot,
             snapshot_version,
-            base_path,
-            batch_collector: Vec::new(),
+            base_dir,
+            batch: Vec::new(),
             uploaded_snapshots: HashSet::new(),
             uploaded_wal_segments: HashSet::new(),
             last_snapshot_time: Instant::now(),
@@ -521,7 +528,7 @@ where
     /// # }
     /// ```
     pub fn take_batch(&mut self) -> Vec<Change<K, C, V>> {
-        std::mem::take(&mut self.batch_collector)
+        std::mem::take(&mut self.batch)
     }
 
     /// Returns a reference to the current batch without clearing it.
@@ -529,7 +536,7 @@ where
     /// **WARNING**: This does NOT clear the batch. Memory will continue to grow until
     /// `take_batch()` is called. See `take_batch()` documentation for memory usage warnings.
     pub fn peek_batch(&self) -> &[Change<K, C, V>] {
-        &self.batch_collector
+        &self.batch
     }
 
     /// Marks a snapshot as successfully uploaded.
@@ -658,7 +665,7 @@ where
         let mut incremental_snapshots = Vec::new();
 
         // Find all snapshot files (both bincode and MessagePack formats)
-        if let Ok(entries) = std::fs::read_dir(&self.base_path) {
+        if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let filename = entry.file_name();
@@ -796,7 +803,7 @@ where
         let mut segments = Vec::new();
 
         // Find all WAL segment files
-        if let Ok(entries) = std::fs::read_dir(&self.base_path) {
+        if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let filename = entry.file_name();
@@ -840,7 +847,7 @@ where
 // Private implementation methods
 impl<K, C, V> PersistedCRDT<K, C, V>
 where
-    K: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
+    K: Ord + Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     C: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     V: Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -849,12 +856,12 @@ where
     #[cfg(feature = "msgpack")]
     #[allow(clippy::type_complexity)]
     fn discover_snapshots(
-        base_path: &PathBuf,
+        base_dir: &PathBuf,
     ) -> Result<(Option<(PathBuf, u64)>, Vec<(PathBuf, u64)>), PersistError> {
         let mut full_snapshots: Vec<(PathBuf, u64)> = Vec::new();
         let mut incremental_snapshots: Vec<(PathBuf, u64, u64)> = Vec::new(); // (path, version, base_version)
 
-        if let Ok(entries) = std::fs::read_dir(base_path) {
+        if let Ok(entries) = std::fs::read_dir(base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let filename = entry.file_name();
@@ -937,7 +944,7 @@ where
     /// Recovers CRDT state from disk: loads snapshot + replays WAL files.
     #[allow(clippy::type_complexity)]
     fn recover(
-        base_path: &PathBuf,
+        base_dir: &PathBuf,
         node_id: NodeId,
     ) -> Result<(CRDT<K, C, V>, WalWriter<K, C, V>, usize, u64), PersistError> {
         let mut max_snapshot_version = 0u64;
@@ -946,7 +953,7 @@ where
         // First, try to load MessagePack snapshots (full + incrementals)
         #[cfg(feature = "msgpack")]
         {
-            let (latest_full, incrementals) = Self::discover_snapshots(base_path)?;
+            let (latest_full, incrementals) = Self::discover_snapshots(base_dir)?;
 
             if let Some((full_path, full_version)) = latest_full {
                 // Load full snapshot
@@ -1057,7 +1064,7 @@ where
 
         // Fallback to bincode snapshots if no MessagePack found
         if crdt.is_none() {
-            if let Ok(entries) = std::fs::read_dir(base_path) {
+            if let Ok(entries) = std::fs::read_dir(base_dir) {
                 for entry in entries.flatten() {
                     let filename = entry.file_name();
                     let filename_str = filename.to_string_lossy();
@@ -1084,10 +1091,10 @@ where
         let crdt = crdt.unwrap_or_else(|| CRDT::new(node_id, None));
 
         // Create WAL writer
-        let wal = WalWriter::new(base_path.clone())?;
+        let wal = WalWriter::new(base_dir.clone())?;
 
         // Replay all WAL files
-        let (recovered_crdt, change_count) = Self::replay_wal(crdt, base_path)?;
+        let (recovered_crdt, change_count) = Self::replay_wal(crdt, base_dir)?;
 
         Ok((recovered_crdt, wal, change_count, max_snapshot_version))
     }
@@ -1095,12 +1102,12 @@ where
     /// Replays all WAL files on top of the base CRDT state.
     fn replay_wal(
         mut crdt: CRDT<K, C, V>,
-        base_path: &PathBuf,
+        base_dir: &PathBuf,
     ) -> Result<(CRDT<K, C, V>, usize), PersistError> {
         let mut total_changes = 0;
 
         // Find all WAL files (wal_*.bin)
-        let mut wal_files: Vec<_> = std::fs::read_dir(base_path)?
+        let mut wal_files: Vec<_> = std::fs::read_dir(base_dir)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 entry
@@ -1219,7 +1226,7 @@ where
         let compressed = self.maybe_compress(combined)?;
 
         // Write to file
-        let snapshot_path = self.base_path.join(format!(
+        let snapshot_path = self.base_dir.join(format!(
             "snapshot_full_{:06}.msgpack",
             self.snapshot_version
         ));
@@ -1303,7 +1310,7 @@ where
         let compressed = self.maybe_compress(bytes)?;
 
         // Write to file
-        let snapshot_path = self.base_path.join(format!(
+        let snapshot_path = self.base_dir.join(format!(
             "snapshot_incr_{:06}_base_{:06}.msgpack",
             self.snapshot_version, self.last_full_snapshot_version
         ));
@@ -1336,7 +1343,7 @@ where
 
                 self.snapshot_version += 1;
                 let path = self
-                    .base_path
+                    .base_dir
                     .join(format!("snapshot_{:06}.bin", self.snapshot_version));
 
                 {
@@ -1377,7 +1384,7 @@ where
         }
 
         // Rotate WAL (seals old segments, calls hooks, starts new segment)
-        let _ = self.wal.rotate(&self.base_path, &self.wal_segment_hooks)?;
+        let _ = self.wal.rotate(&self.base_dir, &self.wal_segment_hooks)?;
 
         // Auto-cleanup old snapshots if configured
         if let Some(keep_count) = self.config.auto_cleanup_snapshots {
@@ -1419,14 +1426,14 @@ where
         self.changes_since_snapshot += changes.len();
 
         // Add to batch collector
-        self.batch_collector.extend_from_slice(changes);
+        self.batch.extend_from_slice(changes);
 
         // Check if batch size limit exceeded and auto-flush if needed
         if let Some(max_size) = self.config.max_batch_size {
-            if self.batch_collector.len() >= max_size {
+            if self.batch.len() >= max_size {
                 // Auto-flush: clear the batch to prevent OOM
                 // Applications should call take_batch() before this happens
-                self.batch_collector.clear();
+                self.batch.clear();
             }
         }
 
@@ -1445,7 +1452,7 @@ where
 // Public CRDT operation methods that integrate persistence
 impl<K, C, V> PersistedCRDT<K, C, V>
 where
-    K: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
+    K: Ord + Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     C: Hash + Eq + Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
     V: Clone + serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
