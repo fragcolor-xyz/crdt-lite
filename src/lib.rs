@@ -133,7 +133,7 @@ type DataMapEntry<'a, K, V> = alloc::collections::btree_map::Entry<'a, K, V>;
 #[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
 type DataMapEntry<'a, K, V> = std::collections::hash_map::Entry<'a, K, V>;
 #[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
-type DataMapEntry<'a, K, V> = hashbrown::hash_map::Entry<'a, K, V>;
+type DataMapEntry<'a, K, V> = hashbrown::hash_map::Entry<'a, K, V, hashbrown::DefaultHashBuilder>;
 
 /// Type alias for node IDs
 ///
@@ -549,7 +549,13 @@ impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
 /// instead of `HashMap`, enabling ordered iteration and range queries at the cost
 /// of O(log n) operations instead of O(1).
 ///
-/// Note: K must implement `Ord` to support potential future use of sorted-keys.
+/// # Type Requirements
+///
+/// K (record key) must implement `Ord + Hash + Eq + Clone`:
+/// - `Ord` is required for potential use with sorted-keys feature (BTreeMap)
+/// - Even without sorted-keys, requiring `Ord` keeps the API consistent and enables
+///   seamless feature toggling. Most common types (String, u64, etc.) already implement Ord.
+/// - This is consistent with PersistedCRDT which also requires K: Ord for serialization.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
@@ -565,7 +571,7 @@ pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   base_version: u64,
 }
 
-// Unified implementation (works with both HashMap and BTreeMap via DataMap alias)
+// Main implementation (works with both HashMap and BTreeMap via DataMap alias)
 impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Creates a new empty CRDT.
   ///
@@ -1495,10 +1501,19 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
 
     None
   }
+}
 
+// Additional methods requiring Ord (sorted-keys feature only)
+#[cfg(feature = "sorted-keys")]
+impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Query records within a specific key range (only available with sorted-keys feature).
+  ///
   /// This method leverages BTreeMap's range query capability to efficiently retrieve
   /// all records whose keys fall within the specified range.
+  ///
+  /// **IMPORTANT**: This method only queries the local CRDT's data. If this CRDT has a parent,
+  /// parent records are NOT included in the range query results. For parent-aware queries,
+  /// iterate over the full range and use `get_record()` for each key.
   ///
   /// # Arguments
   ///
@@ -1506,7 +1521,7 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   ///
   /// # Returns
   ///
-  /// An iterator over key-value pairs within the range
+  /// An iterator over key-value pairs within the range (local records only)
   ///
   /// # Example
   ///
@@ -1521,7 +1536,6 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   ///     // Keys starting with "user-" (using "user/" as exclusive upper bound)
   /// }
   /// ```
-  #[cfg(feature = "sorted-keys")]
   pub fn range<R>(&self, range: R) -> impl Iterator<Item = (&K, &Record<C, V>)>
   where
     R: core::ops::RangeBounds<K>,

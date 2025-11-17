@@ -199,10 +199,12 @@ assert_eq!(session_records.len(), 3);
 ```
 
 **Important Notes:**
-- Requires `K: Ord` trait bound (most common types like `String`, `u64`, etc. already implement this)
+- `K: Ord` trait bound is required for all CRDTs (even without sorted-keys) to maintain API consistency and enable seamless feature toggling
+- Most common types (String, u64, i64, etc.) already implement Ord
+- This is consistent with PersistedCRDT which also requires K: Ord for serialization
 - Tombstones still use HashMap (no benefit from sorting)
 - All CRDT operations work identically - only storage and query capabilities change
-- Cannot combine with non-comparable key types
+- **Parent-child limitation**: `range()` only queries local records, not parent CRDT. For parent-aware queries, use `get_data().iter()` and call `get_record()` for each key
 
 ## Column-Based CRDT Details
 
