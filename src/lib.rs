@@ -125,6 +125,16 @@ type DataMap<K, V> = HashMap<K, V>;
 #[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
 type DataMap<K, V> = HashMap<K, V>;
 
+// Conditional Entry type aliases to match DataMap
+#[cfg(all(feature = "sorted-keys", feature = "std"))]
+type DataMapEntry<'a, K, V> = std::collections::btree_map::Entry<'a, K, V>;
+#[cfg(all(feature = "sorted-keys", not(feature = "std"), feature = "alloc"))]
+type DataMapEntry<'a, K, V> = alloc::collections::btree_map::Entry<'a, K, V>;
+#[cfg(all(not(feature = "sorted-keys"), feature = "std"))]
+type DataMapEntry<'a, K, V> = std::collections::hash_map::Entry<'a, K, V>;
+#[cfg(all(not(feature = "sorted-keys"), not(feature = "std"), feature = "alloc"))]
+type DataMapEntry<'a, K, V> = hashbrown::hash_map::Entry<'a, K, V>;
+
 /// Type alias for node IDs
 ///
 /// By default, NodeId is u64. Use the `node-id-u128` feature to enable u128 for UUID-based IDs:
@@ -1454,18 +1464,9 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     record_id: &K,
     ignore_parent: bool,
   ) -> &mut Record<C, V> {
-    #[cfg(all(feature = "std", not(feature = "sorted-keys")))]
-    use std::collections::hash_map::Entry;
-    #[cfg(all(feature = "std", feature = "sorted-keys"))]
-    use std::collections::btree_map::Entry;
-    #[cfg(all(not(feature = "std"), feature = "alloc", not(feature = "sorted-keys")))]
-    use hashbrown::hash_map::Entry;
-    #[cfg(all(not(feature = "std"), feature = "alloc", feature = "sorted-keys"))]
-    use alloc::collections::btree_map::Entry;
-
     match self.data.entry(record_id.clone()) {
-      Entry::Occupied(e) => e.into_mut(),
-      Entry::Vacant(e) => {
+      DataMapEntry::Occupied(e) => e.into_mut(),
+      DataMapEntry::Vacant(e) => {
         let record = if !ignore_parent {
           self
             .parent
@@ -1534,7 +1535,7 @@ mod tests {
   use super::*;
 
   #[cfg(not(feature = "std"))]
-  use alloc::vec;
+  use alloc::{string::ToString, vec};
 
   #[test]
   fn test_logical_clock() {
@@ -1807,29 +1808,29 @@ mod tests {
 
     // Insert records with composite keys
     let _ = crdt.insert_or_update(
-      &"session-abc-001".to_string(),
-      vec![("data".to_string(), "first".to_string())],
+      &String::from("session-abc-001"),
+      vec![(String::from("data"), String::from("first"))],
     );
     let _ = crdt.insert_or_update(
-      &"session-abc-002".to_string(),
-      vec![("data".to_string(), "second".to_string())],
+      &String::from("session-abc-002"),
+      vec![(String::from("data"), String::from("second"))],
     );
     let _ = crdt.insert_or_update(
-      &"session-abc-003".to_string(),
-      vec![("data".to_string(), "third".to_string())],
+      &String::from("session-abc-003"),
+      vec![(String::from("data"), String::from("third"))],
     );
     let _ = crdt.insert_or_update(
-      &"session-xyz-001".to_string(),
-      vec![("data".to_string(), "other".to_string())],
+      &String::from("session-xyz-001"),
+      vec![(String::from("data"), String::from("other"))],
     );
     let _ = crdt.insert_or_update(
-      &"user-001".to_string(),
-      vec![("name".to_string(), "Alice".to_string())],
+      &String::from("user-001"),
+      vec![(String::from("name"), String::from("Alice"))],
     );
 
     // Test range query for session-abc records
     let session_abc_records: Vec<_> = crdt
-      .range("session-abc-".to_string().."session-abd-".to_string())
+      .range(String::from("session-abc-")..String::from("session-abd-"))
       .collect();
 
     assert_eq!(session_abc_records.len(), 3);
@@ -1844,7 +1845,7 @@ mod tests {
     assert_eq!(all_keys, sorted_keys, "Keys should be in sorted order");
 
     // Test range query boundaries
-    let range_from_user: Vec<_> = crdt.range("user-".to_string()..).collect();
+    let range_from_user: Vec<_> = crdt.range(String::from("user-")..).collect();
     assert_eq!(range_from_user.len(), 1);
     assert_eq!(range_from_user[0].0, "user-001");
   }

@@ -185,6 +185,8 @@ crdt.insert_or_update(&"session-abc-001".to_string(),
     vec![("data".to_string(), "first".to_string())]);
 crdt.insert_or_update(&"session-abc-002".to_string(),
     vec![("data".to_string(), "second".to_string())]);
+crdt.insert_or_update(&"session-abc-003".to_string(),
+    vec![("data".to_string(), "third".to_string())]);
 crdt.insert_or_update(&"session-xyz-001".to_string(),
     vec![("data".to_string(), "other".to_string())]);
 
@@ -193,7 +195,7 @@ let session_records: Vec<_> = crdt
     .range("session-abc-".."session-abd-")
     .collect();
 
-assert_eq!(session_records.len(), 2);
+assert_eq!(session_records.len(), 3);
 ```
 
 **Important Notes:**
