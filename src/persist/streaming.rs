@@ -121,6 +121,9 @@ struct IndexEntry<K> {
     key: K,
     offset: u64,
     length: u32,
+    /// Highest local_db_version in this record (for efficient sync queries)
+    #[cfg_attr(feature = "serde", serde(default))]
+    highest_version: u64,
 }
 
 /// O(1) LRU cache implementation using HashMap + VecDeque with reference counting
@@ -156,15 +159,40 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
     }
 
     fn insert(&mut self, key: K, value: V) {
-        if !self.map.contains_key(&key) {
+        let is_new = !self.map.contains_key(&key);
+        if is_new {
             // Evict if at capacity
             while self.map.len() >= self.capacity {
                 self.evict_one();
             }
+            // Only update order for new keys
+            self.order.push_back(key.clone());
+            *self.ref_count.entry(key.clone()).or_insert(0) += 1;
         }
-        self.order.push_back(key.clone());
-        *self.ref_count.entry(key.clone()).or_insert(0) += 1;
+        // Always update the value
         self.map.insert(key, value);
+
+        // Compact order queue if it gets too large (prevents unbounded growth)
+        if self.order.len() > self.capacity * 10 {
+            self.compact();
+        }
+    }
+
+    /// Rebuild order queue to remove stale entries
+    fn compact(&mut self) {
+        let mut new_order = VecDeque::with_capacity(self.capacity * 2);
+        let mut new_ref_count: HashMap<K, usize> = HashMap::with_capacity(self.capacity);
+
+        // Keep only the most recent entry for each key
+        for key in self.order.drain(..).rev() {
+            if self.map.contains_key(&key) && !new_ref_count.contains_key(&key) {
+                new_ref_count.insert(key.clone(), 1);
+                new_order.push_front(key);
+            }
+        }
+
+        self.order = new_order;
+        self.ref_count = new_ref_count;
     }
 
     fn evict_one(&mut self) {
@@ -210,8 +238,9 @@ where
 {
     /// The snapshot file (kept open for seeking)
     file: Option<BufReader<File>>,
-    /// Key -> (offset, length) index
-    index: HashMap<K, (u64, u32)>,
+    /// Key -> (offset, length, highest_local_db_version) index
+    /// The version is used for efficient get_changes_since queries
+    index: HashMap<K, (u64, u32, u64)>,
     /// Tombstones (loaded entirely at startup)
     tombstones: TombstoneStorage<K>,
     /// Clock value from snapshot
@@ -303,9 +332,9 @@ where
         let index_entries: Vec<IndexEntry<K>> = rmp_serde::from_read(&mut reader)
             .map_err(PersistError::MsgpackDecode)?;
 
-        let index: HashMap<K, (u64, u32)> = index_entries
+        let index: HashMap<K, (u64, u32, u64)> = index_entries
             .into_iter()
-            .map(|e| (e.key, (e.offset, e.length)))
+            .map(|e| (e.key, (e.offset, e.length, e.highest_version)))
             .collect();
 
         // Load tombstones
@@ -332,8 +361,8 @@ where
 
     /// Load a single record from disk
     fn load_record(&mut self, key: &K) -> Result<Option<Record<C, V>>, PersistError> {
-        let (offset, length) = match self.index.get(key) {
-            Some(&(o, l)) => (o, l),
+        let (offset, length, _version) = match self.index.get(key) {
+            Some(&(o, l, v)) => (o, l, v),
             None => return Ok(None),
         };
 
@@ -364,6 +393,7 @@ where
     }
 
     /// Get tombstone info
+    #[allow(dead_code)]
     fn get_tombstone(&self, key: &K) -> Option<TombstoneInfo> {
         self.tombstones.find(key)
     }
@@ -371,6 +401,14 @@ where
     /// Iterate over keys (without collecting into Vec to save memory)
     fn keys(&self) -> impl Iterator<Item = &K> {
         self.index.keys()
+    }
+
+    /// Get keys with changes after a specific version (for efficient sync)
+    fn keys_with_changes_since(&self, last_db_version: u64) -> impl Iterator<Item = &K> {
+        self.index
+            .iter()
+            .filter(move |(_, (_, _, highest_version))| *highest_version > last_db_version)
+            .map(|(k, _)| k)
     }
 
     /// Get number of records in cold storage
@@ -635,6 +673,7 @@ where
                 key: key.clone(),
                 offset,
                 length: record_bytes.len() as u32,
+                highest_version: record.highest_local_db_version,
             });
         }
 
@@ -841,40 +880,43 @@ where
     /// Get changes since a version (for sync)
     ///
     /// This scans both hot and cold storage to ensure all changes are included.
+    ///
+    /// # Performance
+    ///
+    /// Uses an indexed lookup to find cold records with changes after `last_db_version`,
+    /// avoiding a full scan of all records. Only records that actually have changes
+    /// after the specified version are loaded from disk.
+    ///
+    /// For optimal performance, call `get_changes_since` with the highest version
+    /// you've already synced to minimize the number of records loaded.
     pub fn get_changes_since(&mut self, last_db_version: u64) -> Result<Vec<Change<K, C, V>>, PersistError> {
         // Hot tier changes
         let mut changes = self.hot.get_changes_since(last_db_version);
 
-        // Scan cold storage for records with changes after last_db_version
-        // This is necessary to ensure sync completeness
-        for key in self.cold.keys().cloned().collect::<Vec<_>>() {
-            // Skip if already in hot (hot has newer data)
-            if self.hot_keys.contains(&key) {
-                continue;
-            }
-            // Skip if tombstoned
-            if self.hot_tombstones.contains(&key) {
-                continue;
-            }
+        // Use indexed lookup for cold records with changes after last_db_version
+        // This avoids scanning ALL cold records - only those with matching versions
+        let cold_keys_to_check: Vec<K> = self.cold
+            .keys_with_changes_since(last_db_version)
+            .filter(|k| !self.hot_keys.contains(*k) && !self.hot_tombstones.contains(*k))
+            .cloned()
+            .collect();
 
+        for key in cold_keys_to_check {
             if let Some(record) = self.cold.load_record(&key)? {
-                // Check if record has changes after last_db_version
-                if record.highest_local_db_version > last_db_version {
-                    // Convert record to changes
-                    for (col_name, value) in &record.fields {
-                        if let Some(col_ver) = record.column_versions.get(col_name) {
-                            if col_ver.local_db_version > last_db_version {
-                                changes.push(Change::new(
-                                    key.clone(),
-                                    Some(col_name.clone()),
-                                    Some(value.clone()),
-                                    col_ver.col_version,
-                                    col_ver.db_version,
-                                    col_ver.node_id,
-                                    col_ver.local_db_version,
-                                    0,
-                                ));
-                            }
+                // Convert record to changes
+                for (col_name, value) in &record.fields {
+                    if let Some(col_ver) = record.column_versions.get(col_name) {
+                        if col_ver.local_db_version > last_db_version {
+                            changes.push(Change::new(
+                                key.clone(),
+                                Some(col_name.clone()),
+                                Some(value.clone()),
+                                col_ver.col_version,
+                                col_ver.db_version,
+                                col_ver.node_id,
+                                col_ver.local_db_version,
+                                0,
+                            ));
                         }
                     }
                 }
@@ -1020,6 +1062,17 @@ where
         self.cold.len()
     }
 
+    /// Get total number of records (hot + cold, excluding duplicates)
+    ///
+    /// Note: Records in hot tier that supersede cold records are counted once.
+    pub fn total_record_count(&self) -> usize {
+        // Cold records not in hot + hot records
+        let cold_only = self.cold.index.keys()
+            .filter(|k| !self.hot_keys.contains(*k) && !self.hot_tombstones.contains(*k))
+            .count();
+        cold_only + self.hot_keys.len()
+    }
+
     /// Get current logical clock value
     pub fn get_clock_time(&self) -> u64 {
         self.hot.get_clock().current_time()
@@ -1065,6 +1118,13 @@ where
 
         // Add to batch
         self.batch.extend_from_slice(changes);
+
+        // Auto-flush batch if exceeds max size (prevents OOM)
+        if let Some(max_size) = self.config.persist_config.max_batch_size {
+            if self.batch.len() >= max_size {
+                self.batch.clear();
+            }
+        }
 
         // Call post hooks
         for hook in &self.post_hooks {
@@ -1112,10 +1172,16 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     /// when loading cold records into hot storage.
     pub(crate) fn insert_record_direct(&mut self, key: K, record: Record<C, V>) {
         // Update clock to at least match the record's versions
-        for col_ver in record.column_versions.values() {
-            if col_ver.db_version > self.clock.current_time() {
-                self.clock.set_time(col_ver.db_version);
-            }
+        // Check both column versions and highest_local_db_version to handle all cases
+        let max_version = record.column_versions
+            .values()
+            .map(|v| v.db_version)
+            .max()
+            .unwrap_or(0)
+            .max(record.highest_local_db_version);
+
+        if max_version > self.clock.current_time() {
+            self.clock.set_time(max_version);
         }
         self.data.insert(key, record);
     }
