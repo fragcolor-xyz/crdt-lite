@@ -59,18 +59,18 @@ use std::path::Path;
 /// ```
 pub trait PostOpHook<K, C, V>: Send + Sync
 where
-    K: Hash + Eq + Clone,
-    C: Hash + Eq + Clone,
-    V: Clone,
+  K: Hash + Eq + Clone,
+  C: Hash + Eq + Clone,
+  V: Clone,
 {
-    /// Called after changes have been applied and written (but not fsynced).
-    ///
-    /// This fires immediately after WAL write to minimize broadcast latency.
-    /// Local fsync is deferred to snapshot time for CRDT performance.
-    ///
-    /// This should be fast and non-blocking. For network I/O, send changes
-    /// to an async task rather than blocking here.
-    fn after_op(&self, changes: &[Change<K, C, V>]);
+  /// Called after changes have been applied and written (but not fsynced).
+  ///
+  /// This fires immediately after WAL write to minimize broadcast latency.
+  /// Local fsync is deferred to snapshot time for CRDT performance.
+  ///
+  /// This should be fast and non-blocking. For network I/O, send changes
+  /// to an async task rather than blocking here.
+  fn after_op(&self, changes: &[Change<K, C, V>]);
 }
 
 /// Snapshot hook for backup and replication.
@@ -108,16 +108,16 @@ where
 /// }
 /// ```
 pub trait SnapshotHook: Send + Sync {
-    /// Called after a snapshot has been created and sealed.
-    ///
-    /// The snapshot file is immutable and safe for async upload.
-    /// This is called synchronously but should spawn async tasks for I/O.
-    ///
-    /// # Arguments
-    ///
-    /// * `snapshot_path` - Path to the sealed snapshot file
-    /// * `db_version` - The CRDT version (logical clock) at time of snapshot
-    fn on_snapshot(&self, snapshot_path: &Path, db_version: u64);
+  /// Called after a snapshot has been created and sealed.
+  ///
+  /// The snapshot file is immutable and safe for async upload.
+  /// This is called synchronously but should spawn async tasks for I/O.
+  ///
+  /// # Arguments
+  ///
+  /// * `snapshot_path` - Path to the sealed snapshot file
+  /// * `db_version` - The CRDT version (logical clock) at time of snapshot
+  fn on_snapshot(&self, snapshot_path: &Path, db_version: u64);
 }
 
 /// WAL segment hook for archival.
@@ -152,70 +152,70 @@ pub trait SnapshotHook: Send + Sync {
 /// }
 /// ```
 pub trait WalSegmentHook: Send + Sync {
-    /// Called after a WAL segment has been sealed (no longer active).
-    ///
-    /// The segment file is immutable and safe for async upload.
-    fn on_wal_sealed(&self, segment_path: &Path);
+  /// Called after a WAL segment has been sealed (no longer active).
+  ///
+  /// The segment file is immutable and safe for async upload.
+  fn on_wal_sealed(&self, segment_path: &Path);
 }
 
 // Convenience implementations for closures
 
 impl<K, C, V, F> PostOpHook<K, C, V> for F
 where
-    K: Hash + Eq + Clone,
-    C: Hash + Eq + Clone,
-    V: Clone,
-    F: Fn(&[Change<K, C, V>]) + Send + Sync,
+  K: Hash + Eq + Clone,
+  C: Hash + Eq + Clone,
+  V: Clone,
+  F: Fn(&[Change<K, C, V>]) + Send + Sync,
 {
-    fn after_op(&self, changes: &[Change<K, C, V>]) {
-        self(changes)
-    }
+  fn after_op(&self, changes: &[Change<K, C, V>]) {
+    self(changes)
+  }
 }
 
 impl<F> SnapshotHook for F
 where
-    F: Fn(&Path, u64) + Send + Sync,
+  F: Fn(&Path, u64) + Send + Sync,
 {
-    fn on_snapshot(&self, snapshot_path: &Path, db_version: u64) {
-        self(snapshot_path, db_version)
-    }
+  fn on_snapshot(&self, snapshot_path: &Path, db_version: u64) {
+    self(snapshot_path, db_version)
+  }
 }
 
 impl<F> WalSegmentHook for F
 where
-    F: Fn(&Path) + Send + Sync,
+  F: Fn(&Path) + Send + Sync,
 {
-    fn on_wal_sealed(&self, segment_path: &Path) {
-        self(segment_path)
-    }
+  fn on_wal_sealed(&self, segment_path: &Path) {
+    self(segment_path)
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+  use super::*;
 
-    #[test]
-    fn test_hook_closure() {
-        let counter = std::sync::Arc::new(std::sync::Mutex::new(0));
-        let counter_clone = counter.clone();
+  #[test]
+  fn test_hook_closure() {
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let counter_clone = counter.clone();
 
-        let hook = move |changes: &[Change<String, String, String>]| {
-            *counter_clone.lock().unwrap() += changes.len();
-        };
+    let hook = move |changes: &[Change<String, String, String>]| {
+      *counter_clone.lock().unwrap() += changes.len();
+    };
 
-        let changes = vec![Change {
-            record_id: "rec1".to_string(),
-            col_name: Some("field1".to_string()),
-            value: Some("value1".to_string()),
-            col_version: 1,
-            db_version: 1,
-            node_id: 1,
-            local_db_version: 1,
-            flags: 0,
-        }];
+    let changes = vec![Change {
+      record_id: "rec1".to_string(),
+      col_name: Some("field1".to_string()),
+      value: Some("value1".to_string()),
+      col_version: 1,
+      db_version: 1,
+      node_id: 1,
+      local_db_version: 1,
+      flags: 0,
+    }];
 
-        hook.after_op(&changes);
+    hook.after_op(&changes);
 
-        assert_eq!(*counter.lock().unwrap(), 1);
-    }
+    assert_eq!(*counter.lock().unwrap(), 1);
+  }
 }

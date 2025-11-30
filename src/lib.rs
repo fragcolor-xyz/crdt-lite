@@ -86,7 +86,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 // Persistence module (requires any persist-related feature)
-#[cfg(any(feature = "persist", feature = "persist-msgpack", feature = "persist-compressed"))]
+#[cfg(any(
+  feature = "persist",
+  feature = "persist-msgpack",
+  feature = "persist-compressed"
+))]
 pub mod persist;
 
 // Ensure valid feature combination: either std or alloc must be enabled
@@ -105,11 +109,7 @@ use std::{
 };
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-  string::String,
-  sync::Arc,
-  vec::Vec,
-};
+use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(not(feature = "std"))]
 use core::{cmp::Ordering, hash::Hash};
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
@@ -162,8 +162,16 @@ const TOMBSTONE_COL_VERSION: u64 = u64::MAX;
 /// - A deletion of an entire record (when `col_name` is `None`)
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned, V: serde::de::DeserializeOwned")))]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize"))
+)]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(
+    deserialize = "K: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned, V: serde::de::DeserializeOwned"
+  ))
+)]
 pub struct Change<K, C, V> {
   pub record_id: K,
   /// `None` represents tombstone of the record
@@ -369,8 +377,16 @@ impl<K: Hash + Eq> Default for TombstoneStorage<K> {
 /// Represents a record in the CRDT.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "C: serde::Serialize + Hash + Eq, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "C: serde::de::DeserializeOwned + Hash + Eq, V: serde::de::DeserializeOwned")))]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(serialize = "C: serde::Serialize + Hash + Eq, V: serde::Serialize"))
+)]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(
+    deserialize = "C: serde::de::DeserializeOwned + Hash + Eq, V: serde::de::DeserializeOwned"
+  ))
+)]
 pub struct Record<C, V> {
   pub fields: HashMap<C, V>,
   pub column_versions: HashMap<C, ColumnVersion>,
@@ -390,10 +406,7 @@ impl<C: Hash + Eq, V> Record<C, V> {
   }
 
   /// Creates a record from existing fields and column versions
-  pub fn from_parts(
-    fields: HashMap<C, V>,
-    column_versions: HashMap<C, ColumnVersion>,
-  ) -> Self {
+  pub fn from_parts(fields: HashMap<C, V>, column_versions: HashMap<C, ColumnVersion>) -> Self {
     let mut lowest = u64::MAX;
     let mut highest = 0;
 
@@ -558,8 +571,16 @@ impl<K: Ord, C: Ord, V> ChangeComparator<K, C, V> for DefaultChangeComparator {
 /// - This is consistent with PersistedCRDT which also requires K: Ord for serialization.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize")))]
-#[cfg_attr(feature = "serde", serde(bound(deserialize = "K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone")))]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(serialize = "K: serde::Serialize, C: serde::Serialize, V: serde::Serialize"))
+)]
+#[cfg_attr(
+  feature = "serde",
+  serde(bound(
+    deserialize = "K: serde::de::DeserializeOwned + Ord + Hash + Eq + Clone, C: serde::de::DeserializeOwned + Hash + Eq + Clone, V: serde::de::DeserializeOwned + Clone"
+  ))
+)]
 pub struct CRDT<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> {
   node_id: NodeId,
   clock: LogicalClock,
@@ -1409,17 +1430,19 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// // tombstones contains only records deleted after version 1000
   /// ```
   #[cfg(feature = "std")]
-  pub fn get_changed_since(&self, since_version: u64) -> (
-    DataMap<K, Record<C, V>>,
-    HashMap<K, TombstoneInfo>,
-  ) {
-    let records = self.data
+  pub fn get_changed_since(
+    &self,
+    since_version: u64,
+  ) -> (DataMap<K, Record<C, V>>, HashMap<K, TombstoneInfo>) {
+    let records = self
+      .data
       .iter()
       .filter(|(_, record)| record.highest_local_db_version > since_version)
       .map(|(k, v)| (k.clone(), v.clone()))
       .collect();
 
-    let tombstones = self.tombstones
+    let tombstones = self
+      .tombstones
       .iter()
       .filter(|(_, info)| info.local_db_version > since_version)
       .map(|(k, v)| (k.clone(), *v))
@@ -1430,17 +1453,19 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
 
   /// Gets records and tombstones that have changed since a specific version (no_std version).
   #[cfg(not(feature = "std"))]
-  pub fn get_changed_since(&self, since_version: u64) -> (
-    DataMap<K, Record<C, V>>,
-    HashMap<K, TombstoneInfo>,
-  ) {
-    let records = self.data
+  pub fn get_changed_since(
+    &self,
+    since_version: u64,
+  ) -> (DataMap<K, Record<C, V>>, HashMap<K, TombstoneInfo>) {
+    let records = self
+      .data
       .iter()
       .filter(|(_, record)| record.highest_local_db_version > since_version)
       .map(|(k, v)| (k.clone(), v.clone()))
       .collect();
 
-    let tombstones = self.tombstones
+    let tombstones = self
+      .tombstones
       .iter()
       .filter(|(_, info)| info.local_db_version > since_version)
       .map(|(k, v)| (k.clone(), *v))
@@ -1530,7 +1555,8 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
       .max(record.highest_local_db_version);
 
     // Use update() to ensure clock advances past max_version (avoids collisions)
-    if max_version >= self.clock.current_time() {
+    // Only update if max_version exceeds current time to avoid unnecessary gaps
+    if max_version > self.clock.current_time() {
       self.clock.update(max_version);
     }
     self.data.insert(key, record);
@@ -1768,7 +1794,10 @@ mod tests {
     assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
     assert_eq!(
       crdt.get_record(&"user1".to_string()).unwrap().fields,
-      deserialized.get_record(&"user1".to_string()).unwrap().fields
+      deserialized
+        .get_record(&"user1".to_string())
+        .unwrap()
+        .fields
     );
 
     // Verify tombstones are preserved
@@ -1808,7 +1837,10 @@ mod tests {
     assert_eq!(crdt.get_data().len(), deserialized.get_data().len());
     assert_eq!(
       crdt.get_record(&"user1".to_string()).unwrap().fields,
-      deserialized.get_record(&"user1".to_string()).unwrap().fields
+      deserialized
+        .get_record(&"user1".to_string())
+        .unwrap()
+        .fields
     );
 
     // Verify clock is preserved
@@ -1842,10 +1874,14 @@ mod tests {
       assert!(deserialized.parent.is_none());
 
       // Verify child's own data is preserved
-      assert!(deserialized.get_record(&"child_record".to_string()).is_some());
+      assert!(deserialized
+        .get_record(&"child_record".to_string())
+        .is_some());
 
       // Verify parent's data is NOT in deserialized child
-      assert!(deserialized.get_record(&"parent_record".to_string()).is_none());
+      assert!(deserialized
+        .get_record(&"parent_record".to_string())
+        .is_none());
     }
   }
 
