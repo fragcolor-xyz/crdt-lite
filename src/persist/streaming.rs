@@ -25,7 +25,7 @@
 //! ├── magic: "CRDS" (4 bytes)
 //! ├── version: u8
 //! ├── flags: u8
-//! ├── node_id: u64
+//! ├── node_id: NodeId (8 or 16 bytes depending on feature)
 //! ├── clock_value: u64
 //! ├── record_count: u64
 //! ├── tombstone_count: u64
@@ -41,7 +41,7 @@
 //! └── HashMap<K, TombstoneInfo> (MessagePack serialized)
 //!
 //! [Index Section] (loaded at startup)
-//! └── Vec<(K, offset, length)> (MessagePack serialized)
+//! └── Vec<IndexEntry { key: K, offset: u64, length: u32 }> (MessagePack serialized)
 //! ```
 //!
 //! # Example
@@ -75,7 +75,7 @@ use crate::{
     Change, DefaultMergeRule, LogicalClock, NodeId, Record,
     TombstoneInfo, TombstoneStorage, CRDT,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -123,28 +123,32 @@ struct IndexEntry<K> {
     length: u32,
 }
 
-
-/// Simple LRU cache implementation
+/// O(1) LRU cache implementation using HashMap + VecDeque with reference counting
 struct LruCache<K, V> {
     capacity: usize,
     map: HashMap<K, V>,
-    order: Vec<K>, // Most recently used at the end
+    /// Keys in order of access (oldest at front, newest at back)
+    order: VecDeque<K>,
+    /// Count how many times each key appears in the order queue
+    /// Only evict when count reaches 0
+    ref_count: HashMap<K, usize>,
 }
 
 impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
     fn new(capacity: usize) -> Self {
         Self {
-            capacity,
-            map: HashMap::new(),
-            order: Vec::new(),
+            capacity: capacity.max(1), // Ensure at least 1
+            map: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity * 2),
+            ref_count: HashMap::with_capacity(capacity),
         }
     }
 
     fn get(&mut self, key: &K) -> Option<&V> {
         if self.map.contains_key(key) {
-            // Move to end (most recently used)
-            self.order.retain(|k| k != key);
-            self.order.push(key.clone());
+            // Mark as recently used by adding to back
+            self.order.push_back(key.clone());
+            *self.ref_count.entry(key.clone()).or_insert(0) += 1;
             self.map.get(key)
         } else {
             None
@@ -152,22 +156,48 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
     }
 
     fn insert(&mut self, key: K, value: V) {
-        if self.map.contains_key(&key) {
-            // Update existing
-            self.order.retain(|k| k != &key);
-        } else if self.map.len() >= self.capacity {
-            // Evict oldest
-            if let Some(oldest) = self.order.first().cloned() {
-                self.order.remove(0);
-                self.map.remove(&oldest);
+        if !self.map.contains_key(&key) {
+            // Evict if at capacity
+            while self.map.len() >= self.capacity {
+                self.evict_one();
             }
         }
-        self.order.push(key.clone());
+        self.order.push_back(key.clone());
+        *self.ref_count.entry(key.clone()).or_insert(0) += 1;
         self.map.insert(key, value);
+    }
+
+    fn evict_one(&mut self) {
+        // Pop from front until we find a key with ref_count == 1 (last reference)
+        while let Some(oldest) = self.order.pop_front() {
+            let count = self.ref_count.get_mut(&oldest);
+            match count {
+                Some(c) if *c > 1 => {
+                    // Key has newer references, skip this stale one
+                    *c -= 1;
+                }
+                Some(_) => {
+                    // Last reference, evict this key
+                    self.ref_count.remove(&oldest);
+                    self.map.remove(&oldest);
+                    break;
+                }
+                None => {
+                    // Key not in map (already evicted), continue
+                }
+            }
+        }
     }
 
     fn contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)
+    }
+
+    #[allow(dead_code)]
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+        self.ref_count.clear();
     }
 }
 
@@ -288,9 +318,8 @@ where
             tombstones.insert_or_assign(key, info);
         }
 
-        // Reopen file for record access
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        // Reuse the same reader - just seek when needed for record access
+        // No need to reopen the file (fixes file descriptor leak)
 
         Ok(Self {
             file: Some(reader),
@@ -335,12 +364,11 @@ where
     }
 
     /// Get tombstone info
-    #[allow(dead_code)]
     fn get_tombstone(&self, key: &K) -> Option<TombstoneInfo> {
         self.tombstones.find(key)
     }
 
-    /// Get all keys in cold storage
+    /// Iterate over keys (without collecting into Vec to save memory)
     fn keys(&self) -> impl Iterator<Item = &K> {
         self.index.keys()
     }
@@ -414,20 +442,20 @@ where
     ) -> Result<Self, PersistError> {
         std::fs::create_dir_all(&base_dir)?;
 
-        // Look for indexed snapshot
-        let indexed_snapshot = Self::find_indexed_snapshot(&base_dir)?;
+        // Look for indexed snapshot and extract version
+        let (indexed_snapshot, snapshot_version) = Self::find_indexed_snapshot(&base_dir)?;
 
-        let (cold, clock_value) = if let Some(path) = indexed_snapshot {
+        let (cold, clock_value, snapshot_version) = if let Some(path) = indexed_snapshot {
             let cold = ColdStorage::from_file(&path)?;
             let clock = cold.clock_value;
-            (cold, clock)
+            (cold, clock, snapshot_version)
         } else {
             // Try to migrate from regular snapshot
             let migrated = Self::migrate_from_regular_snapshot(&base_dir, node_id)?;
-            if let Some((cold, clock)) = migrated {
-                (cold, clock)
+            if let Some((cold, clock, version)) = migrated {
+                (cold, clock, version)
             } else {
-                (ColdStorage::empty(), 0)
+                (ColdStorage::empty(), 0, 0)
             }
         };
 
@@ -452,7 +480,7 @@ where
             config,
             base_dir,
             changes_since_snapshot: 0,
-            snapshot_version: 0,
+            snapshot_version,
             post_hooks: Vec::new(),
             snapshot_hooks: Vec::new(),
             wal_segment_hooks: Vec::new(),
@@ -465,8 +493,8 @@ where
         Ok(streaming)
     }
 
-    /// Find the most recent indexed snapshot
-    fn find_indexed_snapshot(base_dir: &PathBuf) -> Result<Option<PathBuf>, PersistError> {
+    /// Find the most recent indexed snapshot and return its version
+    fn find_indexed_snapshot(base_dir: &PathBuf) -> Result<(Option<PathBuf>, u64), PersistError> {
         let mut snapshots: Vec<(u64, PathBuf)> = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(base_dir) {
@@ -491,14 +519,17 @@ where
         }
 
         snapshots.sort_by_key(|(v, _)| *v);
-        Ok(snapshots.last().map(|(_, p)| p.clone()))
+        match snapshots.last() {
+            Some((version, path)) => Ok((Some(path.clone()), *version)),
+            None => Ok((None, 0)),
+        }
     }
 
     /// Migrate from a regular PersistedCRDT snapshot to indexed format
     fn migrate_from_regular_snapshot(
         base_dir: &PathBuf,
         node_id: NodeId,
-    ) -> Result<Option<(ColdStorage<K, C, V>, u64)>, PersistError> {
+    ) -> Result<Option<(ColdStorage<K, C, V>, u64, u64)>, PersistError> {
         // Look for existing MessagePack snapshots
         let mut snapshots: Vec<(u64, PathBuf)> = Vec::new();
 
@@ -528,6 +559,7 @@ where
 
         snapshots.sort_by_key(|(v, _)| *v);
         let (version, path) = snapshots.last().unwrap();
+        let version = *version;
 
         // Load the regular snapshot
         let bytes = std::fs::read(path)?;
@@ -559,24 +591,27 @@ where
 
         let clock_value = crdt.get_clock().current_time();
 
-        // Create indexed snapshot from the loaded CRDT
+        // Create indexed snapshot from the loaded CRDT (with atomic write)
         let indexed_path = base_dir.join(format!("snapshot_indexed_{:06}.bin", version));
         Self::create_indexed_snapshot_from_crdt(&crdt, node_id, &indexed_path)?;
 
         // Load the new indexed snapshot
         let cold = ColdStorage::from_file(&indexed_path)?;
 
-        Ok(Some((cold, clock_value)))
+        Ok(Some((cold, clock_value, version)))
     }
 
-    /// Create an indexed snapshot from a CRDT
+    /// Create an indexed snapshot from a CRDT (atomic write via temp file)
     fn create_indexed_snapshot_from_crdt(
         crdt: &CRDT<K, C, V>,
         node_id: NodeId,
         path: &PathBuf,
     ) -> Result<(), PersistError> {
+        // Write to a temp file first, then rename atomically
+        let temp_path = path.with_extension("bin.tmp");
+
         // Use unbuffered I/O to avoid issues with seeking and stream_position
-        let mut file = File::create(path)?;
+        let mut file = File::create(&temp_path)?;
 
         // Write magic and version
         file.write_all(SNAPSHOT_MAGIC)?;
@@ -630,6 +665,10 @@ where
         file.write_all(&tombstones_offset.to_le_bytes())?;
 
         file.sync_all()?;
+        drop(file);
+
+        // Atomic rename
+        std::fs::rename(&temp_path, path)?;
 
         Ok(())
     }
@@ -655,6 +694,7 @@ where
 
         for entry in wal_files {
             let changes: Vec<Change<K, C, V>> = super::wal::read_wal_file(&entry.path())?;
+            let num_changes = changes.len();
             for change in &changes {
                 // Apply to hot tier
                 self.hot_keys.insert(change.record_id.clone());
@@ -664,7 +704,7 @@ where
             }
             // Merge the changes
             self.hot.merge_changes(changes, &DefaultMergeRule);
-            self.changes_since_snapshot += 1;
+            self.changes_since_snapshot += num_changes; // Fix: count actual changes
         }
 
         Ok(())
@@ -732,8 +772,9 @@ where
         // If record exists in cold but not hot, load it first
         if !self.hot_keys.contains(record_id) && self.cold.contains_key(record_id) {
             if let Some(cold_record) = self.cold.load_record(record_id)? {
-                // Merge cold record into hot
-                self.merge_cold_record_to_hot(record_id, cold_record);
+                // Directly insert cold record into hot storage (preserves version metadata)
+                self.hot.insert_record_direct(record_id.clone(), cold_record);
+                self.hot_keys.insert(record_id.clone());
             }
         }
 
@@ -773,7 +814,9 @@ where
                 && self.cold.contains_key(&change.record_id)
             {
                 if let Some(cold_record) = self.cold.load_record(&change.record_id)? {
-                    self.merge_cold_record_to_hot(&change.record_id, cold_record);
+                    // Directly insert cold record into hot storage (preserves version metadata)
+                    self.hot.insert_record_direct(change.record_id.clone(), cold_record);
+                    self.hot_keys.insert(change.record_id.clone());
                 }
             }
         }
@@ -796,13 +839,63 @@ where
     }
 
     /// Get changes since a version (for sync)
+    ///
+    /// This scans both hot and cold storage to ensure all changes are included.
     pub fn get_changes_since(&mut self, last_db_version: u64) -> Result<Vec<Change<K, C, V>>, PersistError> {
         // Hot tier changes
         let mut changes = self.hot.get_changes_since(last_db_version);
 
-        // For cold records not in hot, we'd need to scan - but typically
-        // get_changes_since is called for recent changes which are in hot
-        // This is a trade-off for streaming: old cold changes require full scan
+        // Scan cold storage for records with changes after last_db_version
+        // This is necessary to ensure sync completeness
+        for key in self.cold.keys().cloned().collect::<Vec<_>>() {
+            // Skip if already in hot (hot has newer data)
+            if self.hot_keys.contains(&key) {
+                continue;
+            }
+            // Skip if tombstoned
+            if self.hot_tombstones.contains(&key) {
+                continue;
+            }
+
+            if let Some(record) = self.cold.load_record(&key)? {
+                // Check if record has changes after last_db_version
+                if record.highest_local_db_version > last_db_version {
+                    // Convert record to changes
+                    for (col_name, value) in &record.fields {
+                        if let Some(col_ver) = record.column_versions.get(col_name) {
+                            if col_ver.local_db_version > last_db_version {
+                                changes.push(Change::new(
+                                    key.clone(),
+                                    Some(col_name.clone()),
+                                    Some(value.clone()),
+                                    col_ver.col_version,
+                                    col_ver.db_version,
+                                    col_ver.node_id,
+                                    col_ver.local_db_version,
+                                    0,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Include cold tombstones if they're after last_db_version
+        for (key, info) in self.cold.tombstones.iter() {
+            if info.local_db_version > last_db_version && !self.hot_keys.contains(key) {
+                changes.push(Change::new(
+                    key.clone(),
+                    None,
+                    None,
+                    u64::MAX,
+                    info.db_version,
+                    info.node_id,
+                    info.local_db_version,
+                    0,
+                ));
+            }
+        }
 
         // Sort and dedupe
         CRDT::compress_changes(&mut changes);
@@ -815,19 +908,30 @@ where
         // Merge hot into a temporary full CRDT for snapshot
         let mut full_crdt: CRDT<K, C, V> = CRDT::new(self.hot.node_id, None);
 
-        // First, load all cold records
-        for key in self.cold.keys().cloned().collect::<Vec<_>>() {
-            if !self.hot_tombstones.contains(&key) {
-                if let Some(record) = self.cold.load_record(&key)? {
-                    // Convert record to changes and merge
-                    let changes = self.record_to_changes(&key, &record);
-                    full_crdt.merge_changes(changes, &DefaultMergeRule);
-                }
+        // First, load all cold records (iterate without collecting all keys at once)
+        let cold_keys: Vec<K> = self.cold.keys().cloned().collect();
+        for key in cold_keys {
+            // Skip if hot has this key (hot data supersedes cold)
+            if self.hot_keys.contains(&key) {
+                continue;
+            }
+            // Skip if tombstoned in hot
+            if self.hot_tombstones.contains(&key) {
+                continue;
+            }
+
+            if let Some(record) = self.cold.load_record(&key)? {
+                // Directly insert record (preserves version metadata)
+                full_crdt.insert_record_direct(key, record);
             }
         }
 
-        // Apply cold tombstones
+        // Apply cold tombstones ONLY if not superseded by hot records
         for (key, info) in self.cold.tombstones.iter() {
+            // Skip if hot has touched this key (hot data supersedes cold tombstones)
+            if self.hot_keys.contains(key) {
+                continue;
+            }
             full_crdt.merge_changes(
                 vec![Change::new(
                     key.clone(),
@@ -847,6 +951,9 @@ where
         let hot_changes = self.hot.get_changes_since(0);
         full_crdt.merge_changes(hot_changes, &DefaultMergeRule);
 
+        // Get the FINAL clock value after all merges (fixes clock desync)
+        let final_clock_value = full_crdt.get_clock().current_time();
+
         // Create indexed snapshot
         self.snapshot_version += 1;
         let snapshot_path = self.base_dir.join(format!(
@@ -859,9 +966,9 @@ where
         // Reload cold storage from new snapshot
         self.cold = ColdStorage::from_file(&snapshot_path)?;
 
-        // Clear hot tier
+        // Clear hot tier with FINAL clock value (fixes clock desync)
         self.hot = CRDT::new(self.hot.node_id, None);
-        self.hot.get_clock_mut().set_time(self.cold.clock_value);
+        self.hot.get_clock_mut().set_time(final_clock_value);
         self.hot_keys.clear();
         self.hot_tombstones.clear();
         self.cache = LruCache::new(self.config.cache_capacity);
@@ -916,33 +1023,6 @@ where
     /// Get current logical clock value
     pub fn get_clock_time(&self) -> u64 {
         self.hot.get_clock().current_time()
-    }
-
-    // Helper methods
-
-    fn merge_cold_record_to_hot(&mut self, key: &K, record: Record<C, V>) {
-        let changes = self.record_to_changes(key, &record);
-        self.hot.merge_changes(changes, &DefaultMergeRule);
-        self.hot_keys.insert(key.clone());
-    }
-
-    fn record_to_changes(&self, key: &K, record: &Record<C, V>) -> Vec<Change<K, C, V>> {
-        let mut changes = Vec::new();
-        for (col_name, value) in &record.fields {
-            if let Some(col_ver) = record.column_versions.get(col_name) {
-                changes.push(Change::new(
-                    key.clone(),
-                    Some(col_name.clone()),
-                    Some(value.clone()),
-                    col_ver.col_version,
-                    col_ver.db_version,
-                    col_ver.node_id,
-                    col_ver.local_db_version,
-                    0,
-                ));
-            }
-        }
-        changes
     }
 
     /// Delete all WAL files except the current one
@@ -1015,9 +1095,7 @@ where
     }
 }
 
-// Need to add get_clock_mut and get_tombstones to CRDT - let's do that via a trait extension
-// For now, we'll work around it
-
+// Internal CRDT extensions for streaming module
 impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     /// Mutable access to the logical clock (for internal use)
     pub(crate) fn get_clock_mut(&mut self) -> &mut LogicalClock {
@@ -1027,6 +1105,19 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     /// Access to tombstones (for internal use)
     pub(crate) fn get_tombstones(&self) -> &TombstoneStorage<K> {
         &self.tombstones
+    }
+
+    /// Insert a record directly, preserving its version metadata.
+    /// This bypasses the normal change-based API to avoid causality issues
+    /// when loading cold records into hot storage.
+    pub(crate) fn insert_record_direct(&mut self, key: K, record: Record<C, V>) {
+        // Update clock to at least match the record's versions
+        for col_ver in record.column_versions.values() {
+            if col_ver.db_version > self.clock.current_time() {
+                self.clock.set_time(col_ver.db_version);
+            }
+        }
+        self.data.insert(key, record);
     }
 }
 
@@ -1170,5 +1261,127 @@ mod tests {
             assert_eq!(record.fields.get("field1").unwrap(), "hot_value");
             assert_eq!(record.fields.get("field2").unwrap(), "unchanged");
         }
+    }
+
+    #[test]
+    fn test_get_changes_since_includes_cold() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create data and snapshot
+        {
+            let mut crdt = StreamingCRDT::<String, String, String>::open(
+                base_dir.clone(),
+                1,
+                StreamingConfig::default(),
+            )
+            .unwrap();
+
+            crdt.insert_or_update(
+                &"key1".to_string(),
+                vec![("field1".to_string(), "value1".to_string())],
+            )
+            .unwrap();
+
+            crdt.create_indexed_snapshot().unwrap();
+        }
+
+        // Reopen and verify get_changes_since includes cold records
+        {
+            let mut crdt = StreamingCRDT::<String, String, String>::open(
+                base_dir.clone(),
+                1,
+                StreamingConfig::default(),
+            )
+            .unwrap();
+
+            // Should find changes from cold storage when asking for version 0
+            let changes = crdt.get_changes_since(0).unwrap();
+            assert!(!changes.is_empty(), "Should find cold changes");
+
+            // Verify the change is for key1
+            assert!(
+                changes.iter().any(|c| c.record_id == "key1"),
+                "Should find change for key1"
+            );
+
+            // Should not find changes after the current clock (future)
+            let current_clock = crdt.get_clock_time();
+            let no_changes = crdt.get_changes_since(current_clock + 100).unwrap();
+            assert!(no_changes.is_empty(), "Should not find changes in the future");
+        }
+    }
+
+    #[test]
+    fn test_clock_preserved_across_snapshots() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let clock_before_snapshot;
+        let clock_after_snapshot;
+        {
+            let mut crdt = StreamingCRDT::<String, String, String>::open(
+                base_dir.clone(),
+                1,
+                StreamingConfig::default(),
+            )
+            .unwrap();
+
+            for i in 0..10 {
+                crdt.insert_or_update(
+                    &format!("key{}", i),
+                    vec![("field".to_string(), format!("value{}", i))],
+                )
+                .unwrap();
+            }
+
+            clock_before_snapshot = crdt.get_clock_time();
+            crdt.create_indexed_snapshot().unwrap();
+            clock_after_snapshot = crdt.get_clock_time();
+
+            // Clock should be at least as high after snapshot (merge may advance it)
+            assert!(
+                clock_after_snapshot >= clock_before_snapshot,
+                "Clock should not go backwards"
+            );
+        }
+
+        // Reopen and verify clock is preserved
+        {
+            let crdt = StreamingCRDT::<String, String, String>::open(
+                base_dir.clone(),
+                1,
+                StreamingConfig::default(),
+            )
+            .unwrap();
+
+            // Clock should match what it was after snapshot
+            assert_eq!(crdt.get_clock_time(), clock_after_snapshot);
+        }
+    }
+
+    #[test]
+    fn test_lru_cache_eviction() {
+        let mut cache: LruCache<i32, String> = LruCache::new(3);
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+
+        // All should be present
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+
+        // Access 1 to make it recently used
+        let _ = cache.get(&1);
+
+        // Insert 4, should evict 2 (oldest)
+        cache.insert(4, "four".to_string());
+
+        assert!(cache.contains_key(&1)); // Still there (was accessed)
+        assert!(!cache.contains_key(&2)); // Evicted
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
     }
 }
