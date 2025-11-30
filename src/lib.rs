@@ -1501,6 +1501,40 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
 
     None
   }
+
+  /// Mutable access to the logical clock (for internal use by persistence layer)
+  #[cfg(feature = "persist-msgpack")]
+  pub(crate) fn get_clock_mut(&mut self) -> &mut LogicalClock {
+    &mut self.clock
+  }
+
+  /// Access to tombstones (for internal use by persistence layer)
+  #[cfg(feature = "persist-msgpack")]
+  pub(crate) fn get_tombstones(&self) -> &TombstoneStorage<K> {
+    &self.tombstones
+  }
+
+  /// Insert a record directly, preserving its version metadata.
+  /// This bypasses the normal change-based API to avoid causality issues
+  /// when loading cold records into hot storage.
+  #[cfg(feature = "persist-msgpack")]
+  pub(crate) fn insert_record_direct(&mut self, key: K, record: Record<C, V>) {
+    // Update clock to be ahead of the record's versions to maintain causality
+    // Check both column versions and highest_local_db_version to handle all cases
+    let max_version = record
+      .column_versions
+      .values()
+      .map(|v| v.db_version)
+      .max()
+      .unwrap_or(0)
+      .max(record.highest_local_db_version);
+
+    // Use update() to ensure clock advances past max_version (avoids collisions)
+    if max_version >= self.clock.current_time() {
+      self.clock.update(max_version);
+    }
+    self.data.insert(key, record);
+  }
 }
 
 // Additional methods requiring Ord (sorted-keys feature only)
