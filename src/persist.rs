@@ -101,9 +101,11 @@
 //! ```
 
 mod hooks;
+pub mod streaming;
 mod wal;
 
 pub use hooks::{PostOpHook, SnapshotHook, WalSegmentHook};
+pub use streaming::{StreamingCRDT, StreamingConfig};
 
 use crate::{Change, DefaultMergeRule, MergeRule, NodeId, Record, TombstoneInfo, CRDT};
 use std::collections::HashMap;

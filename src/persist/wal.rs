@@ -169,6 +169,11 @@ where
     fn segment_path(base_path: &Path, segment: u64) -> PathBuf {
         base_path.join(format!("wal_{:06}.bin", segment))
     }
+
+    /// Returns the current segment number.
+    pub fn current_segment(&self) -> u64 {
+        self.segment_number
+    }
 }
 
 /// Reads all changes from a WAL file.
