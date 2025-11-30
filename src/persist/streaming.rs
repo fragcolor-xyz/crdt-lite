@@ -1138,7 +1138,7 @@ where
       .hot_tombstones
       .iter()
       .filter(|k| {
-        if let Some(info) = self.hot.get_tombstones().find(*k) {
+        if self.hot.get_tombstones().find(*k).is_some() {
           false // Still exists, don't remove from tracking
         } else {
           true // Was compacted, remove from tracking
