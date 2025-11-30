@@ -78,7 +78,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hash;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use super::wal::WalWriter;
@@ -88,6 +88,10 @@ use super::{PersistConfig, PersistError, PostOpHook, SnapshotHook, WalSegmentHoo
 const SNAPSHOT_MAGIC: &[u8; 4] = b"CRDS";
 /// Current snapshot format version
 const SNAPSHOT_VERSION: u8 = 1;
+
+/// Header size depends on NodeId type
+/// Layout: node_id + clock + record_count + tombstone_count + index_offset + tombstones_offset
+const HEADER_SIZE: usize = std::mem::size_of::<NodeId>() + 5 * std::mem::size_of::<u64>();
 
 /// Default LRU cache capacity (number of records)
 pub const DEFAULT_CACHE_CAPACITY: usize = 1000;
@@ -206,6 +210,7 @@ where
     /// Load cold storage from an indexed snapshot file
     fn from_file(path: &PathBuf) -> Result<Self, PersistError> {
         let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
         let mut reader = BufReader::new(file);
 
         // Read and verify magic
@@ -230,17 +235,38 @@ where
         // flags[1] reserved for future use
 
         // Read header fields
-        let mut header_buf = [0u8; 48]; // 6 * u64
+        let mut header_buf = vec![0u8; HEADER_SIZE];
         reader.read_exact(&mut header_buf)?;
 
-        let node_id = u64::from_le_bytes(header_buf[0..8].try_into().unwrap());
-        let clock_value = u64::from_le_bytes(header_buf[8..16].try_into().unwrap());
-        let record_count = u64::from_le_bytes(header_buf[16..24].try_into().unwrap());
-        let tombstone_count = u64::from_le_bytes(header_buf[24..32].try_into().unwrap());
-        let index_offset = u64::from_le_bytes(header_buf[32..40].try_into().unwrap());
-        let tombstones_offset = u64::from_le_bytes(header_buf[40..48].try_into().unwrap());
+        // Parse header - NodeId size varies based on feature flag
+        let node_id_size = std::mem::size_of::<NodeId>();
+        let mut offset = 0;
 
-        let _ = (node_id, record_count, tombstone_count); // Silence unused warnings
+        // Skip node_id (we don't need it for loading)
+        offset += node_id_size;
+
+        let clock_value = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        let record_count = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        let tombstone_count = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        let index_offset = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        let tombstones_offset = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
+
+        let _ = (record_count, tombstone_count); // Silence unused warnings
+
+        // Validate offsets
+        if index_offset == 0 || index_offset >= file_len {
+            return Err(PersistError::InvalidDirectory(format!(
+                "Invalid index_offset {} (file_len={})", index_offset, file_len
+            )));
+        }
 
         // Load index from end of file
         reader.seek(SeekFrom::Start(index_offset))?;
@@ -549,27 +575,26 @@ where
         node_id: NodeId,
         path: &PathBuf,
     ) -> Result<(), PersistError> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
+        // Use unbuffered I/O to avoid issues with seeking and stream_position
+        let mut file = File::create(path)?;
 
         // Write magic and version
-        writer.write_all(SNAPSHOT_MAGIC)?;
-        writer.write_all(&[SNAPSHOT_VERSION, 0])?; // version, flags
+        file.write_all(SNAPSHOT_MAGIC)?;
+        file.write_all(&[SNAPSHOT_VERSION, 0])?; // version, flags
 
         // Placeholder for header (we'll seek back and write it)
-        let header_pos = writer.stream_position()?;
-        let placeholder = [0u8; 48];
-        writer.write_all(&placeholder)?;
+        let header_pos = file.stream_position()?;
+        let placeholder = vec![0u8; HEADER_SIZE];
+        file.write_all(&placeholder)?;
 
         // Write records and build index
         let mut index_entries: Vec<IndexEntry<K>> = Vec::new();
-        let records_start = writer.stream_position()?;
 
         for (key, record) in crdt.get_data().iter() {
-            let offset = writer.stream_position()?;
+            let offset = file.stream_position()?;
             let record_bytes =
                 rmp_serde::to_vec(record).map_err(PersistError::MsgpackEncode)?;
-            writer.write_all(&record_bytes)?;
+            file.write_all(&record_bytes)?;
 
             index_entries.push(IndexEntry {
                 key: key.clone(),
@@ -579,7 +604,7 @@ where
         }
 
         // Write tombstones section
-        let tombstones_offset = writer.stream_position()?;
+        let tombstones_offset = file.stream_position()?;
         let tombstone_map: HashMap<K, TombstoneInfo> = crdt
             .get_tombstones()
             .iter()
@@ -587,27 +612,24 @@ where
             .collect();
         let tombstone_bytes =
             rmp_serde::to_vec(&tombstone_map).map_err(PersistError::MsgpackEncode)?;
-        writer.write_all(&tombstone_bytes)?;
+        file.write_all(&tombstone_bytes)?;
 
         // Write index section
-        let index_offset = writer.stream_position()?;
+        let index_offset = file.stream_position()?;
         let index_bytes =
             rmp_serde::to_vec(&index_entries).map_err(PersistError::MsgpackEncode)?;
-        writer.write_all(&index_bytes)?;
+        file.write_all(&index_bytes)?;
 
-        // Write header
-        writer.seek(SeekFrom::Start(header_pos))?;
-        writer.write_all(&node_id.to_le_bytes())?;
-        writer.write_all(&crdt.get_clock().current_time().to_le_bytes())?;
-        writer.write_all(&(index_entries.len() as u64).to_le_bytes())?;
-        writer.write_all(&(tombstone_map.len() as u64).to_le_bytes())?;
-        writer.write_all(&index_offset.to_le_bytes())?;
-        writer.write_all(&tombstones_offset.to_le_bytes())?;
+        // Write header - seek back and overwrite placeholder
+        file.seek(SeekFrom::Start(header_pos))?;
+        file.write_all(&node_id.to_le_bytes())?;
+        file.write_all(&crdt.get_clock().current_time().to_le_bytes())?;
+        file.write_all(&(index_entries.len() as u64).to_le_bytes())?;
+        file.write_all(&(tombstone_map.len() as u64).to_le_bytes())?;
+        file.write_all(&index_offset.to_le_bytes())?;
+        file.write_all(&tombstones_offset.to_le_bytes())?;
 
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-
-        let _ = records_start; // Silence unused warning
+        file.sync_all()?;
 
         Ok(())
     }
