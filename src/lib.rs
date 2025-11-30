@@ -1291,6 +1291,11 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
     &self.clock
   }
 
+  /// Gets the node ID for this CRDT.
+  pub fn node_id(&self) -> NodeId {
+    self.node_id
+  }
+
   /// Gets a reference to the internal data map.
   pub fn get_data(&self) -> &DataMap<K, Record<C, V>> {
     &self.data
@@ -1554,10 +1559,10 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
       .unwrap_or(0)
       .max(record.highest_local_db_version);
 
-    // Use update() to ensure clock advances past max_version (avoids collisions)
-    // Only update if max_version exceeds current time to avoid unnecessary gaps
+    // Use direct assignment instead of update() to avoid creating version gaps
+    // Only set if max_version exceeds current time
     if max_version > self.clock.current_time() {
-      self.clock.update(max_version);
+      self.clock.set_time(max_version);
     }
     self.data.insert(key, record);
   }

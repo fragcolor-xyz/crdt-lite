@@ -734,17 +734,15 @@ where
     let mut index_entries: Vec<IndexEntry<K>> = Vec::new();
 
     // 1. Stream cold records that are NOT superseded by hot tier
-    //    This avoids loading all cold records into memory
-    for key in self.cold.keys().cloned().collect::<Vec<_>>() {
-      // Skip if hot has this key (hot data supersedes cold)
-      if self.hot_keys.contains(&key) {
-        continue;
-      }
-      // Skip if tombstoned in hot
-      if self.hot_tombstones.contains(&key) {
-        continue;
-      }
+    //    Filter before collecting to reduce memory usage
+    let cold_keys_to_process: Vec<K> = self
+      .cold
+      .keys()
+      .filter(|k| !self.hot_keys.contains(*k) && !self.hot_tombstones.contains(*k))
+      .cloned()
+      .collect();
 
+    for key in cold_keys_to_process {
       // Load and write individual record (only one in memory at a time)
       if let Some(record) = self.cold.load_record(&key)? {
         max_clock = max_clock.max(record.highest_local_db_version);
@@ -807,7 +805,7 @@ where
 
     // Write header
     file.seek(SeekFrom::Start(header_pos))?;
-    file.write_all(&self.hot.node_id.to_le_bytes())?;
+    file.write_all(&self.hot.node_id().to_le_bytes())?;
     file.write_all(&max_clock.to_le_bytes())?;
     file.write_all(&(index_entries.len() as u64).to_le_bytes())?;
     file.write_all(&(tombstone_map.len() as u64).to_le_bytes())?;
@@ -1083,7 +1081,7 @@ where
     self.cold = ColdStorage::from_file(&snapshot_path)?;
 
     // Clear hot tier with final clock value
-    self.hot = CRDT::new(self.hot.node_id, None);
+    self.hot = CRDT::new(self.hot.node_id(), None);
     self.hot.get_clock_mut().set_time(final_clock_value);
     self.hot_keys.clear();
     self.hot_tombstones.clear();
