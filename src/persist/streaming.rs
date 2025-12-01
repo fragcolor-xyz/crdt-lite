@@ -336,8 +336,6 @@ where
 
     let tombstones_offset = u64::from_le_bytes(header_buf[offset..offset + 8].try_into().unwrap());
 
-    let _ = (record_count, tombstone_count); // Silence unused warnings
-
     // Validate offsets
     if index_offset == 0 || index_offset >= file_len {
       return Err(PersistError::InvalidDirectory(format!(
@@ -374,6 +372,15 @@ where
     let index_entries: Vec<IndexEntry<K>> =
       rmp_serde::from_read(&mut reader).map_err(PersistError::MsgpackDecode)?;
 
+    // Validate header record_count against actual index entries
+    if (index_entries.len() as u64) != record_count {
+      return Err(PersistError::InvalidDirectory(format!(
+        "Header record_count ({}) doesn't match actual index entries ({})",
+        record_count,
+        index_entries.len()
+      )));
+    }
+
     let index: HashMap<K, (u64, u32, u64)> = index_entries
       .into_iter()
       .map(|e| (e.key, (e.offset, e.length, e.highest_version)))
@@ -383,6 +390,15 @@ where
     reader.seek(SeekFrom::Start(tombstones_offset))?;
     let tombstone_map: HashMap<K, TombstoneInfo> =
       rmp_serde::from_read(&mut reader).map_err(PersistError::MsgpackDecode)?;
+
+    // Validate header tombstone_count against actual tombstones
+    if (tombstone_map.len() as u64) != tombstone_count {
+      return Err(PersistError::InvalidDirectory(format!(
+        "Header tombstone_count ({}) doesn't match actual tombstones ({})",
+        tombstone_count,
+        tombstone_map.len()
+      )));
+    }
 
     let mut tombstones = TombstoneStorage::new();
     for (key, info) in tombstone_map {
@@ -467,6 +483,28 @@ where
 /// This is designed for datasets too large to fit in memory. Recent changes
 /// are kept in a hot in-memory CRDT, while older data is loaded from an
 /// indexed snapshot file on-demand.
+///
+/// # Thread Safety
+///
+/// **`StreamingCRDT` is NOT thread-safe.** All operations require `&mut self`
+/// (exclusive access) and must be performed from a single thread or protected
+/// by external synchronization (e.g., `Mutex<StreamingCRDT>`).
+///
+/// File operations:
+/// - Files are opened on-demand for each `load_record()` call (no persistent FDs)
+/// - Snapshot files are opened, read, and closed within a single operation
+/// - WAL writes use a single `BufWriter` that is not thread-safe
+///
+/// If you need concurrent access from multiple threads:
+/// 1. Wrap the `StreamingCRDT` in a `Mutex` or `RwLock`
+/// 2. Use separate `StreamingCRDT` instances per thread (not recommended for shared data)
+/// 3. Use a message-passing architecture with a single owner thread
+///
+/// # File Descriptor Usage
+///
+/// Unlike some database designs, `StreamingCRDT` does NOT keep snapshot files open.
+/// Files are opened on-demand for each cold record load and closed immediately.
+/// This prevents FD exhaustion when running many `StreamingCRDT` instances.
 pub struct StreamingCRDT<K, C, V>
 where
   K: Ord + Hash + Eq + Clone,
@@ -658,14 +696,23 @@ where
       bytes
     };
 
-    // Parse header
+    // Parse header with detailed error messages
     if bytes.len() < 4 {
-      return Ok(None);
+      return Err(PersistError::InvalidDirectory(format!(
+        "Snapshot file too small to contain header: {} bytes (path: {})",
+        bytes.len(),
+        path.display()
+      )));
     }
 
     let metadata_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     if bytes.len() < 4 + metadata_len {
-      return Ok(None);
+      return Err(PersistError::InvalidDirectory(format!(
+        "Snapshot truncated: header says {} bytes metadata but file only has {} bytes after header (path: {})",
+        metadata_len,
+        bytes.len().saturating_sub(4),
+        path.display()
+      )));
     }
 
     let crdt_bytes = &bytes[4 + metadata_len..];
@@ -707,8 +754,17 @@ where
 
     // Write records and build index
     let mut index_entries: Vec<IndexEntry<K>> = Vec::new();
+    let clock_time = crdt.get_clock().current_time();
 
     for (key, record) in crdt.get_data().iter() {
+      // Clock consistency: record versions should not exceed CRDT clock
+      debug_assert!(
+        record.highest_local_db_version <= clock_time,
+        "Record has version {} but CRDT clock is {} - clock inconsistency",
+        record.highest_local_db_version,
+        clock_time
+      );
+
       let offset = file.stream_position()?;
       let record_bytes = rmp_serde::to_vec(record).map_err(PersistError::MsgpackEncode)?;
       file.write_all(&record_bytes)?;
@@ -786,10 +842,27 @@ where
 
       // Load and write individual record (only one in memory at a time)
       if let Some(record) = self.cold.load_record(&key)? {
+        // Clock consistency: record versions should not exceed our clock
+        debug_assert!(
+          record.highest_local_db_version <= max_clock,
+          "Cold record has version {} but max_clock is {} - clock inconsistency",
+          record.highest_local_db_version,
+          max_clock
+        );
         max_clock = max_clock.max(record.highest_local_db_version);
 
         let offset = file.stream_position()?;
         let record_bytes = rmp_serde::to_vec(&record).map_err(PersistError::MsgpackEncode)?;
+
+        // Validate record size fits in u32 (index uses u32 for length)
+        if record_bytes.len() > u32::MAX as usize {
+          return Err(PersistError::InvalidDirectory(format!(
+            "Record too large: {} bytes (max {} bytes)",
+            record_bytes.len(),
+            u32::MAX
+          )));
+        }
+
         file.write_all(&record_bytes)?;
 
         index_entries.push(IndexEntry {
@@ -803,10 +876,27 @@ where
 
     // 2. Write hot tier records (already in memory, no extra load)
     for (key, record) in self.hot.get_data().iter() {
+      // Clock consistency: hot record versions should not exceed our clock
+      debug_assert!(
+        record.highest_local_db_version <= max_clock,
+        "Hot record has version {} but max_clock is {} - clock inconsistency",
+        record.highest_local_db_version,
+        max_clock
+      );
       max_clock = max_clock.max(record.highest_local_db_version);
 
       let offset = file.stream_position()?;
       let record_bytes = rmp_serde::to_vec(record).map_err(PersistError::MsgpackEncode)?;
+
+      // Validate record size fits in u32 (index uses u32 for length)
+      if record_bytes.len() > u32::MAX as usize {
+        return Err(PersistError::InvalidDirectory(format!(
+          "Record too large: {} bytes (max {} bytes)",
+          record_bytes.len(),
+          u32::MAX
+        )));
+      }
+
       file.write_all(&record_bytes)?;
 
       index_entries.push(IndexEntry {
