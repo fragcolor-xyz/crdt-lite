@@ -177,6 +177,17 @@ where
   pub fn current_segment(&self) -> u64 {
     self.segment_number
   }
+
+  /// Explicitly flush WAL buffer to OS page cache.
+  ///
+  /// This ensures all pending writes are handed off to the OS (but NOT fsynced to disk).
+  /// Call this before firing hooks to guarantee they see written data.
+  ///
+  /// Note: `append()` already calls flush internally, but this method provides
+  /// explicit control for callers who need to guarantee ordering.
+  pub fn flush(&mut self) -> io::Result<()> {
+    self.current_file.flush()
+  }
 }
 
 /// Reads all changes from a WAL file.

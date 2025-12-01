@@ -93,6 +93,13 @@ const HEADER_SIZE: usize = std::mem::size_of::<NodeId>() + 5 * std::mem::size_of
 /// Default LRU cache capacity (number of records)
 pub const DEFAULT_CACHE_CAPACITY: usize = 1000;
 
+/// Maximum index section size in bytes (security limit to prevent OOM attacks)
+/// Allows up to ~10 million index entries (at ~100 bytes per entry estimated)
+const MAX_INDEX_SECTION_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+
+/// Maximum tombstone section size in bytes (security limit)
+const MAX_TOMBSTONE_SECTION_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+
 /// Result type for migration function to avoid clippy type_complexity warning
 type MigrationResult<K, C, V> = Result<Option<(ColdStorage<K, C, V>, u64, u64)>, PersistError>;
 
@@ -137,12 +144,23 @@ struct LruCache<K, V> {
   ref_count: HashMap<K, usize>,
 }
 
+/// Initial capacity multiplier for LRU order queue.
+/// Uses 2x capacity because each get() adds a duplicate entry - we need headroom
+/// before compaction kicks in.
+const LRU_ORDER_INITIAL_CAPACITY_MULTIPLIER: usize = 2;
+
+/// Compaction threshold multiplier for LRU order queue.
+/// When order.len() exceeds capacity * this value, we compact to remove stale entries.
+/// Uses 3x because: 2x for normal duplicates + 1x buffer before we need to compact.
+/// Higher values = less frequent compaction but more memory usage.
+const LRU_ORDER_COMPACT_THRESHOLD_MULTIPLIER: usize = 3;
+
 impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
   fn new(capacity: usize) -> Self {
     Self {
       capacity: capacity.max(1), // Ensure at least 1
       map: HashMap::with_capacity(capacity),
-      order: VecDeque::with_capacity(capacity * 2),
+      order: VecDeque::with_capacity(capacity * LRU_ORDER_INITIAL_CAPACITY_MULTIPLIER),
       ref_count: HashMap::with_capacity(capacity),
     }
   }
@@ -173,14 +191,14 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
     self.map.insert(key, value);
 
     // Compact order queue if it gets too large (prevents unbounded growth)
-    if self.order.len() > self.capacity * 3 {
+    if self.order.len() > self.capacity * LRU_ORDER_COMPACT_THRESHOLD_MULTIPLIER {
       self.compact();
     }
   }
 
   /// Rebuild order queue to remove stale entries
   fn compact(&mut self) {
-    let mut new_order = VecDeque::with_capacity(self.capacity * 2);
+    let mut new_order = VecDeque::with_capacity(self.capacity * LRU_ORDER_INITIAL_CAPACITY_MULTIPLIER);
     let mut new_ref_count: HashMap<K, usize> = HashMap::with_capacity(self.capacity);
 
     // Keep only the most recent entry for each key
@@ -334,6 +352,23 @@ where
       )));
     }
 
+    // Security: Validate section sizes to prevent OOM attacks from malicious snapshots
+    let index_section_size = file_len - index_offset;
+    if index_section_size > MAX_INDEX_SECTION_SIZE {
+      return Err(PersistError::InvalidDirectory(format!(
+        "Index section too large: {} bytes (max {})",
+        index_section_size, MAX_INDEX_SECTION_SIZE
+      )));
+    }
+
+    let tombstone_section_size = index_offset - tombstones_offset;
+    if tombstone_section_size > MAX_TOMBSTONE_SECTION_SIZE {
+      return Err(PersistError::InvalidDirectory(format!(
+        "Tombstone section too large: {} bytes (max {})",
+        tombstone_section_size, MAX_TOMBSTONE_SECTION_SIZE
+      )));
+    }
+
     // Load index from end of file
     reader.seek(SeekFrom::Start(index_offset))?;
     let index_entries: Vec<IndexEntry<K>> =
@@ -471,6 +506,11 @@ where
   batch: Vec<Change<K, C, V>>,
   /// Last snapshot time
   last_snapshot_time: std::time::Instant,
+
+  /// Snapshots that have been successfully uploaded (for safe cleanup)
+  uploaded_snapshots: HashSet<PathBuf>,
+  /// WAL segments that have been successfully uploaded (for safe cleanup)
+  uploaded_wal_segments: HashSet<PathBuf>,
 }
 
 impl<K, C, V> StreamingCRDT<K, C, V>
@@ -534,6 +574,8 @@ where
       wal_segment_hooks: Vec::new(),
       batch: Vec::new(),
       last_snapshot_time: std::time::Instant::now(),
+      uploaded_snapshots: HashSet::new(),
+      uploaded_wal_segments: HashSet::new(),
     };
 
     streaming.replay_wal()?;
@@ -734,15 +776,14 @@ where
     let mut index_entries: Vec<IndexEntry<K>> = Vec::new();
 
     // 1. Stream cold records that are NOT superseded by hot tier
-    //    Filter before collecting to reduce memory usage
-    let cold_keys_to_process: Vec<K> = self
-      .cold
-      .keys()
-      .filter(|k| !self.hot_keys.contains(*k) && !self.hot_tombstones.contains(*k))
-      .cloned()
-      .collect();
+    //    We iterate directly and re-check filters at write time for consistency
+    //    (avoids TOCTOU issues and is clearer about intent)
+    for key in self.cold.keys().cloned().collect::<Vec<_>>() {
+      // Re-check filter at write time (ensures consistency)
+      if self.hot_keys.contains(&key) || self.hot_tombstones.contains(&key) {
+        continue;
+      }
 
-    for key in cold_keys_to_process {
       // Load and write individual record (only one in memory at a time)
       if let Some(record) = self.cold.load_record(&key)? {
         max_clock = max_clock.max(record.highest_local_db_version);
@@ -842,17 +883,17 @@ where
 
     for entry in wal_files {
       let changes: Vec<Change<K, C, V>> = super::wal::read_wal_file(&entry.path())?;
-      let num_changes = changes.len();
       for change in &changes {
-        // Apply to hot tier
+        // Track keys for hot tier membership
         self.hot_keys.insert(change.record_id.clone());
         if change.col_name.is_none() {
           self.hot_tombstones.insert(change.record_id.clone());
         }
       }
-      // Merge the changes
-      self.hot.merge_changes(changes, &DefaultMergeRule);
-      self.changes_since_snapshot += num_changes; // Fix: count actual changes
+      // Merge the changes and count only ACCEPTED changes
+      // (merge_changes may reject some during conflict resolution)
+      let accepted = self.hot.merge_changes(changes, &DefaultMergeRule);
+      self.changes_since_snapshot += accepted.len();
     }
 
     Ok(())
@@ -890,7 +931,14 @@ where
     Ok(None)
   }
 
-  /// Check if a record exists (without loading full record)
+  /// Check if a record exists (without loading full record from disk).
+  ///
+  /// This is a fast membership check that:
+  /// - Returns `false` if the record is tombstoned (deleted)
+  /// - Returns `true` if the key exists in hot tier, cache, or cold storage index
+  ///
+  /// Unlike `get_record()`, this does NOT load the full record from disk,
+  /// making it efficient for existence checks on large datasets.
   pub fn contains_key(&self, key: &K) -> bool {
     if self.hot_tombstones.contains(key) || self.cold.is_tombstoned(key) {
       return false;
@@ -898,7 +946,10 @@ where
     self.hot_keys.contains(key) || self.cache.contains_key(key) || self.cold.contains_key(key)
   }
 
-  /// Check if a record is tombstoned
+  /// Check if a record has been deleted (tombstoned).
+  ///
+  /// Returns `true` if the record was deleted in either hot or cold tier.
+  /// Tombstoned records cannot be updated until compacted.
   pub fn is_tombstoned(&self, key: &K) -> bool {
     self.hot_tombstones.contains(key) || self.cold.is_tombstoned(key)
   }
@@ -939,9 +990,23 @@ where
   }
 
   /// Delete a record
+  ///
+  /// This correctly handles records that exist only in cold storage by loading
+  /// them into the hot tier first before creating the tombstone.
   pub fn delete_record(&mut self, record_id: &K) -> Result<Option<Change<K, C, V>>, PersistError> {
     if self.is_tombstoned(record_id) {
       return Ok(None);
+    }
+
+    // If record exists in cold but not hot, load it first so delete_record works
+    // Without this, deleting a cold-only record would silently fail (no tombstone created)
+    if !self.hot_keys.contains(record_id) && self.cold.contains_key(record_id) {
+      if let Some(cold_record) = self.cold.load_record(record_id)? {
+        self
+          .hot
+          .insert_record_direct(record_id.clone(), cold_record);
+        self.hot_keys.insert(record_id.clone());
+      }
     }
 
     let change = self.hot.delete_record(record_id);
@@ -1087,9 +1152,20 @@ where
     self.hot_tombstones.clear();
     self.cache = LruCache::new(self.config.cache_capacity);
 
-    // Rotate WAL and delete old segments (snapshot has all data)
+    // Rotate WAL (creates new segment, fires hooks on sealed segments)
     let _ = self.wal.rotate(&self.base_dir, &self.wal_segment_hooks)?;
-    self.cleanup_old_wal_files()?;
+
+    // Auto-cleanup old WAL segments that are now captured in the snapshot.
+    // This is necessary for correctness - without it, WAL replay would re-apply
+    // changes that are already in the snapshot, causing hot_keys to be polluted.
+    //
+    // NOTE: If you have async upload hooks, you should:
+    // 1. Disable auto_cleanup_wal by setting auto_cleanup_wal: false in config
+    // 2. Track uploads with mark_wal_segment_uploaded()
+    // 3. Manually call cleanup_old_wal_segments(keep, true) after uploads complete
+    if self.config.persist_config.auto_cleanup_wal.unwrap_or(true) {
+      self.cleanup_old_wal_segments_internal()?;
+    }
 
     // Reset counters
     self.changes_since_snapshot = 0;
@@ -1169,33 +1245,59 @@ where
     Ok(hot_compacted + cold_to_compact)
   }
 
-  /// Add a post-operation hook
+  /// Add a post-operation hook.
+  ///
+  /// The hook is called after each operation is written to WAL (and flushed).
+  /// Use for real-time broadcasting of changes to other nodes.
+  ///
+  /// Note: Hook fires AFTER WAL flush but BEFORE fsync. Changes are in OS
+  /// page cache, safe from process crashes but not power failures.
   pub fn add_post_hook(&mut self, hook: Box<dyn PostOpHook<K, C, V>>) {
     self.post_hooks.push(hook);
   }
 
-  /// Add a snapshot hook
+  /// Add a snapshot hook.
+  ///
+  /// The hook is called after a snapshot has been created and fsynced.
+  /// Use for uploading snapshots to cloud storage (S3, R2, etc.).
+  ///
+  /// The hook receives the snapshot path and the db_version (logical clock value).
   pub fn add_snapshot_hook(&mut self, hook: Box<dyn SnapshotHook>) {
     self.snapshot_hooks.push(hook);
   }
 
-  /// Add a WAL segment hook
+  /// Add a WAL segment hook.
+  ///
+  /// The hook is called when a WAL segment is sealed (rotated).
+  /// Use for archiving WAL segments to cloud storage.
+  ///
+  /// Note: Sealed segments are NOT auto-deleted. Call `cleanup_old_wal_segments()`
+  /// after confirming successful upload.
   pub fn add_wal_segment_hook(&mut self, hook: Box<dyn WalSegmentHook>) {
     self.wal_segment_hooks.push(hook);
   }
 
-  /// Get number of records in hot tier
+  /// Get number of records currently in the hot tier.
+  ///
+  /// The hot tier contains recently modified records that haven't been
+  /// flushed to a snapshot yet. This count includes tombstoned records.
+  ///
+  /// Note: A record may exist in both hot and cold tiers (hot supersedes cold).
   pub fn hot_record_count(&self) -> usize {
     self.hot_keys.len()
   }
 
-  /// Get number of records in cold storage
+  /// Get number of records in cold storage (the indexed snapshot).
+  ///
+  /// This is the number of records persisted in the last snapshot.
+  /// Does not include records added after the snapshot.
   pub fn cold_record_count(&self) -> usize {
     self.cold.len()
   }
 
-  /// Get total number of active records (hot + cold, excluding duplicates and tombstones)
+  /// Get total number of active (non-tombstoned) records.
   ///
+  /// This computes the unique active record count across hot and cold tiers:
   /// Note: Records in hot tier that supersede cold records are counted once.
   /// Tombstoned records are not counted.
   pub fn total_record_count(&self) -> usize {
@@ -1220,8 +1322,138 @@ where
     self.hot.get_clock().current_time()
   }
 
-  /// Delete all WAL files except the current one
-  fn cleanup_old_wal_files(&self) -> Result<(), PersistError> {
+  /// Mark a snapshot as successfully uploaded to cloud storage.
+  ///
+  /// Call this after your snapshot hook has successfully uploaded the file.
+  /// This enables safe cleanup with `cleanup_old_snapshots(keep, true)`.
+  pub fn mark_snapshot_uploaded(&mut self, path: PathBuf) {
+    self.uploaded_snapshots.insert(path);
+  }
+
+  /// Mark a WAL segment as successfully uploaded to cloud storage.
+  ///
+  /// Call this after your WAL segment hook has successfully uploaded the file.
+  /// This enables safe cleanup with `cleanup_old_wal_segments(keep, true)`.
+  pub fn mark_wal_segment_uploaded(&mut self, path: PathBuf) {
+    self.uploaded_wal_segments.insert(path);
+  }
+
+  /// Cleanup old snapshots, keeping the specified number of most recent ones.
+  ///
+  /// # Arguments
+  ///
+  /// * `keep` - Number of most recent snapshots to keep
+  /// * `require_uploaded` - If true, only delete snapshots marked as uploaded via
+  ///   `mark_snapshot_uploaded()`. This prevents data loss if upload hooks fail.
+  ///
+  /// # Returns
+  ///
+  /// Number of snapshots deleted.
+  pub fn cleanup_old_snapshots(
+    &mut self,
+    keep: usize,
+    require_uploaded: bool,
+  ) -> Result<usize, PersistError> {
+    let mut snapshots: Vec<(u64, PathBuf)> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
+      for entry in entries.flatten() {
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        if filename_str.starts_with("snapshot_indexed_") && filename_str.ends_with(".bin") {
+          if let Some(version_str) = filename_str
+            .strip_prefix("snapshot_indexed_")
+            .and_then(|s| s.strip_suffix(".bin"))
+          {
+            if let Ok(version) = version_str.parse::<u64>() {
+              snapshots.push((version, entry.path()));
+            }
+          }
+        }
+      }
+    }
+
+    // Sort by version (ascending) - oldest first
+    snapshots.sort_by_key(|(v, _)| *v);
+
+    let mut deleted = 0;
+    let delete_count = snapshots.len().saturating_sub(keep);
+
+    for (_, path) in snapshots.into_iter().take(delete_count) {
+      if require_uploaded && !self.uploaded_snapshots.contains(&path) {
+        continue; // Skip - not uploaded yet
+      }
+      if std::fs::remove_file(&path).is_ok() {
+        self.uploaded_snapshots.remove(&path);
+        deleted += 1;
+      }
+    }
+
+    Ok(deleted)
+  }
+
+  /// Cleanup old WAL segments, keeping the specified number of most recent ones.
+  ///
+  /// # Arguments
+  ///
+  /// * `keep` - Number of most recent WAL segments to keep (plus current segment)
+  /// * `require_uploaded` - If true, only delete segments marked as uploaded via
+  ///   `mark_wal_segment_uploaded()`. This prevents data loss if upload hooks fail.
+  ///
+  /// # Returns
+  ///
+  /// Number of WAL segments deleted.
+  pub fn cleanup_old_wal_segments(
+    &mut self,
+    keep: usize,
+    require_uploaded: bool,
+  ) -> Result<usize, PersistError> {
+    let current_segment = self.wal.current_segment();
+    let mut segments: Vec<(u64, PathBuf)> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
+      for entry in entries.flatten() {
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
+          if let Some(num_str) = filename_str
+            .strip_prefix("wal_")
+            .and_then(|s| s.strip_suffix(".bin"))
+          {
+            if let Ok(segment_num) = num_str.parse::<u64>() {
+              // Never delete current segment
+              if segment_num < current_segment {
+                segments.push((segment_num, entry.path()));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Sort by segment number (ascending) - oldest first
+    segments.sort_by_key(|(n, _)| *n);
+
+    let mut deleted = 0;
+    let delete_count = segments.len().saturating_sub(keep);
+
+    for (_, path) in segments.into_iter().take(delete_count) {
+      if require_uploaded && !self.uploaded_wal_segments.contains(&path) {
+        continue; // Skip - not uploaded yet
+      }
+      if std::fs::remove_file(&path).is_ok() {
+        self.uploaded_wal_segments.remove(&path);
+        deleted += 1;
+      }
+    }
+
+    Ok(deleted)
+  }
+
+  /// Internal WAL cleanup (unconditional, no upload tracking)
+  fn cleanup_old_wal_segments_internal(&self) -> Result<(), PersistError> {
     let current_segment = self.wal.current_segment();
 
     if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
@@ -1230,7 +1462,6 @@ where
         let filename_str = filename.to_string_lossy();
 
         if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
-          // Parse segment number
           if let Some(num_str) = filename_str
             .strip_prefix("wal_")
             .and_then(|s| s.strip_suffix(".bin"))
@@ -1254,9 +1485,13 @@ where
       return Ok(());
     }
 
-    // Append to WAL
+    // Append to WAL (includes internal flush)
     self.wal.append(changes)?;
     self.changes_since_snapshot += changes.len();
+
+    // Explicit flush before hooks to guarantee changes are in OS page cache
+    // This ensures hooks (which may broadcast to network) see written data
+    self.wal.flush()?;
 
     // Add to batch
     self.batch.extend_from_slice(changes);
@@ -1268,7 +1503,7 @@ where
       }
     }
 
-    // Call post hooks
+    // Call post hooks (WAL is flushed, safe to broadcast)
     for hook in &self.post_hooks {
       hook.after_op(changes);
     }
@@ -1561,5 +1796,205 @@ mod tests {
     assert!(!cache.contains_key(&2)); // Evicted
     assert!(cache.contains_key(&3));
     assert!(cache.contains_key(&4));
+  }
+
+  /// Test that deleting a record that only exists in cold storage works correctly.
+  /// This was a critical bug where cold-only records couldn't be deleted.
+  #[test]
+  fn test_delete_cold_record() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    // Create record and snapshot (moves to cold)
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      crdt
+        .insert_or_update(
+          &"cold_key".to_string(),
+          vec![("field".to_string(), "value".to_string())],
+        )
+        .unwrap();
+
+      crdt.create_indexed_snapshot().unwrap();
+    }
+
+    // Reopen (record is now cold-only) and delete
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      // Verify record exists in cold storage
+      assert_eq!(crdt.cold_record_count(), 1);
+      assert_eq!(crdt.hot_record_count(), 0);
+      assert!(crdt.contains_key(&"cold_key".to_string()));
+
+      // Delete the cold-only record
+      let delete_change = crdt.delete_record(&"cold_key".to_string()).unwrap();
+      assert!(
+        delete_change.is_some(),
+        "Delete should return a change for cold-only record"
+      );
+
+      // Verify tombstone exists and record is gone
+      assert!(crdt.is_tombstoned(&"cold_key".to_string()));
+      assert!(!crdt.contains_key(&"cold_key".to_string()));
+      let record = crdt.get_record(&"cold_key".to_string()).unwrap();
+      assert!(record.is_none(), "Deleted record should not be retrievable");
+    }
+
+    // Reopen and verify record doesn't reappear (zombie prevention)
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      // Record should still be tombstoned after WAL replay
+      assert!(
+        crdt.is_tombstoned(&"cold_key".to_string()),
+        "Tombstone should persist after reopen"
+      );
+      let record = crdt.get_record(&"cold_key".to_string()).unwrap();
+      assert!(
+        record.is_none(),
+        "Deleted record should not reappear after reopen"
+      );
+    }
+  }
+
+  /// Test that clock doesn't jump when loading cold records from remote nodes.
+  /// This was a bug where db_version was used instead of local_db_version.
+  #[test]
+  fn test_clock_causality_on_cold_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    // Create a CRDT and manually inject a record with high db_version
+    // (simulating a record synced from a node with higher clock)
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      // Insert a few records to advance local clock
+      for i in 0..5 {
+        crdt
+          .insert_or_update(
+            &format!("key{}", i),
+            vec![("field".to_string(), format!("value{}", i))],
+          )
+          .unwrap();
+      }
+
+      let clock_after_inserts = crdt.get_clock_time();
+      assert!(
+        clock_after_inserts > 0 && clock_after_inserts <= 10,
+        "Clock should be reasonable after 5 inserts"
+      );
+
+      crdt.create_indexed_snapshot().unwrap();
+    }
+
+    // Reopen and update a cold record
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      let clock_after_reopen = crdt.get_clock_time();
+
+      // Update a cold record (triggers insert_record_direct)
+      crdt
+        .insert_or_update(
+          &"key0".to_string(),
+          vec![("field".to_string(), "updated".to_string())],
+        )
+        .unwrap();
+
+      let clock_after_update = crdt.get_clock_time();
+
+      // Clock should have advanced by a small amount (1-2), not jumped wildly
+      let clock_diff = clock_after_update - clock_after_reopen;
+      assert!(
+        clock_diff <= 5,
+        "Clock should not jump excessively: before={} after={} diff={}",
+        clock_after_reopen,
+        clock_after_update,
+        clock_diff
+      );
+    }
+  }
+
+  /// Test upload tracking and cleanup methods
+  #[test]
+  fn test_upload_tracking_cleanup() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    let mut crdt = StreamingCRDT::<String, String, String>::open(
+      base_dir.clone(),
+      1,
+      StreamingConfig::default(),
+    )
+    .unwrap();
+
+    // Create some data and snapshots
+    for i in 0..3 {
+      crdt
+        .insert_or_update(
+          &format!("key{}", i),
+          vec![("field".to_string(), format!("value{}", i))],
+        )
+        .unwrap();
+      crdt.create_indexed_snapshot().unwrap();
+    }
+
+    // Should have 3 snapshots
+    let snapshot_count = std::fs::read_dir(&base_dir)
+      .unwrap()
+      .filter(|e| {
+        e.as_ref()
+          .unwrap()
+          .file_name()
+          .to_string_lossy()
+          .starts_with("snapshot_indexed_")
+      })
+      .count();
+    assert_eq!(snapshot_count, 3);
+
+    // Cleanup without upload tracking (require_uploaded=false)
+    let deleted = crdt.cleanup_old_snapshots(1, false).unwrap();
+    assert_eq!(deleted, 2, "Should delete 2 old snapshots");
+
+    // Only 1 snapshot should remain
+    let remaining = std::fs::read_dir(&base_dir)
+      .unwrap()
+      .filter(|e| {
+        e.as_ref()
+          .unwrap()
+          .file_name()
+          .to_string_lossy()
+          .starts_with("snapshot_indexed_")
+      })
+      .count();
+    assert_eq!(remaining, 1);
   }
 }

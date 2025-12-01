@@ -1547,14 +1547,23 @@ impl<K: Ord + Hash + Eq + Clone, C: Hash + Eq + Clone, V: Clone> CRDT<K, C, V> {
   /// Insert a record directly, preserving its version metadata.
   /// This bypasses the normal change-based API to avoid causality issues
   /// when loading cold records into hot storage.
+  ///
+  /// # Clock Update Strategy
+  ///
+  /// We use `local_db_version` (not `db_version`) to update the clock because:
+  /// - `db_version` is the global logical clock from the originating node
+  /// - `local_db_version` is the local clock when the change was applied on THIS node
+  ///
+  /// Using `db_version` would cause clock jumps when loading records synced from
+  /// nodes with higher clocks, violating causality and causing incorrect conflict resolution.
   #[cfg(feature = "persist-msgpack")]
   pub(crate) fn insert_record_direct(&mut self, key: K, record: Record<C, V>) {
-    // Update clock to be ahead of the record's versions to maintain causality
-    // Check both column versions and highest_local_db_version to handle all cases
+    // Update clock to be ahead of the record's LOCAL versions to maintain causality
+    // Use local_db_version (not db_version) to avoid clock jumps from remote nodes
     let max_version = record
       .column_versions
       .values()
-      .map(|v| v.db_version)
+      .map(|v| v.local_db_version)
       .max()
       .unwrap_or(0)
       .max(record.highest_local_db_version);
