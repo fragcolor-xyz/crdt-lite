@@ -740,11 +740,11 @@ where
           record_id: key,
           col_name: None,
           value: None,
-          col_version: 0,
+          col_version: u64::MAX, // TOMBSTONE_COL_VERSION
           db_version: tombstone.db_version,
           node_id: tombstone.node_id,
           local_db_version: tombstone.local_db_version,
-          flags: 1,
+          flags: 0,
         });
       }
 
@@ -800,6 +800,16 @@ where
 
       let offset = file.stream_position()?;
       let record_bytes = rmp_serde::to_vec(record).map_err(PersistError::MsgpackEncode)?;
+
+      // Validate record size fits in u32 (index uses u32 for length)
+      if record_bytes.len() > u32::MAX as usize {
+        return Err(PersistError::InvalidDirectory(format!(
+          "Record too large: {} bytes (max {} bytes)",
+          record_bytes.len(),
+          u32::MAX
+        )));
+      }
+
       file.write_all(&record_bytes)?;
 
       index_entries.push(IndexEntry {
@@ -944,9 +954,26 @@ where
     let mut tombstone_map: HashMap<K, TombstoneInfo> = HashMap::new();
 
     // Add cold tombstones not superseded by hot
+    // A cold tombstone should be included unless the hot tier has explicitly
+    // handled this key (either as a live record or as its own tombstone).
+    // Checking hot_keys alone is insufficient: if a key is in hot_keys but
+    // has no live record and no hot tombstone, the cold tombstone would be
+    // lost, causing zombie record resurrection on next recovery.
     for (key, info) in self.cold.tombstones.iter() {
-      if !self.hot_keys.contains(key) {
-        tombstone_map.insert(key.clone(), *info);
+      if !self.hot_keys.contains(key) || !self.hot_tombstones.contains(key) {
+        // If key is not in hot at all, preserve cold tombstone.
+        // If key is in hot_keys but also in hot_tombstones, the hot tombstone
+        // will be added below (and may supersede this one via HashMap insert).
+        if !self.hot_keys.contains(key) {
+          tombstone_map.insert(key.clone(), *info);
+        } else if !self.hot_tombstones.contains(key) {
+          // Key is in hot_keys but has no hot tombstone and no hot record —
+          // this is an inconsistent state. Preserve the cold tombstone to
+          // prevent zombie records.
+          if self.hot.get_record(key).is_none() {
+            tombstone_map.insert(key.clone(), *info);
+          }
+        }
       }
     }
 
@@ -1040,10 +1067,9 @@ where
       if let Some(record) = self.hot.get_record(key) {
         return Ok(Some(record.clone()));
       }
-      // Key is in hot but record was deleted
-      if self.hot_tombstones.contains(key) {
-        return Ok(None);
-      }
+      // Key is tracked in hot but has no live record — either it's tombstoned
+      // or in an inconsistent state. Either way, don't fall through to cold.
+      return Ok(None);
     }
 
     // 2. Check if tombstoned (hot or cold)
