@@ -886,7 +886,7 @@ where
   /// and any incremental snapshots that build on it.
   #[cfg(feature = "msgpack")]
   #[allow(clippy::type_complexity)]
-  fn discover_snapshots(
+  pub(crate) fn discover_snapshots(
     base_dir: &PathBuf,
   ) -> Result<(Option<(PathBuf, u64)>, Vec<(PathBuf, u64)>), PersistError> {
     let mut full_snapshots: Vec<(PathBuf, u64)> = Vec::new();

@@ -640,42 +640,26 @@ where
     }
   }
 
-  /// Migrate from a regular PersistedCRDT snapshot to indexed format
+  /// Migrate from a regular PersistedCRDT snapshot to indexed format.
+  ///
+  /// Handles both full and incremental snapshots: loads the latest full snapshot,
+  /// applies any incremental snapshots that build on it (matching PersistedCRDT
+  /// recovery logic), then converts to indexed format.
   fn migrate_from_regular_snapshot(
     base_dir: &PathBuf,
     node_id: NodeId,
   ) -> MigrationResult<K, C, V> {
-    // Look for existing MessagePack snapshots
-    let mut snapshots: Vec<(u64, PathBuf)> = Vec::new();
+    // Use PersistedCRDT's snapshot discovery to find full + incremental snapshots
+    let (latest_full, incrementals) =
+      super::PersistedCRDT::<K, C, V>::discover_snapshots(base_dir)?;
 
-    if let Ok(entries) = std::fs::read_dir(base_dir) {
-      for entry in entries.flatten() {
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
+    let (full_path, full_version) = match latest_full {
+      Some(v) => v,
+      None => return Ok(None),
+    };
 
-        if filename_str.starts_with("snapshot_full_") && filename_str.ends_with(".msgpack") {
-          if let Some(version_str) = filename_str
-            .strip_prefix("snapshot_full_")
-            .and_then(|s| s.strip_suffix(".msgpack"))
-          {
-            if let Ok(version) = version_str.parse::<u64>() {
-              snapshots.push((version, entry.path()));
-            }
-          }
-        }
-      }
-    }
-
-    if snapshots.is_empty() {
-      return Ok(None);
-    }
-
-    snapshots.sort_by_key(|(v, _)| *v);
-    let (version, path) = snapshots.last().unwrap();
-    let version = *version;
-
-    // Load the regular snapshot
-    let bytes = std::fs::read(path)?;
+    // Load the full snapshot
+    let bytes = std::fs::read(&full_path)?;
 
     // Decompress if needed
     #[cfg(feature = "compression")]
@@ -690,7 +674,7 @@ where
       return Err(PersistError::InvalidDirectory(format!(
         "Snapshot file too small to contain header: {} bytes (path: {})",
         bytes.len(),
-        path.display()
+        full_path.display()
       )));
     }
 
@@ -700,15 +684,75 @@ where
         "Snapshot truncated: header says {} bytes metadata but file only has {} bytes after header (path: {})",
         metadata_len,
         bytes.len().saturating_sub(4),
-        path.display()
+        full_path.display()
       )));
     }
 
     let crdt_bytes = &bytes[4 + metadata_len..];
-    let crdt: CRDT<K, C, V> =
+    let mut crdt: CRDT<K, C, V> =
       CRDT::from_msgpack_bytes(crdt_bytes).map_err(PersistError::MsgpackDecode)?;
 
+    // Apply incremental snapshots in order (matching PersistedCRDT recovery logic).
+    // Without this, records stored only in incrementals would be silently lost,
+    // since the WAL only contains changes since the last incremental snapshot.
+    for (incr_path, _) in incrementals {
+      let incr_bytes = std::fs::read(&incr_path)?;
+      let incr_decompressed = {
+        #[cfg(feature = "compression")]
+        {
+          if incr_bytes.len() >= 4 && &incr_bytes[0..4] == b"\x28\xb5\x2f\xfd" {
+            zstd::decode_all(&incr_bytes[..]).map_err(PersistError::Compression)?
+          } else {
+            incr_bytes
+          }
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+          incr_bytes
+        }
+      };
+
+      let incremental: super::IncrementalSnapshot<K, C, V> =
+        rmp_serde::from_slice(&incr_decompressed)?;
+
+      // Convert incremental records to changes and apply
+      let mut changes = Vec::new();
+      for (key, record) in incremental.changed_records {
+        for (col_name, value) in record.fields {
+          if let Some(col_version) = record.column_versions.get(&col_name) {
+            changes.push(Change {
+              record_id: key.clone(),
+              col_name: Some(col_name),
+              value: Some(value),
+              col_version: col_version.col_version,
+              db_version: col_version.db_version,
+              node_id: col_version.node_id,
+              local_db_version: col_version.local_db_version,
+              flags: 0,
+            });
+          }
+        }
+      }
+
+      // Add tombstone changes
+      for (key, tombstone) in incremental.new_tombstones {
+        changes.push(Change {
+          record_id: key,
+          col_name: None,
+          value: None,
+          col_version: 0,
+          db_version: tombstone.db_version,
+          node_id: tombstone.node_id,
+          local_db_version: tombstone.local_db_version,
+          flags: 1,
+        });
+      }
+
+      crdt.merge_changes(changes, &DefaultMergeRule);
+    }
+
     let clock_value = crdt.get_clock().current_time();
+    let version = full_version;
 
     // Create indexed snapshot from the loaded CRDT (with atomic write)
     let indexed_path = base_dir.join(format!("snapshot_indexed_{:06}.bin", version));
@@ -962,16 +1006,27 @@ where
 
     for entry in wal_files {
       let changes: Vec<Change<K, C, V>> = super::wal::read_wal_file(&entry.path())?;
-      for change in &changes {
-        // Track keys for hot tier membership
+
+      // Filter out changes for records that are tombstoned in cold storage.
+      // Without this, WAL entries predating the current snapshot could resurrect
+      // records that were deleted after the WAL was written (zombie resurrection).
+      // This happens when auto_cleanup_wal=false (WAL hooks registered) and old
+      // WAL segments survive across snapshot cycles.
+      let changes: Vec<Change<K, C, V>> = changes
+        .into_iter()
+        .filter(|c| !self.cold.is_tombstoned(&c.record_id))
+        .collect();
+
+      // Merge first, then track only ACCEPTED changes in hot_keys/hot_tombstones.
+      // Tracking before merge would pollute hot_keys with rejected changes, causing
+      // create_streaming_snapshot to skip valid cold records (silent data loss).
+      let accepted = self.hot.merge_changes(changes, &DefaultMergeRule);
+      for change in &accepted {
         self.hot_keys.insert(change.record_id.clone());
         if change.col_name.is_none() {
           self.hot_tombstones.insert(change.record_id.clone());
         }
       }
-      // Merge the changes and count only ACCEPTED changes
-      // (merge_changes may reject some during conflict resolution)
-      let accepted = self.hot.merge_changes(changes, &DefaultMergeRule);
       self.changes_since_snapshot += accepted.len();
     }
 
@@ -1318,16 +1373,17 @@ where
     let cold_compacted = self.cold.tombstones.compact(min_acknowledged_version);
 
     let total = hot_compacted + cold_compacted;
-    if total > 0 {
-      // Force snapshot to persist the compacted state
-      self.create_indexed_snapshot()?;
 
-      // CRITICAL: Delete old WAL segments that contain tombstone records.
-      // Failure to do this causes zombie records to reappear on recovery.
-      // This must be unconditional regardless of auto_cleanup_wal config,
-      // matching PersistedCRDT::compact_tombstones behavior.
-      self.cleanup_old_wal_segments(0, false)?;
-    }
+    // Always create snapshot and clean up WAL unconditionally, matching
+    // PersistedCRDT::compact_tombstones behavior. Even when total==0, this
+    // ensures consistent state and WAL cleanup.
+    self.create_indexed_snapshot()?;
+
+    // CRITICAL: Delete old WAL segments that contain tombstone records.
+    // Failure to do this causes zombie records to reappear on recovery.
+    // Use internal cleanup to unconditionally delete all old segments
+    // regardless of auto_cleanup_wal config.
+    self.cleanup_old_wal_segments_internal()?;
 
     Ok(total)
   }
@@ -2367,12 +2423,12 @@ mod tests {
     assert!(!all.is_empty());
 
     // Excluding node 1 should return nothing
-    let excluding = HashSet::from([1u64]);
+    let excluding = HashSet::from([1 as NodeId]);
     let filtered = crdt.get_changes_since_excluding(0, &excluding).unwrap();
     assert!(filtered.is_empty(), "Should exclude node 1's changes");
 
     // Excluding a different node should return all changes
-    let other = HashSet::from([99u64]);
+    let other = HashSet::from([99 as NodeId]);
     let not_filtered = crdt.get_changes_since_excluding(0, &other).unwrap();
     assert_eq!(not_filtered.len(), all.len());
   }
