@@ -183,10 +183,11 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
       while self.map.len() >= self.capacity {
         self.evict_one();
       }
-      // Only update order for new keys
-      self.order.push_back(key.clone());
-      *self.ref_count.entry(key.clone()).or_insert(0) += 1;
     }
+    // Always mark as recently used (both new and updated keys)
+    // Without this, frequently updated keys get evicted despite being "hot"
+    self.order.push_back(key.clone());
+    *self.ref_count.entry(key.clone()).or_insert(0) += 1;
     // Always update the value
     self.map.insert(key, value);
 
@@ -198,7 +199,8 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
 
   /// Rebuild order queue to remove stale entries
   fn compact(&mut self) {
-    let mut new_order = VecDeque::with_capacity(self.capacity * LRU_ORDER_INITIAL_CAPACITY_MULTIPLIER);
+    let mut new_order =
+      VecDeque::with_capacity(self.capacity * LRU_ORDER_INITIAL_CAPACITY_MULTIPLIER);
     let mut new_ref_count: HashMap<K, usize> = HashMap::with_capacity(self.capacity);
 
     // Keep only the most recent entry for each key
@@ -237,13 +239,6 @@ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
 
   fn contains_key(&self, key: &K) -> bool {
     self.map.contains_key(key)
-  }
-
-  #[allow(dead_code)]
-  fn clear(&mut self) {
-    self.map.clear();
-    self.order.clear();
-    self.ref_count.clear();
   }
 }
 
@@ -450,12 +445,6 @@ where
   /// Check if a record is tombstoned
   fn is_tombstoned(&self, key: &K) -> bool {
     self.tombstones.find(key).is_some()
-  }
-
-  /// Get tombstone info
-  #[allow(dead_code)]
-  fn get_tombstone(&self, key: &K) -> Option<TombstoneInfo> {
-    self.tombstones.find(key)
   }
 
   /// Iterate over keys (without collecting into Vec to save memory)
@@ -1113,9 +1102,14 @@ where
     &mut self,
     changes: Vec<Change<K, C, V>>,
   ) -> Result<Vec<Change<K, C, V>>, PersistError> {
-    // Load any cold records that are being updated
+    // Load any cold records that are being updated (skip tombstoned records
+    // to prevent zombie resurrection — a field update for a deleted record
+    // must not bring it back to life)
     for change in &changes {
-      if !self.hot_keys.contains(&change.record_id) && self.cold.contains_key(&change.record_id) {
+      if !self.hot_keys.contains(&change.record_id)
+        && !self.is_tombstoned(&change.record_id)
+        && self.cold.contains_key(&change.record_id)
+      {
         if let Some(cold_record) = self.cold.load_record(&change.record_id)? {
           // Directly insert cold record into hot storage (preserves version metadata)
           self
@@ -1249,11 +1243,15 @@ where
     // This is necessary for correctness - without it, WAL replay would re-apply
     // changes that are already in the snapshot, causing hot_keys to be polluted.
     //
-    // NOTE: If you have async upload hooks, you should:
-    // 1. Disable auto_cleanup_wal by setting auto_cleanup_wal: false in config
-    // 2. Track uploads with mark_wal_segment_uploaded()
-    // 3. Manually call cleanup_old_wal_segments(keep, true) after uploads complete
-    if self.config.persist_config.auto_cleanup_wal.unwrap_or(true) {
+    // When WAL segment hooks are registered, auto-cleanup is disabled by default
+    // to prevent deleting WAL files before async upload hooks complete.
+    // Override with auto_cleanup_wal: Some(true/false) in config.
+    let auto_cleanup = self
+      .config
+      .persist_config
+      .auto_cleanup_wal
+      .unwrap_or(self.wal_segment_hooks.is_empty());
+    if auto_cleanup {
       self.cleanup_old_wal_segments_internal()?;
     }
 
@@ -1280,12 +1278,13 @@ where
   /// **CRITICAL**: Only call this after ALL nodes have acknowledged the version.
   /// Premature compaction can cause deleted records to reappear (zombie records).
   ///
-  /// This creates a new snapshot with compacted tombstones, then reloads cold storage.
+  /// This compacts tombstones in both hot and cold tiers, creates a new snapshot
+  /// capturing the compacted state, and unconditionally deletes old WAL segments.
   ///
   /// # Arguments
   ///
   /// * `min_acknowledged_version` - The minimum version acknowledged by all nodes.
-  ///   Tombstones with `local_db_version <= min_acknowledged_version` will be removed.
+  ///   Tombstones with `db_version < min_acknowledged_version` will be removed.
   ///
   /// # Returns
   ///
@@ -1297,42 +1296,40 @@ where
     // Compact hot tier tombstones
     let hot_compacted = self.hot.compact_tombstones(min_acknowledged_version);
 
-    // Remove from hot_tombstones tracking set for compacted tombstones
+    // Remove from hot_tombstones AND hot_keys tracking sets for compacted tombstones.
+    // Removing from hot_keys is critical: if a key stays in hot_keys after its hot
+    // tombstone is compacted, create_streaming_snapshot will skip the cold tombstone
+    // for that key (assuming hot supersedes it), causing the tombstone to vanish
+    // entirely from the snapshot — leading to zombie record resurrection.
     let keys_to_remove: Vec<K> = self
       .hot_tombstones
       .iter()
-      .filter(|k| {
-        if self.hot.get_tombstones().find(*k).is_some() {
-          false // Still exists, don't remove from tracking
-        } else {
-          true // Was compacted, remove from tracking
-        }
-      })
+      .filter(|k| self.hot.get_tombstones().find(*k).is_none())
       .cloned()
       .collect();
 
-    for key in keys_to_remove {
-      self.hot_tombstones.remove(&key);
+    for key in &keys_to_remove {
+      self.hot_tombstones.remove(key);
+      self.hot_keys.remove(key);
     }
 
-    // Count cold tombstones that will be compacted
-    let cold_to_compact: usize = self
-      .cold
-      .tombstones
-      .iter()
-      .filter(|(_, info)| info.local_db_version <= min_acknowledged_version)
-      .count();
+    // Compact cold tombstones in-memory BEFORE creating snapshot,
+    // so the snapshot captures the compacted state.
+    let cold_compacted = self.cold.tombstones.compact(min_acknowledged_version);
 
-    // If there are cold tombstones to compact, create new snapshot
-    if cold_to_compact > 0 {
-      // Force snapshot which will merge tombstones and apply compaction
+    let total = hot_compacted + cold_compacted;
+    if total > 0 {
+      // Force snapshot to persist the compacted state
       self.create_indexed_snapshot()?;
 
-      // Now compact the reloaded cold storage tombstones
-      self.cold.tombstones.compact(min_acknowledged_version);
+      // CRITICAL: Delete old WAL segments that contain tombstone records.
+      // Failure to do this causes zombie records to reappear on recovery.
+      // This must be unconditional regardless of auto_cleanup_wal config,
+      // matching PersistedCRDT::compact_tombstones behavior.
+      self.cleanup_old_wal_segments(0, false)?;
     }
 
-    Ok(hot_compacted + cold_to_compact)
+    Ok(total)
   }
 
   /// Add a post-operation hook.
@@ -1410,6 +1407,76 @@ where
   /// Get current logical clock value
   pub fn get_clock_time(&self) -> u64 {
     self.hot.get_clock().current_time()
+  }
+
+  /// Returns the node ID of this CRDT instance.
+  pub fn node_id(&self) -> NodeId {
+    self.hot.node_id()
+  }
+
+  /// Explicitly create a snapshot of the current state.
+  ///
+  /// This is an alias for `create_indexed_snapshot()` that matches the
+  /// `PersistedCRDT::snapshot()` API for consistency.
+  pub fn snapshot(&mut self) -> Result<PathBuf, PersistError> {
+    self.create_indexed_snapshot()
+  }
+
+  /// Get the current number of changes since the last snapshot.
+  pub fn changes_since_snapshot(&self) -> usize {
+    self.changes_since_snapshot
+  }
+
+  /// Peek at the current batch without consuming it.
+  pub fn peek_batch(&self) -> &[Change<K, C, V>] {
+    &self.batch
+  }
+
+  /// Delete a specific field from a record.
+  ///
+  /// If the record only exists in cold storage, it is loaded into the hot
+  /// tier first. Returns `None` if the record or field doesn't exist, or
+  /// if the record is tombstoned.
+  pub fn delete_field(
+    &mut self,
+    record_id: &K,
+    field_name: &C,
+  ) -> Result<Option<Change<K, C, V>>, PersistError> {
+    if self.is_tombstoned(record_id) {
+      return Ok(None);
+    }
+
+    // Load cold record into hot if needed
+    if !self.hot_keys.contains(record_id) && self.cold.contains_key(record_id) {
+      if let Some(cold_record) = self.cold.load_record(record_id)? {
+        self
+          .hot
+          .insert_record_direct(record_id.clone(), cold_record);
+        self.hot_keys.insert(record_id.clone());
+      }
+    }
+
+    let change = self.hot.delete_field(record_id, field_name);
+    if let Some(ref c) = change {
+      self.hot_keys.insert(record_id.clone());
+      self.persist_and_notify(std::slice::from_ref(c))?;
+    }
+
+    Ok(change)
+  }
+
+  /// Get changes since a version, excluding changes from specific nodes.
+  ///
+  /// Useful for syncing with peers — exclude the peer's own node ID to avoid
+  /// echoing their changes back to them.
+  pub fn get_changes_since_excluding(
+    &mut self,
+    last_db_version: u64,
+    excluding: &HashSet<NodeId>,
+  ) -> Result<Vec<Change<K, C, V>>, PersistError> {
+    let mut changes = self.get_changes_since(last_db_version)?;
+    changes.retain(|c| !excluding.contains(&c.node_id));
+    Ok(changes)
   }
 
   /// Mark a snapshot as successfully uploaded to cloud storage.
@@ -1546,21 +1613,20 @@ where
   fn cleanup_old_wal_segments_internal(&self) -> Result<(), PersistError> {
     let current_segment = self.wal.current_segment();
 
-    if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
-      for entry in entries.flatten() {
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
+    let entries = std::fs::read_dir(&self.base_dir)?;
+    for entry in entries.flatten() {
+      let filename = entry.file_name();
+      let filename_str = filename.to_string_lossy();
 
-        if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
-          if let Some(num_str) = filename_str
-            .strip_prefix("wal_")
-            .and_then(|s| s.strip_suffix(".bin"))
-          {
-            if let Ok(segment_num) = num_str.parse::<u64>() {
-              // Keep current segment, delete others
-              if segment_num < current_segment {
-                let _ = std::fs::remove_file(entry.path());
-              }
+      if filename_str.starts_with("wal_") && filename_str.ends_with(".bin") {
+        if let Some(num_str) = filename_str
+          .strip_prefix("wal_")
+          .and_then(|s| s.strip_suffix(".bin"))
+        {
+          if let Ok(segment_num) = num_str.parse::<u64>() {
+            // Keep current segment, delete others
+            if segment_num < current_segment {
+              std::fs::remove_file(entry.path())?;
             }
           }
         }
@@ -1587,9 +1653,11 @@ where
     self.batch.extend_from_slice(changes);
 
     // Auto-flush batch if exceeds max size (prevents OOM)
+    // Keeps only the most recent half to preserve some data for late consumers
     if let Some(max_size) = self.config.persist_config.max_batch_size {
       if self.batch.len() >= max_size {
-        self.batch.clear();
+        let keep_from = self.batch.len() / 2;
+        self.batch.drain(..keep_from);
       }
     }
 
@@ -2086,5 +2154,226 @@ mod tests {
       })
       .count();
     assert_eq!(remaining, 1);
+  }
+
+  /// Test that LRU cache correctly handles updates to existing keys.
+  /// Previously, updating an existing key didn't mark it as recently used,
+  /// causing frequently-updated records to be evicted.
+  #[test]
+  fn test_lru_cache_update_marks_recent() {
+    let mut cache: LruCache<i32, String> = LruCache::new(3);
+
+    cache.insert(1, "one".to_string());
+    cache.insert(2, "two".to_string());
+    cache.insert(3, "three".to_string());
+
+    // Update key 1 (should mark it as recently used)
+    cache.insert(1, "one_updated".to_string());
+
+    // Insert 4 — should evict 2 (oldest untouched), not 1 (recently updated)
+    cache.insert(4, "four".to_string());
+
+    assert!(cache.contains_key(&1), "Updated key should not be evicted");
+    assert_eq!(cache.get(&1).unwrap(), "one_updated");
+    assert!(
+      !cache.contains_key(&2),
+      "Oldest untouched key should be evicted"
+    );
+    assert!(cache.contains_key(&3));
+    assert!(cache.contains_key(&4));
+  }
+
+  /// Test that merge_changes does not resurrect tombstoned cold records.
+  #[test]
+  fn test_merge_changes_no_zombie_resurrection() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    // Create a record, snapshot it (goes cold), then delete it
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      crdt
+        .insert_or_update(
+          &"victim".to_string(),
+          vec![("field".to_string(), "value".to_string())],
+        )
+        .unwrap();
+
+      crdt.create_indexed_snapshot().unwrap();
+    }
+
+    // Reopen: record is cold. Delete it, then try to merge a field update for it.
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      // Delete the cold record
+      crdt.delete_record(&"victim".to_string()).unwrap();
+      assert!(crdt.is_tombstoned(&"victim".to_string()));
+
+      // Simulate a remote node sending a field update for the deleted record
+      let remote_change = Change::new(
+        "victim".to_string(),
+        Some("field".to_string()),
+        Some("resurrected".to_string()),
+        1,  // col_version
+        50, // db_version (high, from remote)
+        99, // node_id (different node)
+        50, // local_db_version
+        0,
+      );
+
+      let accepted = crdt.merge_changes(vec![remote_change]).unwrap();
+      // The change may or may not be accepted by the merge rule,
+      // but the record should remain tombstoned
+      let _ = accepted;
+
+      // Record must still be gone
+      let record = crdt.get_record(&"victim".to_string()).unwrap();
+      assert!(
+        record.is_none(),
+        "Tombstoned record should not be resurrected by merge"
+      );
+    }
+  }
+
+  /// Test delete_field on cold records
+  #[test]
+  fn test_delete_field_cold_record() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    // Create record with two fields and snapshot
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      crdt
+        .insert_or_update(
+          &"key1".to_string(),
+          vec![
+            ("name".to_string(), "Alice".to_string()),
+            ("email".to_string(), "alice@example.com".to_string()),
+          ],
+        )
+        .unwrap();
+
+      crdt.create_indexed_snapshot().unwrap();
+    }
+
+    // Reopen and delete one field
+    {
+      let mut crdt = StreamingCRDT::<String, String, String>::open(
+        base_dir.clone(),
+        1,
+        StreamingConfig::default(),
+      )
+      .unwrap();
+
+      assert_eq!(crdt.hot_record_count(), 0);
+
+      let change = crdt
+        .delete_field(&"key1".to_string(), &"email".to_string())
+        .unwrap();
+      assert!(
+        change.is_some(),
+        "Should return a change for field deletion"
+      );
+
+      // Record should still exist with remaining field
+      let record = crdt.get_record(&"key1".to_string()).unwrap().unwrap();
+      assert_eq!(record.fields.get("name").unwrap(), "Alice");
+      assert!(
+        record.fields.get("email").is_none(),
+        "Deleted field should be gone"
+      );
+    }
+  }
+
+  /// Test node_id(), snapshot() alias, changes_since_snapshot(), peek_batch()
+  #[test]
+  fn test_api_parity_methods() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    let mut crdt = StreamingCRDT::<String, String, String>::open(
+      base_dir.clone(),
+      42,
+      StreamingConfig::default(),
+    )
+    .unwrap();
+
+    assert_eq!(crdt.node_id(), 42);
+    assert_eq!(crdt.changes_since_snapshot(), 0);
+    assert!(crdt.peek_batch().is_empty());
+
+    crdt
+      .insert_or_update(
+        &"key1".to_string(),
+        vec![("f".to_string(), "v".to_string())],
+      )
+      .unwrap();
+
+    assert_eq!(crdt.changes_since_snapshot(), 1);
+    assert_eq!(crdt.peek_batch().len(), 1);
+
+    // take_batch clears it
+    let batch = crdt.take_batch();
+    assert_eq!(batch.len(), 1);
+    assert!(crdt.peek_batch().is_empty());
+
+    // snapshot() alias works
+    let path = crdt.snapshot().unwrap();
+    assert!(path.exists());
+    assert_eq!(crdt.changes_since_snapshot(), 0);
+  }
+
+  /// Test get_changes_since_excluding
+  #[test]
+  fn test_get_changes_since_excluding() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_dir = temp_dir.path().to_path_buf();
+
+    let mut crdt = StreamingCRDT::<String, String, String>::open(
+      base_dir.clone(),
+      1,
+      StreamingConfig::default(),
+    )
+    .unwrap();
+
+    crdt
+      .insert_or_update(
+        &"key1".to_string(),
+        vec![("f".to_string(), "v".to_string())],
+      )
+      .unwrap();
+
+    // Should find changes from node 1
+    let all = crdt.get_changes_since(0).unwrap();
+    assert!(!all.is_empty());
+
+    // Excluding node 1 should return nothing
+    let excluding = HashSet::from([1u64]);
+    let filtered = crdt.get_changes_since_excluding(0, &excluding).unwrap();
+    assert!(filtered.is_empty(), "Should exclude node 1's changes");
+
+    // Excluding a different node should return all changes
+    let other = HashSet::from([99u64]);
+    let not_filtered = crdt.get_changes_since_excluding(0, &other).unwrap();
+    assert_eq!(not_filtered.len(), all.len());
   }
 }

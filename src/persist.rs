@@ -253,9 +253,14 @@ pub struct PersistConfig {
   pub enable_compression: bool,
   /// Skip creating incremental snapshots when there are no changes
   pub skip_empty_incrementals: bool,
-  /// Auto-cleanup old WAL segments after snapshot (default: true)
-  /// Set to false if you have async upload hooks and need to track uploads manually.
-  /// When false, you must call `cleanup_old_wal_segments()` manually after uploads complete.
+  /// Auto-cleanup old WAL segments after snapshot.
+  ///
+  /// Used by `StreamingCRDT` only (`PersistedCRDT` does not auto-delete WAL segments).
+  ///
+  /// - `Some(true)`: Always auto-cleanup after snapshot
+  /// - `Some(false)`: Never auto-cleanup (use `cleanup_old_wal_segments()` manually)
+  /// - `None` (default): Auto-cleanup unless WAL segment hooks are registered
+  ///   (prevents deleting files before async upload hooks complete)
   pub auto_cleanup_wal: Option<bool>,
 }
 
@@ -282,7 +287,7 @@ impl Default for PersistConfig {
       full_snapshot_interval: DEFAULT_FULL_SNAPSHOT_INTERVAL,
       enable_compression: false,
       skip_empty_incrementals: true,
-      auto_cleanup_wal: Some(true), // Default: auto-cleanup WAL after snapshots
+      auto_cleanup_wal: None, // Default: auto-cleanup unless WAL segment hooks registered
     }
   }
 }
