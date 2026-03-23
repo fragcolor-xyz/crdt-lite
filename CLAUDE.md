@@ -937,6 +937,55 @@ pcrdt.snapshot()?;
 - Old (10 full snapshots): 151 MB
 - New (1 full + 9 incrementals): 6 MB (95% reduction)
 
+## Disk-Streaming CRDT (Rust)
+
+The Rust implementation includes a disk-streaming variant (`src/persist/streaming.rs`) for datasets larger than memory. It provides the same API as `PersistedCRDT` but loads records on-demand from indexed snapshots.
+
+### Architecture
+
+Three-tier memory hierarchy:
+
+1. **Hot Tier (Memory)** — Recent writes, always in memory. A full in-memory `CRDT` instance.
+2. **LRU Cache (Memory)** — Frequently accessed cold records (configurable, default 1000 records).
+3. **Indexed Snapshot (Disk)** — All records, loaded on-demand via index lookups.
+
+At startup, only the index and tombstones are loaded (not all records). Records are fetched from disk as needed.
+
+### Indexed Snapshot Format
+
+Binary format with four sections:
+- **Header**: magic (`CRDS`), version, node_id, clock_value, record/tombstone counts, section offsets
+- **Records**: MessagePack-serialized records, each at a seekable offset
+- **Tombstones**: Full `HashMap<K, TombstoneInfo>`, loaded at startup (typically small)
+- **Index**: `Vec<IndexEntry { key, offset, length }>`, loaded at startup for O(1) key-to-offset lookups
+
+### Key Design Decisions
+
+- **Hot/cold merge on snapshot**: `create_indexed_snapshot()` merges hot records over cold, clears the hot tier, rotates WAL.
+- **Cold record loading**: Operations that need a cold record (e.g., `merge_changes`, `delete_record`) load it into hot via `insert_record_direct` before modifying.
+- **Tombstone tracking**: `hot_keys` and `hot_tombstones` track which keys have been touched in the hot tier, used during snapshot merge to decide precedence.
+- **Auto-migration**: Existing MessagePack snapshots from `PersistedCRDT` are auto-converted to indexed format on first open.
+
+### Configuration
+
+```rust
+use crdt_lite::persist::streaming::{StreamingCRDT, StreamingConfig};
+
+let config = StreamingConfig {
+    cache_capacity: 1000,           // LRU cache size (records)
+    persist_config: PersistConfig::default(), // Underlying persistence config
+};
+```
+
+### Tombstone Compaction
+
+`StreamingCRDT::compact_tombstones` follows the same safety contract as `PersistedCRDT`:
+1. Compact tombstones in memory (both hot and cold tiers)
+2. Create snapshot capturing the compacted state
+3. Unconditionally delete old WAL segments (regardless of `auto_cleanup_wal` config)
+
+**CRITICAL:** Same zombie record rules apply — only compact after ALL nodes acknowledge the version.
+
 ## Testing
 
 ### Column CRDT Tests (`tests.cpp`)

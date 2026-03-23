@@ -557,7 +557,10 @@ fn test_large_version_numbers() {
   let mut crdt: CRDT<String, String, String> = CRDT::from_changes(1, changes);
 
   // This should not panic even with very large version numbers
-  let new_changes = crdt.insert_or_update(&record_id, vec![("field2".to_string(), "value".to_string())]);
+  let new_changes = crdt.insert_or_update(
+    &record_id,
+    vec![("field2".to_string(), "value".to_string())],
+  );
 
   assert_eq!(new_changes.len(), 1);
   assert!(new_changes[0].db_version > u64::MAX - 100);
@@ -637,7 +640,10 @@ fn test_partial_field_updates() {
   // Verify that ONLY the role field changed, other fields remain unchanged
   let record_after = crdt.get_record(&record_id).unwrap();
   assert_eq!(record_after.fields.get("name").unwrap(), "Alice"); // Unchanged
-  assert_eq!(record_after.fields.get("email").unwrap(), "alice@example.com"); // Unchanged
+  assert_eq!(
+    record_after.fields.get("email").unwrap(),
+    "alice@example.com"
+  ); // Unchanged
   assert_eq!(record_after.fields.get("role").unwrap(), "admin"); // Changed
   assert_eq!(record_after.fields.get("status").unwrap(), "active"); // Unchanged
 
